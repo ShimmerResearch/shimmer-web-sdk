@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { u16le, u16be, u24le, u24be, sign16, sign24, hex2, concatU8 } from '../../src/devices/shimmer3r/protocol.js';
+import {
+  u16le,
+  u16be,
+  u24le,
+  u24be,
+  sign16,
+  sign24,
+  hex2,
+  concatU8,
+} from '../../src/devices/shimmer3r/protocol.js';
 
 describe('u16le', () => {
   it('reads unsigned 16-bit little-endian', () => {

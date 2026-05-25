@@ -57,11 +57,7 @@ export class ObjectCluster {
    * @returns The matching field, or `null` if not found.
    */
   get(name: string, kind: FieldKind = null): SensorField | null {
-    return (
-      this.fields.find(
-        (f) => f.name === name && (kind === null || f.kind === kind),
-      ) ?? null
-    );
+    return this.fields.find((f) => f.name === name && (kind === null || f.kind === kind)) ?? null;
   }
 
   /**

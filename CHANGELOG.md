@@ -6,6 +6,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+
 - Initial TypeScript SDK structure migrated from `ShimmerAPI/shimmer3r.js` and `Verisense/verisense.js`.
 - `Shimmer3RClient` — typed BLE client for the Shimmer3R platform.
 - `VerisenseBleDevice` — typed BLE + Web Serial client for the Verisense platform.

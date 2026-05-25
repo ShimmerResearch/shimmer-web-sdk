@@ -2,14 +2,24 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import type { ObjectCluster } from '../../core/ObjectCluster.js';
 import {
-  NUS_SERVICE, NUS_TX, NUS_RX,
-  READ_DATA_REQ, DISCONNECT_REQ, DATA_ACK, DATA_NACK, DATA_EOS_HDR,
+  NUS_SERVICE,
+  NUS_TX,
+  NUS_RX,
+  READ_DATA_REQ,
+  DISCONNECT_REQ,
+  DATA_ACK,
+  DATA_NACK,
+  DATA_EOS_HDR,
 } from './constants.js';
 import {
-  u16le_at, u24le, nowMillis,
-  computeCrcLikeCSharp, getOriginalCrcLE,
+  u16le_at,
+  u24le,
+  nowMillis,
+  computeCrcLikeCSharp,
+  getOriginalCrcLE,
   crc16_ccitt_false,
-  normalizeOperationalConfig, parseProductionConfigPayload,
+  normalizeOperationalConfig,
+  parseProductionConfigPayload,
   type ProductionConfig,
 } from './protocol.js';
 import { SensorBase } from './sensors/SensorBase.js';
@@ -45,7 +55,9 @@ export interface TransferLoggedDataOptions {
   timeoutMs?: number;
   maxNack?: number;
   maxCrcNack?: number;
-  onProgress?: ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void) | null;
+  onProgress?:
+    | ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void)
+    | null;
 }
 
 export interface TransferLoggedDataResult {
@@ -74,11 +86,13 @@ interface SyncSession {
   timeoutMs: number;
   bytesWritten: number;
   resolve: (v: { ok: boolean; bytesWritten: number }) => void;
-  reject:  (e: Error) => void;
-  timer:   ReturnType<typeof setInterval> | null;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setInterval> | null;
   writable: FileSystemWritableFileStream | null;
   chunks: Uint8Array[];
-  onProgress: ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void) | null;
+  onProgress:
+    | ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void)
+    | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +124,8 @@ interface SyncSession {
 export class VerisenseBleDevice extends BaseShimmerClient {
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
-  static readonly NUS_TX      = NUS_TX;
-  static readonly NUS_RX      = NUS_RX;
+  static readonly NUS_TX = NUS_TX;
+  static readonly NUS_RX = NUS_RX;
 
   // Event emitter state
   private readonly _evMap = new Map<string, Set<(data: unknown) => void>>();
@@ -133,14 +147,14 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   // Transport handles
   private _transportKind: TransportKind = null;
-  device:  BluetoothDevice | null = null;
-  private server:  BluetoothRemoteGATTServer | null = null;
+  device: BluetoothDevice | null = null;
+  private server: BluetoothRemoteGATTServer | null = null;
   private service: BluetoothRemoteGATTService | null = null;
   tx: BluetoothRemoteGATTCharacteristic | null = null;
   rx: BluetoothRemoteGATTCharacteristic | null = null;
   port: SerialPort | null = null;
-  private _serialAbort:        AbortController | null = null;
-  private _serialReader:       ReadableStreamDefaultReader<Uint8Array> | null = null;
+  private _serialAbort: AbortController | null = null;
+  private _serialReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private _serialReadLoopTask: Promise<void> | null = null;
   private _onGattDisconnected: (() => void) | null = null;
 
@@ -152,7 +166,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _expectedLen = 0;
   private _pending: {
     resolve: (v: { payload: Uint8Array }) => void;
-    reject:  (e: Error) => void;
+    reject: (e: Error) => void;
   } | null = null;
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
@@ -166,7 +180,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   // Cached configs
   operationalConfig: Uint8Array | null = null;
-  productionConfig:  Uint8Array | null = null;
+  productionConfig: Uint8Array | null = null;
 
   // Debug flags
   debugSync = true;
@@ -176,8 +190,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   constructor(opts: VerisenseClientOptions = {}) {
     super({ debug: opts.debug ?? true });
     this.hardwareIdentifier = opts.hardwareIdentifier ?? 'VERISENSE_PULSE_PLUS';
-    this.stripStreamCrc     = opts.stripStreamCrc  ?? true;
-    this.verifyStreamCrc    = opts.verifyStreamCrc ?? false;
+    this.stripStreamCrc = opts.stripStreamCrc ?? true;
+    this.verifyStreamCrc = opts.verifyStreamCrc ?? false;
 
     this.sensors = {
       1: new SensorGSR(),
@@ -194,22 +208,36 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   // Quick access aliases
-  get gsr():        SensorGSR      { return this.sensors[1]; }
-  get accel1():     SensorLIS2DW12 { return this.sensors[2]; }
-  get gyroAccel2(): SensorLSM6DS3  { return this.sensors[3]; }
-  get ppg():        SensorPPG      { return this.sensors[4]; }
+  get gsr(): SensorGSR {
+    return this.sensors[1];
+  }
+  get accel1(): SensorLIS2DW12 {
+    return this.sensors[2];
+  }
+  get gyroAccel2(): SensorLSM6DS3 {
+    return this.sensors[3];
+  }
+  get ppg(): SensorPPG {
+    return this.sensors[4];
+  }
 
   // ---------------------------------------------------------------------------
   // BLE connect / disconnect
   // ---------------------------------------------------------------------------
 
-  override async connect(opts: {
-    device?: BluetoothDevice | null;
-    filters?: BluetoothLEScanFilter[];
-    optionalServices?: BluetoothServiceUUID[];
-  } = {}): Promise<boolean> {
+  override async connect(
+    opts: {
+      device?: BluetoothDevice | null;
+      filters?: BluetoothLEScanFilter[];
+      optionalServices?: BluetoothServiceUUID[];
+    } = {},
+  ): Promise<boolean> {
     if (this._transportKind === 'serial' || this.port) {
-      try { await this.disconnect(); } catch { /* ignore */ }
+      try {
+        await this.disconnect();
+      } catch {
+        /* ignore */
+      }
     }
 
     this._transportKind = 'ble';
@@ -219,13 +247,15 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       optionalServices: opts.optionalServices ?? [NUS_SERVICE],
     };
 
-    this.device = opts.device ?? await navigator.bluetooth.requestDevice(requestOpts);
+    this.device = opts.device ?? (await navigator.bluetooth.requestDevice(requestOpts));
 
     try {
       if (this._onGattDisconnected && this.device) {
         this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     this._onGattDisconnected = () => {
       this._mode = 'idle';
@@ -234,14 +264,14 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     };
     this.device.addEventListener('gattserverdisconnected', this._onGattDisconnected);
 
-    this.server  = await this.device.gatt!.connect();
+    this.server = await this.device.gatt!.connect();
     this.service = await this.server.getPrimaryService(NUS_SERVICE);
-    this.tx      = await this.service.getCharacteristic(NUS_TX);
-    this.rx      = await this.service.getCharacteristic(NUS_RX);
+    this.tx = await this.service.getCharacteristic(NUS_TX);
+    this.rx = await this.service.getCharacteristic(NUS_RX);
 
     await this.rx.startNotifications();
     this.rx.addEventListener('characteristicvaluechanged', (ev) => {
-      const dv    = (ev as any).target.value as DataView;
+      const dv = (ev as any).target.value as DataView;
       const bytes = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
       this._feedStreamBytes(bytes);
     });
@@ -256,15 +286,17 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   // --- Web Serial (USB COM port) connect ---
-  async connectSerial(opts: {
-    port?: SerialPort | null;
-    baudRate?: number;
-    dataBits?: number;
-    stopBits?: number;
-    parity?: ParityType;
-    flowControl?: FlowControlType;
-    filters?: SerialPortFilter[] | null;
-  } = {}): Promise<boolean> {
+  async connectSerial(
+    opts: {
+      port?: SerialPort | null;
+      baudRate?: number;
+      dataBits?: number;
+      stopBits?: number;
+      parity?: ParityType;
+      flowControl?: FlowControlType;
+      filters?: SerialPortFilter[] | null;
+    } = {},
+  ): Promise<boolean> {
     if (!('serial' in navigator)) {
       throw new Error('Web Serial not supported. Use Chrome/Edge on HTTPS or http://localhost.');
     }
@@ -279,22 +311,31 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this._mode = 'idle';
     this._resetAssembler();
 
-    const serial = (navigator as unknown as { serial: { requestPort(o?: { filters?: SerialPortFilter[] }): Promise<SerialPort> } }).serial;
+    const serial = (
+      navigator as unknown as {
+        serial: { requestPort(o?: { filters?: SerialPortFilter[] }): Promise<SerialPort> };
+      }
+    ).serial;
     if (!opts.port) {
       opts.port = await serial.requestPort(opts.filters ? { filters: opts.filters } : undefined);
     }
     this.port = opts.port!;
 
-    await (this.port as unknown as {
-      open(o: {
-        baudRate: number; dataBits: number; stopBits: number;
-        parity: string; flowControl: string;
-      }): Promise<void>
-    }).open({
-      baudRate:    opts.baudRate    ?? 115200,
-      dataBits:    opts.dataBits    ?? 8,
-      stopBits:    opts.stopBits    ?? 1,
-      parity:      opts.parity      ?? 'none',
+    await (
+      this.port as unknown as {
+        open(o: {
+          baudRate: number;
+          dataBits: number;
+          stopBits: number;
+          parity: string;
+          flowControl: string;
+        }): Promise<void>;
+      }
+    ).open({
+      baudRate: opts.baudRate ?? 115200,
+      dataBits: opts.dataBits ?? 8,
+      stopBits: opts.stopBits ?? 1,
+      parity: opts.parity ?? 'none',
       flowControl: opts.flowControl ?? 'none',
     });
 
@@ -336,7 +377,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       } catch (e) {
         if (!signal.aborted) console.warn('[serial] read loop error:', e);
       } finally {
-        try { reader?.releaseLock?.(); } catch { /* ignore */ }
+        try {
+          reader?.releaseLock?.();
+        } catch {
+          /* ignore */
+        }
         if (this._serialReader === reader) this._serialReader = null;
         this._serialReadLoopTask = null;
         if (!signal.aborted) {
@@ -348,20 +393,33 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   private async _serialDisconnect(reason = 'user'): Promise<void> {
-    try { this._serialAbort?.abort(); } catch { /* ignore */ }
+    try {
+      this._serialAbort?.abort();
+    } catch {
+      /* ignore */
+    }
 
     const cancelActiveReader = async (): Promise<boolean> => {
       const r = this._serialReader;
       if (!r) return false;
-      try { await r.cancel(); } catch { /* ignore */ }
-      try { r.releaseLock(); } catch { /* ignore */ }
+      try {
+        await r.cancel();
+      } catch {
+        /* ignore */
+      }
+      try {
+        r.releaseLock();
+      } catch {
+        /* ignore */
+      }
       if (this._serialReader === r) this._serialReader = null;
       return true;
     };
 
     await cancelActiveReader();
 
-    const portReadableLocked = (this.port as unknown as { readable?: { locked?: boolean } })?.readable?.locked;
+    const portReadableLocked = (this.port as unknown as { readable?: { locked?: boolean } })
+      ?.readable?.locked;
     if (portReadableLocked && !this._serialReader) {
       for (let i = 0; i < 10; i++) {
         await new Promise<void>((r) => setTimeout(r, 20));
@@ -372,18 +430,38 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     try {
       const task = this._serialReadLoopTask;
       if (task) await Promise.race([task, new Promise<void>((r) => setTimeout(r, 750))]);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     try {
-      const writable = (this.port as unknown as { writable?: { locked?: boolean; getWriter(): WritableStreamDefaultWriter<unknown> } })?.writable;
+      const writable = (
+        this.port as unknown as {
+          writable?: { locked?: boolean; getWriter(): WritableStreamDefaultWriter<unknown> };
+        }
+      )?.writable;
       if (writable?.locked) {
         const w = writable.getWriter();
-        try { await (w as unknown as { abort?(): void }).abort?.(); } catch { /* ignore */ }
-        try { w.releaseLock(); } catch { /* ignore */ }
+        try {
+          await (w as unknown as { abort?(): void }).abort?.();
+        } catch {
+          /* ignore */
+        }
+        try {
+          w.releaseLock();
+        } catch {
+          /* ignore */
+        }
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
-    try { await (this.port as unknown as { close(): Promise<void> })?.close?.(); } catch { /* ignore */ }
+    try {
+      await (this.port as unknown as { close(): Promise<void> })?.close?.();
+    } catch {
+      /* ignore */
+    }
 
     this.port = null;
     this._serialAbort = null;
@@ -397,24 +475,46 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const kind = this._transportKind === 'serial' ? 'serial' : 'ble';
 
     if (this._mode === 'streaming') {
-      try { await this.stopStreaming(); } catch { /* ignore */ }
+      try {
+        await this.stopStreaming();
+      } catch {
+        /* ignore */
+      }
     }
 
     if (this._sync) {
-      try { this._abortSync(new Error(opts.reason ?? 'Disconnected')); } catch { /* ignore */ }
+      try {
+        this._abortSync(new Error(opts.reason ?? 'Disconnected'));
+      } catch {
+        /* ignore */
+      }
     }
 
     if (this._transportKind === 'serial') {
-      try { await this._serialDisconnect(opts.reason ?? 'user'); } catch { /* ignore */ }
+      try {
+        await this._serialDisconnect(opts.reason ?? 'user');
+      } catch {
+        /* ignore */
+      }
     } else {
       void this.writeBytes(DISCONNECT_REQ, { withResponse: false });
-      try { if (this.rx) await this.rx.stopNotifications?.(); } catch { /* ignore */ }
+      try {
+        if (this.rx) await this.rx.stopNotifications?.();
+      } catch {
+        /* ignore */
+      }
       try {
         if (this._onGattDisconnected && this.device) {
           this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
         }
-      } catch { /* ignore */ }
-      try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (this.device?.gatt?.connected) this.device.gatt.disconnect();
+      } catch {
+        /* ignore */
+      }
     }
 
     this._mode = 'idle';
@@ -449,11 +549,19 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   // Logged data transfer
   // ---------------------------------------------------------------------------
 
-  async transferLoggedData(opts: TransferLoggedDataOptions = {}): Promise<TransferLoggedDataResult> {
-    const { fileHandle = null, timeoutMs = 1000, maxNack = 5, maxCrcNack = 5, onProgress = null } = opts;
+  async transferLoggedData(
+    opts: TransferLoggedDataOptions = {},
+  ): Promise<TransferLoggedDataResult> {
+    const {
+      fileHandle = null,
+      timeoutMs = 1000,
+      maxNack = 5,
+      maxCrcNack = 5,
+      onProgress = null,
+    } = opts;
 
     const bleOk = !!(this.rx && this.tx);
-    const serOk = !!(this.port);
+    const serOk = !!this.port;
     if (!bleOk && !serOk) throw new Error('Not connected');
     if (this._mode === 'streaming') throw new Error('Stop streaming before TransferLoggedData');
     if (this._mode === 'logged') throw new Error('Already syncing logged data');
@@ -478,8 +586,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       timeoutMs,
       bytesWritten: 0,
       resolve: null!,
-      reject:  null!,
-      timer:   null,
+      reject: null!,
+      timer: null,
       writable,
       chunks,
       onProgress: onProgress ?? null,
@@ -488,29 +596,32 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     const donePromise = new Promise<{ ok: boolean; bytesWritten: number }>((resolve, reject) => {
       sync.resolve = resolve;
-      sync.reject  = reject;
+      sync.reject = reject;
     });
 
-    sync.timer = setInterval(async () => {
-      if (!this._sync?.receiving) return;
-      const age = Date.now() - this._sync.lastRxAt;
-      if (age < this._sync.timeoutMs) return;
+    sync.timer = setInterval(
+      async () => {
+        if (!this._sync?.receiving) return;
+        const age = Date.now() - this._sync.lastRxAt;
+        if (age < this._sync.timeoutMs) return;
 
-      try {
-        if (this._sync.lastReply === 'NONE') {
-          await this.writeBytes(READ_DATA_REQ, { withResponse: true });
-        } else {
-          this._clearSyncRxBuffers('timeout-nack');
-          await this.writeBytes(DATA_NACK);
-          this._sync.nackCount++;
-          this._sync.lastReply = 'NACK';
-          if (this._sync.nackCount >= maxNack) throw new Error('Too many NACK timeouts');
+        try {
+          if (this._sync.lastReply === 'NONE') {
+            await this.writeBytes(READ_DATA_REQ, { withResponse: true });
+          } else {
+            this._clearSyncRxBuffers('timeout-nack');
+            await this.writeBytes(DATA_NACK);
+            this._sync.nackCount++;
+            this._sync.lastReply = 'NACK';
+            if (this._sync.nackCount >= maxNack) throw new Error('Too many NACK timeouts');
+          }
+          this._sync.lastRxAt = Date.now();
+        } catch (e) {
+          this._abortSync(e instanceof Error ? e : new Error(String(e)));
         }
-        this._sync.lastRxAt = Date.now();
-      } catch (e) {
-        this._abortSync(e instanceof Error ? e : new Error(String(e)));
-      }
-    }, Math.max(250, Math.floor(timeoutMs / 2)));
+      },
+      Math.max(250, Math.floor(timeoutMs / 2)),
+    );
 
     await this.writeBytes(READ_DATA_REQ, { withResponse: true });
     const result = await donePromise;
@@ -586,8 +697,16 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }, timeoutMs);
 
       this._pending = {
-        resolve: (x) => { clearTimeout(t); this._pending = null; resolve(x); },
-        reject:  (e) => { clearTimeout(t); this._pending = null; reject(e); },
+        resolve: (x) => {
+          clearTimeout(t);
+          this._pending = null;
+          resolve(x);
+        },
+        reject: (e) => {
+          clearTimeout(t);
+          this._pending = null;
+          reject(e);
+        },
       };
     });
 
@@ -596,13 +715,27 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   // Convenience command methods
-  readStatus()            { return this.request(0x11); }
-  readStatus2()           { return this.request(0x1c); }
-  readProductionConfig()  { return this.request(0x13); }
-  readOperationalConfig() { return this.request(0x14); }
-  readTime()              { return this.request(0x15); }
-  readPendingEvents()     { return this.request(0x17); }
-  disconnectRequest()     { return this.request(0x2b); }
+  readStatus() {
+    return this.request(0x11);
+  }
+  readStatus2() {
+    return this.request(0x1c);
+  }
+  readProductionConfig() {
+    return this.request(0x13);
+  }
+  readOperationalConfig() {
+    return this.request(0x14);
+  }
+  readTime() {
+    return this.request(0x15);
+  }
+  readPendingEvents() {
+    return this.request(0x17);
+  }
+  disconnectRequest() {
+    return this.request(0x2b);
+  }
 
   // ---------------------------------------------------------------------------
   // Operational config helpers
@@ -614,7 +747,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async readProductionConfigFromDevice(): Promise<ProductionConfig> {
-    const rsp  = await this.readProductionConfig();
+    const rsp = await this.readProductionConfig();
     const prod = normalizeOperationalConfig(rsp?.payload);
     if (!prod?.length) throw new Error('Invalid production config returned from device');
 
@@ -626,8 +759,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   async readOpConfigFromDevice(): Promise<Uint8Array> {
     const rsp = await this.readOperationalConfig();
-    const op  = normalizeOperationalConfig(rsp?.payload);
-    if (!op?.length || op[0] !== 0x5a) throw new Error('Invalid operational config returned from device');
+    const op = normalizeOperationalConfig(rsp?.payload);
+    if (!op?.length || op[0] !== 0x5a)
+      throw new Error('Invalid operational config returned from device');
 
     this.operationalConfig = op;
 
@@ -649,27 +783,34 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       opConfigBytes instanceof Uint8Array ? opConfigBytes : new Uint8Array(opConfigBytes),
     );
     if (!op || op.length < 4) throw new Error('writeOpConfig: invalid opconfig');
-    if (op[0] !== 0x5a)       throw new Error('writeOpConfig: opconfig must start with 0x5A');
+    if (op[0] !== 0x5a) throw new Error('writeOpConfig: opconfig must start with 0x5A');
 
     const req = this._makeReq(0x24, op);
     await this.writeBytes(req, { withResponse: true });
     await this.readOpConfigFromDevice();
   }
 
-  async getopconfig(): Promise<Uint8Array>                     { return this.getOpConfig(); }
-  async writeopconfig(op: Uint8Array | number[]): Promise<void> { return this.writeOpConfig(op); }
+  async getopconfig(): Promise<Uint8Array> {
+    return this.getOpConfig();
+  }
+  async writeopconfig(op: Uint8Array | number[]): Promise<void> {
+    return this.writeOpConfig(op);
+  }
 
   getSensor(name: string | number): SensorBase | null {
     const k = String(name ?? '').toLowerCase();
     if (!k) return null;
     if (k.includes('lis2dw12') || k.includes('accel1') || k === '2') return this.accel1;
-    if (k.includes('lsm6') || k.includes('gyro') || k.includes('accel2') || k === '3') return this.gyroAccel2;
+    if (k.includes('lsm6') || k.includes('gyro') || k.includes('accel2') || k === '3')
+      return this.gyroAccel2;
     if (k.includes('gsr') || k === '1') return this.gsr;
     if (k.includes('ppg') || k === '4') return this.ppg;
     return null;
   }
 
-  GetSensor(name: string | number): SensorBase | null { return this.getSensor(name); }
+  GetSensor(name: string | number): SensorBase | null {
+    return this.getSensor(name);
+  }
 
   // ---------------------------------------------------------------------------
   // RX assembly and dispatch
@@ -703,7 +844,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     const computed = computeCrcLikeCSharp(payloadU8);
     const original = getOriginalCrcLE(payloadU8);
-    const crcOk    = computed === original;
+    const crcOk = computed === original;
     const payloadIndex = u16le_at(payloadU8, 0);
 
     if (!crcOk) {
@@ -801,7 +942,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     let crcOk: boolean | null = null;
 
     if (this.stripStreamCrc && payload.length >= 6) {
-      const claimed   = (payload[payload.length - 2] | (payload[payload.length - 1] << 8)) >>> 0;
+      const claimed = (payload[payload.length - 2] | (payload[payload.length - 1] << 8)) >>> 0;
       const dataNoCrc = payload.slice(0, payload.length - 2);
 
       if (this.verifyStreamCrc) {
@@ -816,8 +957,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }
     }
 
-    const sensorId      = body[0];
-    const tick          = u24le(body, 1);
+    const sensorId = body[0];
+    const tick = u24le(body, 1);
     const sensorPayload = body.slice(4);
 
     const sensor = (this.sensors as unknown as Record<number, SensorBase | undefined>)[sensorId];

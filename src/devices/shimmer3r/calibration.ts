@@ -19,7 +19,7 @@ export function calibrateU12AdcValue(
   vRefP: number,
   gain: number,
 ): number {
-  return (unCalData - offset) * (((vRefP * 1000) / gain) / 4095);
+  return (unCalData - offset) * ((vRefP * 1000) / gain / 4095);
 }
 
 /**
@@ -67,10 +67,7 @@ export function calibrateGsrDataToResistanceFromAmplifierEq(
  * @param gsrRangeSetting    Range 0–3 (fixed) or 4 (auto).
  * @returns Clamped resistance in kΩ.
  */
-export function nudgeGsrResistance(
-  gsrResistanceKOhms: number,
-  gsrRangeSetting: number,
-): number {
+export function nudgeGsrResistance(gsrResistanceKOhms: number, gsrRangeSetting: number): number {
   if (gsrRangeSetting === 4) return gsrResistanceKOhms;
   const [minVal, maxVal] = SHIMMER3_GSR_RESISTANCE_MIN_MAX_KOHMS[gsrRangeSetting];
   return Math.max(minVal, Math.min(maxVal, gsrResistanceKOhms));

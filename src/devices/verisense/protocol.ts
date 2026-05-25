@@ -10,8 +10,8 @@ export function u16le(b0: number, b1: number): number {
 
 /** Read a signed 16-bit integer at byte offset `off`, little-endian. */
 export function i16le(bytes: Uint8Array, off: number): number {
-  const v = (bytes[off] | (bytes[off + 1] << 8));
-  return (v & 0x8000) ? v - 0x10000 : v;
+  const v = bytes[off] | (bytes[off + 1] << 8);
+  return v & 0x8000 ? v - 0x10000 : v;
 }
 
 /** Read a 24-bit unsigned integer at byte offset `off`, little-endian. */
@@ -44,7 +44,7 @@ export function crc16_ccitt_false(bytes: Uint8Array): number {
   for (let i = 0; i < bytes.length; i++) {
     crc ^= bytes[i] << 8;
     for (let b = 0; b < 8; b++) {
-      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+      crc = crc & 0x8000 ? (crc << 1) ^ 0x1021 : crc << 1;
       crc &= 0xffff;
     }
   }
@@ -76,7 +76,13 @@ export function computeCrcLikeCSharp(payload: Uint8Array): number {
  * `Uint8Array`.  Throws if the input type is unrecognised.
  */
 export function normalizeOperationalConfig(
-  payload: Uint8Array | ArrayBuffer | number[] | { buffer: ArrayBuffer; byteOffset?: number; byteLength?: number } | null | undefined,
+  payload:
+    | Uint8Array
+    | ArrayBuffer
+    | number[]
+    | { buffer: ArrayBuffer; byteOffset?: number; byteLength?: number }
+    | null
+    | undefined,
 ): Uint8Array | null {
   if (!payload) return null;
   if (payload instanceof Uint8Array) return payload;
@@ -107,7 +113,10 @@ export function parseProductionConfigPayload(response: Uint8Array): ProductionCo
   const isAllFFs = (arr: Uint8Array) => arr.every((b) => b === 255);
 
   const configHeader = response[0];
-  const asmid = [...response.slice(1, 7)].reverse().map((b) => b.toString(16).padStart(2, '0')).join('');
+  const asmid = [...response.slice(1, 7)]
+    .reverse()
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 
   const revHwMajor = response[7];
   const revHwMinor = response[8];

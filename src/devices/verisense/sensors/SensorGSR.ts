@@ -40,7 +40,7 @@ export class SensorGSR extends SensorBase {
   readonly GSR_UNCAL_LIMIT_RANGE3_SR62 = 683;
 
   private readonly SHIMMER3_REF_KOHMS = [40.2, 287.0, 1000.0, 3300.0];
-  private readonly SR68_REF_KOHMS     = [21.0, 150.0, 562.0, 1740.0];
+  private readonly SR68_REF_KOHMS = [21.0, 150.0, 562.0, 1740.0];
 
   gsrEnabled = true;
   battEnabled = false;
@@ -58,15 +58,25 @@ export class SensorGSR extends SensorBase {
     this.samplingRateHz = 50;
   }
 
-  setHardwareIdentifier(idStr: HardwareIdentifier): void { this.hardwareIdentifier = idStr; }
-  setGsrRangeSetting(v: number): void { this.gsrRangeSetting = v; }
+  setHardwareIdentifier(idStr: HardwareIdentifier): void {
+    this.hardwareIdentifier = idStr;
+  }
+  setGsrRangeSetting(v: number): void {
+    this.gsrRangeSetting = v;
+  }
 
   // Convenience aliases
-  setGSREnabled(enabled: boolean, opConfigBytes?: Uint8Array | null): Uint8Array | Record<string, boolean> {
+  setGSREnabled(
+    enabled: boolean,
+    opConfigBytes?: Uint8Array | null,
+  ): Uint8Array | Record<string, boolean> {
     return this.setEnabled(enabled, opConfigBytes);
   }
 
-  setBattEnabled(enabled: boolean, opConfigBytes?: Uint8Array | null): Uint8Array | Record<string, boolean> {
+  setBattEnabled(
+    enabled: boolean,
+    opConfigBytes?: Uint8Array | null,
+  ): Uint8Array | Record<string, boolean> {
     return this.setEnabled({ batt: enabled }, opConfigBytes);
   }
 
@@ -81,18 +91,14 @@ export class SensorGSR extends SensorBase {
   ): Uint8Array | Record<string, boolean> {
     if (opConfigBytes != null) {
       const desired =
-        typeof arg1 === 'boolean' ? { gsr: arg1 } :
-        arg1 && typeof arg1 === 'object' ? arg1 :
-        {};
+        typeof arg1 === 'boolean' ? { gsr: arg1 } : arg1 && typeof arg1 === 'object' ? arg1 : {};
       return this._patchEnabled(desired, opConfigBytes);
     }
 
     const obj =
-      typeof arg1 === 'boolean' ? { gsr: arg1 } :
-      arg1 && typeof arg1 === 'object' ? arg1 :
-      {};
+      typeof arg1 === 'boolean' ? { gsr: arg1 } : arg1 && typeof arg1 === 'object' ? arg1 : {};
 
-    if (typeof obj.gsr  === 'boolean') this.gsrEnabled  = obj.gsr;
+    if (typeof obj.gsr === 'boolean') this.gsrEnabled = obj.gsr;
     if (typeof obj.batt === 'boolean') this.battEnabled = obj.batt;
 
     return { gsr: this.gsrEnabled, batt: this.battEnabled };
@@ -107,11 +113,11 @@ export class SensorGSR extends SensorBase {
 
     if (typeof gsr === 'boolean') {
       const idx = OP_IDX.GEN_CFG_1;
-      out[idx] = gsr ? (out[idx] | 0x80) & 0xff : (out[idx] & 0x7f) & 0xff;
+      out[idx] = gsr ? (out[idx] | 0x80) & 0xff : out[idx] & 0x7f & 0xff;
     }
     if (typeof batt === 'boolean') {
       const idx = OP_IDX.GEN_CFG_2;
-      out[idx] = batt ? (out[idx] | 0x02) & 0xff : (out[idx] & 0xfd) & 0xff;
+      out[idx] = batt ? (out[idx] | 0x02) & 0xff : out[idx] & 0xfd & 0xff;
     }
 
     return out;
@@ -149,7 +155,7 @@ export class SensorGSR extends SensorBase {
       refVoltage = 3.0 / 4.0;
     }
     const adcScaling = 1.0 / 4.0;
-    return ((uncal12bit * refVoltage) / adcRange) / adcScaling;
+    return (uncal12bit * refVoltage) / adcRange / adcScaling;
   }
 
   calibrateGsrToKOhmsUsingAmplifierEq(volts: number, range: number): number {
@@ -173,7 +179,9 @@ export class SensorGSR extends SensorBase {
     return Math.min(Math.max(kOhms, lim[0]), lim[1]);
   }
 
-  kOhmToUSiemens(kOhms: number): number { return 1000.0 / kOhms; }
+  kOhmToUSiemens(kOhms: number): number {
+    return 1000.0 / kOhms;
+  }
 
   override parsePayload(sensorPayloadBytes: Uint8Array): GSRPayloadSample[] {
     const bytesPerSample = this.gsrEnabled && this.battEnabled ? 4 : 2;
@@ -183,7 +191,7 @@ export class SensorGSR extends SensorBase {
     for (let i = 0; i < n; i++) {
       const base = i * bytesPerSample;
       let batt: GSRBatterySample | null = null;
-      let gsr:  GSRSample | null = null;
+      let gsr: GSRSample | null = null;
 
       const gsrStart = this.battEnabled && this.gsrEnabled ? 2 : 0;
 
@@ -202,10 +210,10 @@ export class SensorGSR extends SensorBase {
           if (adc12 < limit) adc12 = limit;
         }
 
-        const volts  = this.calibrateAdcToVolts(adc12);
-        let kOhms    = this.calibrateGsrToKOhmsUsingAmplifierEq(volts, currentRange);
-        kOhms        = this.nudgeGsrResistance(kOhms);
-        const uS     = this.kOhmToUSiemens(kOhms);
+        const volts = this.calibrateAdcToVolts(adc12);
+        let kOhms = this.calibrateGsrToKOhmsUsingAmplifierEq(volts, currentRange);
+        kOhms = this.nudgeGsrResistance(kOhms);
+        const uS = this.kOhmToUSiemens(kOhms);
         const connectivity = uS > this.LIMIT_MIN_VALID_USIEMENS ? 'Connected' : 'Disconnected';
 
         gsr = { raw: gsrraw, adc12, range: currentRange, volts, kOhms, uS, connectivity };
@@ -213,7 +221,7 @@ export class SensorGSR extends SensorBase {
 
       if (this.battEnabled) {
         const braw = i16le(sensorPayloadBytes, base) & 0x0fff;
-        const mv   = this.calibrateAdcToVolts(braw) * 1000.0;
+        const mv = this.calibrateAdcToVolts(braw) * 1000.0;
         batt = { raw: braw, mV: mv };
       }
 
@@ -227,16 +235,16 @@ export class SensorGSR extends SensorBase {
     const gen1 = op[OP_IDX.GEN_CFG_1] ?? 0;
     const gen2 = op[OP_IDX.GEN_CFG_2] ?? 0;
 
-    this.gsrEnabled  = ((gen1 >> 7) & 0x01) === 1;
+    this.gsrEnabled = ((gen1 >> 7) & 0x01) === 1;
     this.battEnabled = (gen2 & 0b00000010) !== 0;
 
-    const rateCfg     = (op[OP_IDX.ADC_CHANNEL_SETTINGS_0] ?? 0) & 0x3f;
-    const cfg1        = (op[OP_IDX.ADC_CHANNEL_SETTINGS_1] ?? 0) & 0xff;
-    const rangeCfg    = cfg1 & 0x07;
+    const rateCfg = (op[OP_IDX.ADC_CHANNEL_SETTINGS_0] ?? 0) & 0x3f;
+    const cfg1 = (op[OP_IDX.ADC_CHANNEL_SETTINGS_1] ?? 0) & 0xff;
+    const rangeCfg = cfg1 & 0x07;
     const oversamplingCfg = (cfg1 >> 4) & 0x0f;
 
-    this.gsrRateSettingRaw            = rateCfg;
-    this.gsrRangeSettingRaw           = rangeCfg;
+    this.gsrRateSettingRaw = rateCfg;
+    this.gsrRangeSettingRaw = rangeCfg;
     this.gsrOversamplingRateSettingRaw = oversamplingCfg;
 
     if (rangeCfg >= 0 && rangeCfg <= 4) {

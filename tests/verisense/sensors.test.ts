@@ -10,8 +10,12 @@ import { SensorBase } from '../../src/devices/verisense/sensors/SensorBase.js';
 // ---------------------------------------------------------------------------
 
 class ConcreteSensor extends SensorBase {
-  parsePayload(_: Uint8Array): unknown[] { return []; }
-  applyOperationalConfig(_: Uint8Array): void { /* noop */ }
+  parsePayload(_: Uint8Array): unknown[] {
+    return [];
+  }
+  applyOperationalConfig(_: Uint8Array): void {
+    /* noop */
+  }
 }
 
 describe('SensorBase.unwrapTicks', () => {
@@ -68,7 +72,9 @@ describe('SensorBase.extrapolateSampleTimes', () => {
 
 describe('SensorGSR', () => {
   let gsr: SensorGSR;
-  beforeEach(() => { gsr = new SensorGSR(); });
+  beforeEach(() => {
+    gsr = new SensorGSR();
+  });
 
   it('defaults to auto-range (4)', () => {
     expect(gsr.gsrRangeSetting).toBe(4);
@@ -87,7 +93,7 @@ describe('SensorGSR', () => {
   });
 
   it('parsePayload returns one sample per 2 bytes (GSR-only mode)', () => {
-    gsr.gsrEnabled  = true;
+    gsr.gsrEnabled = true;
     gsr.battEnabled = false;
     // 4 bytes → 2 samples
     const buf = new Uint8Array([0x00, 0x08, 0x00, 0x08]);
@@ -118,7 +124,7 @@ describe('SensorLIS2DW12', () => {
 describe('SensorLSM6DS3', () => {
   it('parsePayload with gyro+accel enabled parses 12 bytes per sample', () => {
     const sensor = new SensorLSM6DS3();
-    sensor.accEnabled  = true;
+    sensor.accEnabled = true;
     sensor.gyroEnabled = true;
     const buf = new Uint8Array(24); // 2 samples
     const out = sensor.parsePayload(buf);
@@ -129,7 +135,7 @@ describe('SensorLSM6DS3', () => {
 
   it('parsePayload with gyro-only parses 6 bytes per sample', () => {
     const sensor = new SensorLSM6DS3();
-    sensor.accEnabled  = false;
+    sensor.accEnabled = false;
     sensor.gyroEnabled = true;
     const buf = new Uint8Array(6); // 1 sample
     const out = sensor.parsePayload(buf);

@@ -34,12 +34,12 @@ export function u24be(b: Uint8Array, o: number): number {
 
 /** Sign-extend a 16-bit value to a signed integer. */
 export function sign16(v: number): number {
-  return (v & 0x8000) ? (v | 0xffff0000) : v;
+  return v & 0x8000 ? v | 0xffff0000 : v;
 }
 
 /** Sign-extend a 24-bit value to a signed integer. */
 export function sign24(v: number): number {
-  return (v & 0x800000) ? (v | 0xff000000) : v;
+  return v & 0x800000 ? v | 0xff000000 : v;
 }
 
 /** Format a byte as a 2-digit uppercase hex string. */

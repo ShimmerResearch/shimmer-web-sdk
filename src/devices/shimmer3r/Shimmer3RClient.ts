@@ -17,16 +17,7 @@ import {
   nudgeGsrResistance,
   getOversamplingRatioADS1292R,
 } from './calibration.js';
-import {
-  concatU8,
-  u16le,
-  u16be,
-  u24le,
-  u24be,
-  sign16,
-  sign24,
-  hex2,
-} from './protocol.js';
+import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -125,7 +116,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
   // Callbacks
-  onInquiry: ((info: ReturnType<Shimmer3RClient['_interpretInquiryResponseShimmer3R']>) => void) | null = null;
+  onInquiry:
+    | ((info: ReturnType<Shimmer3RClient['_interpretInquiryResponseShimmer3R']>) => void)
+    | null = null;
   onExpPowerChanged: ((expPower: number) => void) | null = null;
 
   constructor(opts: Shimmer3RClientOptions = {}) {
@@ -165,7 +158,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async disconnect(): Promise<void> {
     try {
       if (this.tx) {
-        try { await this.tx.stopNotifications(); } catch { /* ignore */ }
+        try {
+          await this.tx.stopNotifications();
+        } catch {
+          /* ignore */
+        }
         this.tx.removeEventListener('characteristicvaluechanged', this._handleNotify);
       }
       if (this.device?.gatt?.connected) this.device.gatt.disconnect();
@@ -222,8 +219,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     // 3) Try parsing if schema is available
     if (this.schema) {
-      try { this._parseBySchema(); }
-      catch (e) { this._log('parseBySchema error:', e); }
+      try {
+        this._parseBySchema();
+      } catch (e) {
+        this._log('parseBySchema error:', e);
+      }
     }
   };
 
@@ -235,16 +235,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Control the internal expansion power rail (required for ExG/EMG/ECG).
    * @param expPower 0 = disable, 1 = enable.
    */
-  async setInternalExpPower(expPower: 0 | 1): Promise<{ expPower: number; ackRemainder: Uint8Array | null }> {
+  async setInternalExpPower(
+    expPower: 0 | 1,
+  ): Promise<{ expPower: number; ackRemainder: Uint8Array | null }> {
     if (expPower !== 0 && expPower !== 1) throw new Error('expPower must be 0 (off) or 1 (on)');
     if (!this.rx) throw new Error('Not connected (RX missing)');
 
     const cmd = new Uint8Array([OPCODES.SET_INTERNAL_EXP_POWER_ENABLE_CMD, expPower]);
-    this._emitStatus(`SET_INTERNAL_EXP_POWER_ENABLE_CMD → ${expPower ? 'ON' : 'OFF'} waiting for ACK…`);
+    this._emitStatus(
+      `SET_INTERNAL_EXP_POWER_ENABLE_CMD → ${expPower ? 'ON' : 'OFF'} waiting for ACK…`,
+    );
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     this._emitStatus(`Expansion power ${expPower ? 'enabled' : 'disabled'} (ACK received).`);
     this.ExpPower = expPower;
-    try { this.onExpPowerChanged?.(expPower); } catch (e) { this._log('onExpPowerChanged handler error', e); }
+    try {
+      this.onExpPowerChanged?.(expPower);
+    } catch (e) {
+      this._log('onExpPowerChanged handler error', e);
+    }
     return { expPower, ackRemainder };
   }
 
@@ -252,7 +260,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Set the GSR measurement range.
    * @param gsrRange 0 = 8–63 kΩ, 1 = 63–220 kΩ, 2 = 220–680 kΩ, 3 = 680–4700 kΩ, 4 = Auto.
    */
-  async setGSRRange(gsrRange: number): Promise<{ gsrRange: number; ackRemainder: Uint8Array | null }> {
+  async setGSRRange(
+    gsrRange: number,
+  ): Promise<{ gsrRange: number; ackRemainder: Uint8Array | null }> {
     if (!Number.isInteger(gsrRange) || gsrRange < 0 || gsrRange > 4) {
       throw new Error('gsrRange must be 0–4');
     }
@@ -278,7 +288,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Enable sensors via a 24-bit bitmask.
    * Automatically performs an Inquiry after ACK to rebuild the stream schema.
    */
-  async setSensors(sensors: number): Promise<{ sensors: number; ackRemainder: Uint8Array | null; enabledSensors: number }> {
+  async setSensors(
+    sensors: number,
+  ): Promise<{ sensors: number; ackRemainder: Uint8Array | null; enabledSensors: number }> {
     if (!Number.isFinite(sensors)) throw new Error('sensors must be a finite number');
     if (!this.rx) throw new Error('Not connected (RX missing)');
 
@@ -288,15 +300,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const b3 = (sensors >>> 16) & 0xff;
     const cmd = new Uint8Array([OPCODES.SET_SENSORS_CMD, b1, b2, b3]);
 
-    this._emitStatus(`SET_SENSORS_CMD → bitmask=0x${sensors.toString(16).toUpperCase().padStart(6, '0')} waiting for ACK…`);
+    this._emitStatus(
+      `SET_SENSORS_CMD → bitmask=0x${sensors.toString(16).toUpperCase().padStart(6, '0')} waiting for ACK…`,
+    );
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
-    this._emitStatus(`Sensors ACK received. Bitmask 0x${sensors.toString(16).toUpperCase().padStart(6, '0')} applied.`);
+    this._emitStatus(
+      `Sensors ACK received. Bitmask 0x${sensors.toString(16).toUpperCase().padStart(6, '0')} applied.`,
+    );
 
     try {
       this._emitStatus('Performing automatic inquiry to refresh schema…');
       const info = await this.inquiry();
       this.enabledSensors = info.schema.enabledSensors;
-      this._emitStatus(`Inquiry complete. Enabled sensors: 0x${this.enabledSensors.toString(16).toUpperCase()}`);
+      this._emitStatus(
+        `Inquiry complete. Enabled sensors: 0x${this.enabledSensors.toString(16).toUpperCase()}`,
+      );
     } catch (err: unknown) {
       this._emitStatus(`Inquiry after setSensors failed: ${(err as Error).message}`);
     }
@@ -308,7 +326,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Set the sampling rate.
    * The firmware expects a 16-bit divisor: `divisor = floor(32768 / rateHz)`.
    */
-  async setSamplingRate(rateHz: number): Promise<{ requestedHz: number; appliedHz: number; divisor: number; ackRemainder: Uint8Array | null }> {
+  async setSamplingRate(
+    rateHz: number,
+  ): Promise<{
+    requestedHz: number;
+    appliedHz: number;
+    divisor: number;
+    ackRemainder: Uint8Array | null;
+  }> {
     if (!Number.isFinite(rateHz) || rateHz <= 0) {
       throw new Error('Sampling rate must be a positive number (Hz)');
     }
@@ -321,7 +346,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const msb = (divisor >> 8) & 0xff;
     const cmd = new Uint8Array([OPCODES.SAMPLING_RATE, lsb, msb]);
 
-    this._emitStatus(`Set sampling rate → ${rateHz.toFixed(3)} Hz (divisor=${divisor}) — waiting for ACK…`);
+    this._emitStatus(
+      `Set sampling rate → ${rateHz.toFixed(3)} Hz (divisor=${divisor}) — waiting for ACK…`,
+    );
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     const appliedHz = 32768 / divisor;
     this.samplingRateHz = appliedHz;
@@ -359,8 +386,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async enableEMG16Bit(): Promise<void> {
     if (!this.rx) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
-      new Uint8Array([0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20, 0x00, 0x00, 0x02, 0x03]),
-      new Uint8Array([0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0xe1, 0xe1, 0x00, 0x00, 0x00, 0x02, 0x01]),
+      new Uint8Array([
+        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20, 0x00, 0x00, 0x02, 0x03,
+      ]),
+      new Uint8Array([
+        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0xe1, 0xe1, 0x00, 0x00, 0x00, 0x02, 0x01,
+      ]),
     );
     this._emitStatus('EMG 16-bit enabled on EXG1 & EXG2. Schema updated.');
   }
@@ -369,8 +400,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async enableEXGTestSignal16Bit(): Promise<void> {
     if (!this.rx) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
-      new Uint8Array([0x61, 0x00, 0x00, 0x0a, 0x02, 0xab, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01]),
-      new Uint8Array([0x61, 0x01, 0x00, 0x0a, 0x02, 0xa3, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01]),
+      new Uint8Array([
+        0x61, 0x00, 0x00, 0x0a, 0x02, 0xab, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
+      ]),
+      new Uint8Array([
+        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa3, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
+      ]),
     );
     this._emitStatus('EXG test signal 16-bit enabled. Schema updated.');
   }
@@ -379,8 +414,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async enableECG16Bit(): Promise<void> {
     if (!this.rx) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
-      new Uint8Array([0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x40, 0x40, 0x2d, 0x00, 0x00, 0x02, 0x03]),
-      new Uint8Array([0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0x40, 0x47, 0x00, 0x00, 0x00, 0x02, 0x01]),
+      new Uint8Array([
+        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x40, 0x40, 0x2d, 0x00, 0x00, 0x02, 0x03,
+      ]),
+      new Uint8Array([
+        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0x40, 0x47, 0x00, 0x00, 0x00, 0x02, 0x01,
+      ]),
     );
     this._emitStatus('ECG 16-bit enabled on EXG1 & EXG2. Schema updated.');
   }
@@ -536,28 +575,53 @@ export class Shimmer3RClient extends BaseShimmerClient {
       packetSize += fmt.sizeBytes ?? 2;
 
       switch (id) {
-        case 0x00: case 0x01: case 0x02:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_A_ACCEL; break;
-        case 0x04: case 0x05: case 0x06:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_D_ACCEL; break;
-        case 0x14: case 0x15: case 0x16:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_ACCEL_ALT; break;
-        case 0x07: case 0x08: case 0x09:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_MAG; break;
-        case 0x0a: case 0x0b: case 0x0c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GYRO; break;
+        case 0x00:
+        case 0x01:
+        case 0x02:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_A_ACCEL;
+          break;
+        case 0x04:
+        case 0x05:
+        case 0x06:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_D_ACCEL;
+          break;
+        case 0x14:
+        case 0x15:
+        case 0x16:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
+          break;
+        case 0x07:
+        case 0x08:
+        case 0x09:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_MAG;
+          break;
+        case 0x0a:
+        case 0x0b:
+        case 0x0c:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_GYRO;
+          break;
         case 0x12:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_INT_A1; break;
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_INT_A1;
+          break;
         case 0x1c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GSR; break;
-        case 0x23: case 0x24:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_16BIT; break;
-        case 0x25: case 0x26:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_16BIT; break;
-        case 0x1e: case 0x1f:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_24BIT; break;
-        case 0x21: case 0x22:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_24BIT; break;
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_GSR;
+          break;
+        case 0x23:
+        case 0x24:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
+          break;
+        case 0x25:
+        case 0x26:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
+          break;
+        case 0x1e:
+        case 0x1f:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
+          break;
+        case 0x21:
+        case 0x22:
+          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
+          break;
         default:
           console.warn(`⚠️ Unmapped channel ID 0x${id.toString(16)} — added as generic i16.`);
       }
@@ -623,7 +687,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           continue;
         }
 
-        const dt = ((ts2 - ts1) % TS_MOD + TS_MOD) % TS_MOD;
+        const dt = (((ts2 - ts1) % TS_MOD) + TS_MOD) % TS_MOD;
         if (dt === 0) {
           buf = buf.subarray(1);
           drops++;
@@ -675,7 +739,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           }
 
           if (this._lastTs) {
-            const dLast = ((ts - this._lastTs) % TS_MOD + TS_MOD) % TS_MOD;
+            const dLast = (((ts - this._lastTs) % TS_MOD) + TS_MOD) % TS_MOD;
             if (dLast === 0) {
               anomalies++;
               this._log(`⚠️ Timestamp anomaly#${anomalies}: ts=${ts}, last=${this._lastTs}, Δ=0`);
@@ -717,7 +781,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     await this.rx.writeValue(u8);
   }
 
-  private async _writeExpectingAck(u8: Uint8Array, ackTimeoutMs = 1000): Promise<Uint8Array | null> {
+  private async _writeExpectingAck(
+    u8: Uint8Array,
+    ackTimeoutMs = 1000,
+  ): Promise<Uint8Array | null> {
     this._expectingAck++;
     try {
       await this._write(u8);
@@ -780,11 +847,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
     });
   }
 
-  private _onTemp(fn: (chunk: Uint8Array) => void): void { this._temps.add(fn); }
-  private _offTemp(fn: (chunk: Uint8Array) => void): void { this._temps.delete(fn); }
+  private _onTemp(fn: (chunk: Uint8Array) => void): void {
+    this._temps.add(fn);
+  }
+  private _offTemp(fn: (chunk: Uint8Array) => void): void {
+    this._temps.delete(fn);
+  }
   private _emitTemp(buf: Uint8Array): void {
     this._temps.forEach((fn) => {
-      try { fn(buf); } catch (e) { this._log('temp handler error', e); }
+      try {
+        fn(buf);
+      } catch (e) {
+        this._log('temp handler error', e);
+      }
     });
   }
 }

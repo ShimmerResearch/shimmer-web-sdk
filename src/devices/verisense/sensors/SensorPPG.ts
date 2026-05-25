@@ -9,10 +9,10 @@ export interface PPGChannelSample {
 }
 
 export interface PPGSample {
-  RED?:   PPGChannelSample;
-  IR?:    PPGChannelSample;
+  RED?: PPGChannelSample;
+  IR?: PPGChannelSample;
   GREEN?: PPGChannelSample;
-  BLUE?:  PPGChannelSample;
+  BLUE?: PPGChannelSample;
 }
 
 type PPGChannel = 'RED' | 'IR' | 'GREEN' | 'BLUE';
@@ -38,10 +38,10 @@ export class SensorPPG extends SensorBase {
   }
 
   setChannels(channels: Partial<Record<PPGChannel, boolean>>): void {
-    if (typeof channels.RED   === 'boolean') this.red   = channels.RED;
-    if (typeof channels.IR    === 'boolean') this.ir    = channels.IR;
+    if (typeof channels.RED === 'boolean') this.red = channels.RED;
+    if (typeof channels.IR === 'boolean') this.ir = channels.IR;
     if (typeof channels.GREEN === 'boolean') this.green = channels.GREEN;
-    if (typeof channels.BLUE  === 'boolean') this.blue  = channels.BLUE;
+    if (typeof channels.BLUE === 'boolean') this.blue = channels.BLUE;
   }
 
   setAdcResolutionIndex(i: number): void {
@@ -50,15 +50,15 @@ export class SensorPPG extends SensorBase {
 
   calibrateValue(uncalValue: number): number {
     const idx = this.adcResolutionIndex;
-    return (uncalValue / this.adcBitShift[idx]) * this.adcLsb[idx] / 1000.0;
+    return ((uncalValue / this.adcBitShift[idx]) * this.adcLsb[idx]) / 1000.0;
   }
 
   override parsePayload(sensorPayloadBytes: Uint8Array): PPGSample[] {
     const enabled: PPGChannel[] = [];
-    if (this.red)   enabled.push('RED');
-    if (this.ir)    enabled.push('IR');
+    if (this.red) enabled.push('RED');
+    if (this.ir) enabled.push('IR');
     if (this.green) enabled.push('GREEN');
-    if (this.blue)  enabled.push('BLUE');
+    if (this.blue) enabled.push('BLUE');
 
     const bytesPerSample = enabled.length * 3;
     if (bytesPerSample === 0) return [];

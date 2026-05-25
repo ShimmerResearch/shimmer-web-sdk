@@ -12,10 +12,7 @@ export default [
       format: 'esm',
       sourcemap: true,
     },
-    plugins: [
-      resolve(),
-      typescript({ tsconfig: './tsconfig.json', declaration: false }),
-    ],
+    plugins: [resolve(), typescript({ tsconfig: './tsconfig.json', declaration: false })],
   },
   // UMD bundle (for CDN / <script> tag usage)
   {
@@ -26,10 +23,7 @@ export default [
       name: 'ShimmerBLE',
       sourcemap: true,
     },
-    plugins: [
-      resolve(),
-      typescript({ tsconfig: './tsconfig.json', declaration: false }),
-    ],
+    plugins: [resolve(), typescript({ tsconfig: './tsconfig.json', declaration: false })],
   },
   // TypeScript declaration bundle
   {

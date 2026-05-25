@@ -27,10 +27,10 @@ export class SensorLIS2DW12 extends SensorBase {
   ];
 
   private readonly sensitivityByRange: Record<AccelRange, [number, number, number]> = {
-    '2G':  [1671.665922915, 1671.665922915, 1671.665922915],
-    '4G':  [835.832961457,  835.832961457,  835.832961457],
-    '8G':  [417.916480729,  417.916480729,  417.916480729],
-    '16G': [208.958240364,  208.958240364,  208.958240364],
+    '2G': [1671.665922915, 1671.665922915, 1671.665922915],
+    '4G': [835.832961457, 835.832961457, 835.832961457],
+    '8G': [417.916480729, 417.916480729, 417.916480729],
+    '16G': [208.958240364, 208.958240364, 208.958240364],
   };
 
   range: AccelRange = '2G';
@@ -54,7 +54,7 @@ export class SensorLIS2DW12 extends SensorBase {
     const op = normalizeOperationalConfig(opConfigBytes)!;
     const out = new Uint8Array(op);
     const idx = OP_IDX.GEN_CFG_0;
-    out[idx] = enabled ? (out[idx] | 0x80) & 0xff : (out[idx] & 0x7f) & 0xff;
+    out[idx] = enabled ? (out[idx] | 0x80) & 0xff : out[idx] & 0x7f & 0xff;
     return out;
   }
 
@@ -130,8 +130,24 @@ export class SensorLIS2DW12 extends SensorBase {
     const rangeMap: Record<number, AccelRange> = { 0: '2G', 1: '4G', 2: '8G', 3: '16G' };
     this.setRange(rangeMap[rangeSetting] ?? '2G');
 
-    const lowPowerHzByCfg: Record<number, number> = { 1: 1.6, 2: 12.5, 3: 25, 4: 50, 5: 100, 6: 200 };
-    const highPerfHzByCfg: Record<number, number> = { 1: 12.5, 3: 25, 4: 50, 5: 100, 6: 200, 7: 400, 8: 800, 9: 1600 };
+    const lowPowerHzByCfg: Record<number, number> = {
+      1: 1.6,
+      2: 12.5,
+      3: 25,
+      4: 50,
+      5: 100,
+      6: 200,
+    };
+    const highPerfHzByCfg: Record<number, number> = {
+      1: 12.5,
+      3: 25,
+      4: 50,
+      5: 100,
+      6: 200,
+      7: 400,
+      8: 800,
+      9: 1600,
+    };
 
     const isLowPower = modeSetting === 0;
     const hz = isLowPower ? lowPowerHzByCfg[rateSetting] : highPerfHzByCfg[rateSetting];
