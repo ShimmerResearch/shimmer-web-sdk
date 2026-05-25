@@ -6,6 +6,17 @@
   "main": "dist/shimmer-ble.umd.js",
   "module": "dist/shimmer-ble.esm.js",
   "types": "dist/shimmer-ble.d.ts",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShimmerResearch/shimmer-web-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ShimmerResearch/shimmer-web-sdk/issues"
+  },
+  "homepage": "https://github.com/ShimmerResearch/shimmer-web-sdk#readme",
   "exports": {
     ".": {
       "import": "./dist/shimmer-ble.esm.js",

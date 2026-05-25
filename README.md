@@ -63,6 +63,16 @@ npm run build    # produces dist/shimmer-ble.esm.js, .umd.js, .d.ts
 npm test         # Vitest — runs without a browser
 ```
 
+## Publishing to GitHub Packages
+
+This package is configured for GitHub Packages (`@shimmerresearch` scope).  
+Publishing is automated by `.github/workflows/publish-github-packages.yml` and runs on:
+
+- Release published
+- Manual workflow dispatch
+
+To publish, create a GitHub release for the tag/version you want to publish.
+
 ## Package Layout
 
 ```
