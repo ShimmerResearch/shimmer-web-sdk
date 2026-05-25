@@ -185,17 +185,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._log('Notify len=', chunk.length, 'data=', chunk);
 
     // 1) Consume an expected ACK
-    if (chunk.length >= 1 && chunk[0] === OPCODES.ACK && (this._expectingAck ?? 0) > 0) {
+    if (chunk.length >= 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && (this._expectingAck ?? 0) > 0) {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
 
       const remainder = chunk.slice(1);
       this._lastAckRemainder = remainder.length ? remainder : null;
 
-      this._emitTemp(new Uint8Array([OPCODES.ACK]));
+      this._emitTemp(new Uint8Array([OPCODES.ACK_COMMAND_PROCESSED]));
 
       if (this._lastAckRemainder) {
-        if (this._streaming && this._lastAckRemainder[0] === OPCODES.DATA) {
+        if (this._streaming && this._lastAckRemainder[0] === OPCODES.DATA_PACKET) {
           this._log('Appending DATA remainder after ACK to stream buffer');
           this._rxBuf = concatU8(this._rxBuf, this._lastAckRemainder);
         } else {
@@ -212,7 +212,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._rxBuf = concatU8(this._rxBuf, chunk);
     } else {
       this._emitTemp(chunk);
-      if (chunk.length && chunk[0] === OPCODES.DATA) {
+      if (chunk.length && chunk[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, chunk);
       }
     }
@@ -241,7 +241,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (expPower !== 0 && expPower !== 1) throw new Error('expPower must be 0 (off) or 1 (on)');
     if (!this.rx) throw new Error('Not connected (RX missing)');
 
-    const cmd = new Uint8Array([OPCODES.SET_INTERNAL_EXP_POWER_ENABLE_CMD, expPower]);
+    const cmd = new Uint8Array([OPCODES.SET_INTERNAL_EXP_POWER_ENABLE_COMMAND, expPower]);
     this._emitStatus(
       `SET_INTERNAL_EXP_POWER_ENABLE_CMD → ${expPower ? 'ON' : 'OFF'} waiting for ACK…`,
     );
@@ -268,7 +268,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     if (!this.rx) throw new Error('Not connected (RX missing)');
 
-    const cmd = new Uint8Array([OPCODES.SET_GSR_RANGE, gsrRange & 0xff]);
+    const cmd = new Uint8Array([OPCODES.SET_GSR_RANGE_COMMAND, gsrRange & 0xff]);
     this._emitStatus('SET_GSR_RANGE → waiting for ACK…');
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     this._emitStatus('SET_GSR_RANGE (ACK received).');
@@ -298,7 +298,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const b1 = sensors & 0xff;
     const b2 = (sensors >>> 8) & 0xff;
     const b3 = (sensors >>> 16) & 0xff;
-    const cmd = new Uint8Array([OPCODES.SET_SENSORS_CMD, b1, b2, b3]);
+    const cmd = new Uint8Array([OPCODES.SET_SENSORS_COMMAND, b1, b2, b3]);
 
     this._emitStatus(
       `SET_SENSORS_CMD → bitmask=0x${sensors.toString(16).toUpperCase().padStart(6, '0')} waiting for ACK…`,
@@ -344,7 +344,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     const lsb = divisor & 0xff;
     const msb = (divisor >> 8) & 0xff;
-    const cmd = new Uint8Array([OPCODES.SAMPLING_RATE, lsb, msb]);
+    const cmd = new Uint8Array([OPCODES.SET_SAMPLING_RATE_COMMAND, lsb, msb]);
 
     this._emitStatus(
       `Set sampling rate → ${rateHz.toFixed(3)} Hz (divisor=${divisor}) — waiting for ACK…`,
@@ -363,15 +363,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Send INQUIRY_CMD and parse the response to build the stream schema. */
   async inquiry() {
     this._emitStatus('INQUIRY_CMD → waiting for ACK then RSP…');
-    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.INQUIRY_CMD]), 1500);
+    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.INQUIRY_COMMAND]), 1500);
 
-    if (remainder && remainder[0] === OPCODES.INQUIRY_RSP) {
+    if (remainder && remainder[0] === OPCODES.INQUIRY_RESPONSE) {
       this._log('Using post-ACK remainder as response');
       const info = this._interpretInquiryResponseShimmer3R(remainder);
       this.onInquiry?.(info);
       return info;
     }
-    const rsp = await this._waitForResponse(OPCODES.INQUIRY_RSP, 2000);
+    const rsp = await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, 2000);
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
     const info = this._interpretInquiryResponseShimmer3R(rsp);
     this.onInquiry?.(info);
@@ -449,11 +449,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.START_STREAM]), 1500);
+    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.START_STREAMING_COMMAND]), 1500);
     this._streaming = true;
 
     if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA) {
+      if (remainder[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, remainder);
       } else {
         this._emitTemp(remainder);
@@ -465,7 +465,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async stopStreaming(): Promise<void> {
     this._emitStatus('STOP_STREAM → sending (no ACK wait)…');
     try {
-      await this._write(new Uint8Array([OPCODES.STOP_STREAM]));
+      await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]));
       this._emitStatus('STOP_STREAM command sent (skipped ACK wait).');
     } catch (err: unknown) {
       this._emitStatus(`STOP_STREAM write failed: ${(err as Error).message}`);
@@ -480,12 +480,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
     const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.START_BT_STREAM_SD_LOGGING]),
+      new Uint8Array([OPCODES.START_SDBT_COMMAND]),
       1500,
     );
     this._streaming = true;
     if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA) {
+      if (remainder[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, remainder);
       } else {
         this._emitTemp(remainder);
@@ -498,7 +498,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async stopStreamingAndLogging(): Promise<void> {
     this._emitStatus('STOP_BT_STREAM_SD_LOGGING → sending…');
     try {
-      await this._write(new Uint8Array([OPCODES.STOP_BT_STREAM_SD_LOGGING]));
+      await this._write(new Uint8Array([OPCODES.STOP_SDBT_COMMAND]));
     } catch (err: unknown) {
       this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${(err as Error).message}`);
     }
@@ -513,7 +513,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _interpretInquiryResponseShimmer3R(u8: Uint8Array) {
     let base = 0;
-    if (u8[0] === OPCODES.INQUIRY_RSP && u8.length >= 2) base = 1;
+    if (u8[0] === OPCODES.INQUIRY_RESPONSE && u8.length >= 2) base = 1;
 
     const adcRaw = u16le(u8, base + 0);
     const samplingRateHz = 32768 / adcRaw;
@@ -804,7 +804,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
-        if (chunk.length === 1 && chunk[0] === OPCODES.ACK) {
+        if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) {
           clearTimeout(t);
           this._offTemp(handler);
           const rem = this._lastAckRemainder;
@@ -812,7 +812,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           resolve(rem ?? null);
           return;
         }
-        if (chunk[0] === OPCODES.ACK && chunk.length > 1) {
+        if (chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && chunk.length > 1) {
           clearTimeout(t);
           this._offTemp(handler);
           resolve(chunk.slice(1));
@@ -836,7 +836,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
-        if (chunk.length === 1 && chunk[0] === OPCODES.ACK) return;
+        if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) return;
         if (chunk[0] === expectedOpcode) {
           clearTimeout(t);
           this._offTemp(handler);
