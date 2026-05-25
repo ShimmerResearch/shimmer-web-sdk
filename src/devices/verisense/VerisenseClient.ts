@@ -1,6 +1,4 @@
-/// <reference path="../../serial.d.ts" />
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
-import type { ObjectCluster } from '../../core/ObjectCluster.js';
 import {
   NUS_SERVICE,
   NUS_TX,
@@ -82,6 +80,8 @@ interface SyncSession {
   lastReply: string;
   nackCount: number;
   nackCrcCount: number;
+  maxNack: number;
+  maxCrcNack: number;
   lastRxAt: number;
   timeoutMs: number;
   bytesWritten: number;
@@ -582,6 +582,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       lastReply: 'NONE',
       nackCount: 0,
       nackCrcCount: 0,
+      maxNack,
+      maxCrcNack,
       lastRxAt: Date.now(),
       timeoutMs,
       bytesWritten: 0,
@@ -613,7 +615,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
             await this.writeBytes(DATA_NACK);
             this._sync.nackCount++;
             this._sync.lastReply = 'NACK';
-            if (this._sync.nackCount >= maxNack) throw new Error('Too many NACK timeouts');
+            if (this._sync.nackCount >= this._sync.maxNack) throw new Error('Too many NACK timeouts');
           }
           this._sync.lastRxAt = Date.now();
         } catch (e) {
@@ -852,7 +854,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       s.nackCrcCount++;
       this._clearSyncRxBuffers('crc-nack');
       await this.writeBytes(DATA_NACK);
-      if (s.nackCrcCount >= 5) this._abortSync(new Error('Too many CRC failures'));
+      if (s.nackCrcCount >= s.maxCrcNack) this._abortSync(new Error('Too many CRC failures'));
       s.onProgress?.({ payloadIndex, bytesWritten: s.bytesWritten, crcOk: false });
       return;
     }

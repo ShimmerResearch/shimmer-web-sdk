@@ -1,5 +1,4 @@
 import { SensorBase } from './SensorBase.js';
-import { OP_IDX } from '../constants.js';
 import { normalizeOperationalConfig } from '../protocol.js';
 
 export interface PPGChannelSample {

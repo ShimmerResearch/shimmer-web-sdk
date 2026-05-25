@@ -7,7 +7,6 @@ import {
   TIMESTAMP_FIELD,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
-  SHIMMER3_GSR_RESISTANCE_MIN_MAX_KOHMS,
   type TimestampFmt,
 } from './constants.js';
 import { SensorBitmapShimmer3 } from './SensorBitmap.js';
