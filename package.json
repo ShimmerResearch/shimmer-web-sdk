@@ -1,0 +1,54 @@
+{
+  "name": "@shimmerresearch/web-ble",
+  "version": "0.1.0",
+  "description": "Web Bluetooth API for Shimmer sensor devices (Shimmer3R, Verisense)",
+  "type": "module",
+  "main": "dist/shimmer-ble.umd.js",
+  "module": "dist/shimmer-ble.esm.js",
+  "types": "dist/shimmer-ble.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/shimmer-ble.esm.js",
+      "require": "./dist/shimmer-ble.umd.js",
+      "types": "./dist/shimmer-ble.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "rollup -c rollup.config.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src tests --ext .ts",
+    "docs": "typedoc --out docs src/index.ts"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "keywords": [
+    "shimmer",
+    "bluetooth",
+    "web-bluetooth",
+    "ble",
+    "sensor",
+    "imu",
+    "emg",
+    "ecg",
+    "gsr",
+    "ppg"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@types/web-bluetooth": "^0.0.21",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "rollup": "^4.14.0",
+    "rollup-plugin-dts": "^6.1.0",
+    "tslib": "^2.6.2",
+    "typedoc": "^0.25.13",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
