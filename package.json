@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Web Bluetooth API for Shimmer sensor devices (Shimmer3R, Verisense IMU/Pulse+)",
   "type": "module",
-  "main": "dist/shimmer-ble.umd.js",
+  "main": "dist/shimmer-ble.cjs",
   "module": "dist/shimmer-ble.esm.js",
   "types": "dist/shimmer-ble.d.ts",
   "publishConfig": {
@@ -20,7 +20,7 @@
   "exports": {
     ".": {
       "import": "./dist/shimmer-ble.esm.js",
-      "require": "./dist/shimmer-ble.umd.js",
+      "require": "./dist/shimmer-ble.cjs",
       "types": "./dist/shimmer-ble.d.ts"
     }
   },

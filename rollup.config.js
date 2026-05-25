@@ -14,6 +14,16 @@ export default [
     },
     plugins: [resolve(), typescript({ tsconfig: './tsconfig.json', declaration: false })],
   },
+  // CJS bundle (for Node.js / CommonJS consumers)
+  {
+    input: 'src/index.ts',
+    output: {
+      file: 'dist/shimmer-ble.cjs',
+      format: 'cjs',
+      sourcemap: true,
+    },
+    plugins: [resolve(), typescript({ tsconfig: './tsconfig.json', declaration: false })],
+  },
   // UMD bundle (for CDN / <script> tag usage)
   {
     input: 'src/index.ts',
