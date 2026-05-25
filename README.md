@@ -4,9 +4,9 @@ Web Bluetooth SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
-| Device | Class | Transport |
-|---|---|---|
-| Shimmer3R | `Shimmer3RClient` | Web Bluetooth |
+| Device                  | Class                | Transport                 |
+| ----------------------- | -------------------- | ------------------------- |
+| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth             |
 | Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial |
 
 ## Quick Start
@@ -66,17 +66,20 @@ npm test         # Vitest — runs without a browser
 ## Publishing to GitHub Packages
 
 This package is configured for GitHub Packages (`@shimmerresearch` scope).  
-Publishing is automated by `.github/workflows/publish-github-packages.yml` and runs on:
-
-- Release published
-- Manual workflow dispatch
+Release, tag, and package publishing are automated by `.github/workflows/cut-release.yml`.
 
 To cut a new release using npm-standard versioning:
 
 1. Run `.github/workflows/cut-release.yml`.
 2. Choose `major`, `minor`, or `patch`.
-3. The workflow bumps `package.json`/`package-lock.json`, creates a `vX.Y.Z` tag, and creates a GitHub Release.
-4. The publish workflow runs on that release and publishes to GitHub Packages.
+3. The workflow bumps `package.json`/`package-lock.json`, publishes to GitHub Packages, pushes the `vX.Y.Z` tag, and creates a GitHub Release.
+
+## Automatic Formatting
+
+Formatting is automated on each push by `.github/workflows/format-on-commit.yml` using Prettier.
+
+- Run locally: `npm run format`
+- Check formatting only: `npm run format:check`
 
 ## Package Layout
 
