@@ -7,7 +7,7 @@ Web Bluetooth SDK for Shimmer sensor devices.
 | Device | Class | Transport |
 |---|---|---|
 | Shimmer3R | `Shimmer3RClient` | Web Bluetooth |
-| Verisense (Pulse Plus, GSR Plus) | `VerisenseBleDevice` | Web Bluetooth, Web Serial |
+| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial |
 
 ## Quick Start
 
@@ -71,7 +71,12 @@ Publishing is automated by `.github/workflows/publish-github-packages.yml` and r
 - Release published
 - Manual workflow dispatch
 
-To publish, create a GitHub release for the tag/version you want to publish.
+To cut a new release using npm-standard versioning:
+
+1. Run `.github/workflows/cut-release.yml`.
+2. Choose `major`, `minor`, or `patch`.
+3. The workflow bumps `package.json`/`package-lock.json`, creates a `vX.Y.Z` tag, and creates a GitHub Release.
+4. The publish workflow runs on that release and publishes to GitHub Packages.
 
 ## Package Layout
 
@@ -112,4 +117,4 @@ tests/
 
 ## License
 
-MIT
+BSD-3-Clause (see `LICENSE`).
