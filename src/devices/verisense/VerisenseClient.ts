@@ -679,7 +679,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!this.tx) throw new Error('Not connected');
 
     if (opts.withResponse) {
-      await this.tx.writeValue(u8);
+      await this.tx.writeValue(toArrayBuffer(u8));
       return;
     }
 
@@ -687,9 +687,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       writeValueWithoutResponse?(v: BufferSource): Promise<void>;
     };
     if (txExt.writeValueWithoutResponse) {
-      await txExt.writeValueWithoutResponse(u8);
+      await txExt.writeValueWithoutResponse(toArrayBuffer(u8));
     } else {
-      await this.tx.writeValue(u8);
+      await this.tx.writeValue(toArrayBuffer(u8));
     }
   }
 

@@ -18,6 +18,12 @@ import {
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
 
+function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const out = new Uint8Array(u8.byteLength);
+  out.set(u8);
+  return out.buffer;
+}
+
 // ---------------------------------------------------------------------------
 // Internal schema type
 // ---------------------------------------------------------------------------
@@ -785,7 +791,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private async _write(u8: Uint8Array): Promise<void> {
     if (!this.rx) throw new Error('Not connected (RX missing)');
     this._log('Write', u8);
-    await this.rx.writeValue(u8);
+    await this.rx.writeValue(toArrayBuffer(u8));
   }
 
   private async _writeExpectingAck(
