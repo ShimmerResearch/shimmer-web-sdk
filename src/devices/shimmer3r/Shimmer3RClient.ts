@@ -17,12 +17,7 @@ import {
   getOversamplingRatioADS1292R,
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
-
-function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  const out = new Uint8Array(u8.byteLength);
-  out.set(u8);
-  return out.buffer;
-}
+import { toArrayBuffer } from '../../core/arrayBuffer.js';
 
 // ---------------------------------------------------------------------------
 // Internal schema type

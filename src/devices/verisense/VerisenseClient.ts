@@ -25,12 +25,7 @@ import { SensorGSR } from './sensors/SensorGSR.js';
 import { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
 import { SensorPPG } from './sensors/SensorPPG.js';
-
-function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  const out = new Uint8Array(u8.byteLength);
-  out.set(u8);
-  return out.buffer;
-}
+import { toArrayBuffer } from '../../core/arrayBuffer.js';
 
 // ---------------------------------------------------------------------------
 // Public types
