@@ -17,5 +17,5 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Sensor decoders: `SensorGSR`, `SensorLIS2DW12`, `SensorLSM6DS3`, `SensorPPG`.
 - Calibration utilities: `calibrateGsrDataToResistanceFromAmplifierEq`, `nudgeGsrResistance`, `getOversamplingRatioADS1292R`.
 - CRC-16/CCITT-FALSE implementation in `protocol.ts`.
-- Rollup build producing `dist/shimmer-ble.esm.js`, `dist/shimmer-ble.umd.js`, `dist/shimmer-ble.d.ts`.
+- Rollup build producing `dist/shimmer-web-sdk.esm.js`, `dist/shimmer-web-sdk.umd.js`, `dist/shimmer-web-sdk.d.ts`.
 - Vitest unit tests for calibration, protocol helpers, CRC, and sensor decoders.
