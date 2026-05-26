@@ -8,7 +8,7 @@ export default [
   {
     input: 'src/index.ts',
     output: {
-      file: 'dist/shimmer-ble.esm.js',
+      file: 'dist/shimmer-web-sdk.esm.js',
       format: 'esm',
       sourcemap: true,
     },
@@ -18,7 +18,7 @@ export default [
   {
     input: 'src/index.ts',
     output: {
-      file: 'dist/shimmer-ble.cjs',
+      file: 'dist/shimmer-web-sdk.cjs',
       format: 'cjs',
       sourcemap: true,
     },
@@ -28,7 +28,7 @@ export default [
   {
     input: 'src/index.ts',
     output: {
-      file: 'dist/shimmer-ble.umd.js',
+      file: 'dist/shimmer-web-sdk.umd.js',
       format: 'umd',
       name: 'ShimmerBLE',
       sourcemap: true,
@@ -39,7 +39,7 @@ export default [
   {
     input: 'src/index.ts',
     output: {
-      file: 'dist/shimmer-ble.d.ts',
+      file: 'dist/shimmer-web-sdk.d.ts',
       format: 'esm',
     },
     plugins: [dts()],
