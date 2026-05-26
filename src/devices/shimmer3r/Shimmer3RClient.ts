@@ -545,7 +545,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const chStart = base + 11;
     const channelIds = [...u8.slice(chStart, chStart + numCh)];
 
-    const schema = this._buildSchemaFromChannels(channelIds, 'u24');
+    const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24');
     this.schema = schema;
 
     this._log(
