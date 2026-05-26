@@ -25,6 +25,7 @@ import { SensorGSR } from './sensors/SensorGSR.js';
 import { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
 import { SensorPPG } from './sensors/SensorPPG.js';
+import { toArrayBuffer } from '../../core/arrayBuffer.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -270,8 +271,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this.rx = await this.service.getCharacteristic(NUS_RX);
 
     await this.rx.startNotifications();
-    this.rx.addEventListener('characteristicvaluechanged', (ev) => {
-      const dv = (ev as any).target.value as DataView;
+    this.rx.addEventListener('characteristicvaluechanged', (ev: Event) => {
+      const dv = (ev.target as BluetoothRemoteGATTCharacteristic | null)?.value;
+      if (!dv) return;
       const bytes = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
       this._feedStreamBytes(bytes);
     });
@@ -639,7 +641,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       await (this._loggedChain ?? Promise.resolve());
 
       if (!fileHandle) {
-        const blob = new Blob(chunks, { type: 'application/octet-stream' });
+        const blob = new Blob(chunks.map(toArrayBuffer), { type: 'application/octet-stream' });
         return { ...result, blob };
       }
 
@@ -672,7 +674,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!this.tx) throw new Error('Not connected');
 
     if (opts.withResponse) {
-      await this.tx.writeValue(u8);
+      await this.tx.writeValue(toArrayBuffer(u8));
       return;
     }
 
@@ -680,9 +682,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       writeValueWithoutResponse?(v: BufferSource): Promise<void>;
     };
     if (txExt.writeValueWithoutResponse) {
-      await txExt.writeValueWithoutResponse(u8);
+      await txExt.writeValueWithoutResponse(toArrayBuffer(u8));
     } else {
-      await this.tx.writeValue(u8);
+      await this.tx.writeValue(toArrayBuffer(u8));
     }
   }
 
@@ -875,7 +877,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     }
 
     if (s.writable) {
-      await s.writable.write(payloadU8);
+      await s.writable.write(toArrayBuffer(payloadU8));
     } else {
       s.chunks.push(payloadU8.slice());
     }

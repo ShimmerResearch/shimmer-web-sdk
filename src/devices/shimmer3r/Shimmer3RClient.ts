@@ -17,6 +17,7 @@ import {
   getOversamplingRatioADS1292R,
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
+import { toArrayBuffer } from '../../core/arrayBuffer.js';
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -785,7 +786,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private async _write(u8: Uint8Array): Promise<void> {
     if (!this.rx) throw new Error('Not connected (RX missing)');
     this._log('Write', u8);
-    await this.rx.writeValue(u8);
+    await this.rx.writeValue(toArrayBuffer(u8));
   }
 
   private async _writeExpectingAck(
