@@ -32,6 +32,6 @@ jobs:
         run: npm run format
 
       - name: Auto-commit formatting changes
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: 'style: auto-format source files'
