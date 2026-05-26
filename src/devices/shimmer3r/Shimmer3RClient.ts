@@ -184,7 +184,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._log('Notify len=', chunk.length, 'data=', chunk);
 
     // 1) Consume an expected ACK
-    if (chunk.length >= 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && (this._expectingAck ?? 0) > 0) {
+    if (
+      chunk.length >= 1 &&
+      chunk[0] === OPCODES.ACK_COMMAND_PROCESSED &&
+      (this._expectingAck ?? 0) > 0
+    ) {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
 
@@ -325,9 +329,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Set the sampling rate.
    * The firmware expects a 16-bit divisor: `divisor = floor(32768 / rateHz)`.
    */
-  async setSamplingRate(
-    rateHz: number,
-  ): Promise<{
+  async setSamplingRate(rateHz: number): Promise<{
     requestedHz: number;
     appliedHz: number;
     divisor: number;
@@ -362,7 +364,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Send INQUIRY_CMD and parse the response to build the stream schema. */
   async inquiry() {
     this._emitStatus('INQUIRY_CMD → waiting for ACK then RSP…');
-    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.INQUIRY_COMMAND]), 1500);
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.INQUIRY_COMMAND]),
+      1500,
+    );
 
     if (remainder && remainder[0] === OPCODES.INQUIRY_RESPONSE) {
       this._log('Using post-ACK remainder as response');
@@ -448,7 +453,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(new Uint8Array([OPCODES.START_STREAMING_COMMAND]), 1500);
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
+      1500,
+    );
     this._streaming = true;
 
     if (remainder?.length) {

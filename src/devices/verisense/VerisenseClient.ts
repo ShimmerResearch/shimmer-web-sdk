@@ -615,7 +615,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
             await this.writeBytes(DATA_NACK);
             this._sync.nackCount++;
             this._sync.lastReply = 'NACK';
-            if (this._sync.nackCount >= this._sync.maxNack) throw new Error('Too many NACK timeouts');
+            if (this._sync.nackCount >= this._sync.maxNack)
+              throw new Error('Too many NACK timeouts');
           }
           this._sync.lastRxAt = Date.now();
         } catch (e) {
