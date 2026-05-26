@@ -1,5 +1,5 @@
 /**
- * @shimmerresearch/web-ble
+ * @shimmerresearch/shimmer-web-sdk
  *
  * Web Bluetooth SDK for Shimmer sensor devices.
  *
