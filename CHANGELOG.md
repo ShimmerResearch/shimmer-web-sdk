@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@shimmerresearch/web-ble` will be documented here.
+All notable changes to `@shimmerresearch/shimmer-web-sdk` will be documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
