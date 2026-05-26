@@ -625,18 +625,25 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       Math.max(250, Math.floor(timeoutMs / 2)),
     );
 
-    await this.writeBytes(READ_DATA_REQ, { withResponse: true });
-    const result = await donePromise;
-    await (this._loggedChain ?? Promise.resolve());
+    try {
+      await this.writeBytes(READ_DATA_REQ, { withResponse: true });
+      const result = await donePromise;
+      await (this._loggedChain ?? Promise.resolve());
 
-    if (writable) await writable.close();
+      if (!fileHandle) {
+        const blob = new Blob(chunks, { type: 'application/octet-stream' });
+        return { ...result, blob };
+      }
 
-    if (!fileHandle) {
-      const blob = new Blob(chunks, { type: 'application/octet-stream' });
-      return { ...result, blob };
+      return result;
+    } finally {
+      if (sync.timer) {
+        clearInterval(sync.timer);
+        sync.timer = null;
+      }
+
+      if (writable) await writable.close();
     }
-
-    return result;
   }
 
   // ---------------------------------------------------------------------------
