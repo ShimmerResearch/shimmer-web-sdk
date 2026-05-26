@@ -1,6 +1,6 @@
 # @shimmerresearch/shimmer-web-sdk
 
-Web Bluetooth SDK for Shimmer sensor devices.
+Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
