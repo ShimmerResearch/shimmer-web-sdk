@@ -1,6 +1,6 @@
 {
   "name": "@shimmerresearch/shimmer-web-sdk",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Web Bluetooth and Web Serial API for Shimmer sensor devices (Shimmer3R, Verisense IMU/Pulse+)",
   "type": "module",
   "main": "dist/shimmer-web-sdk.cjs",
