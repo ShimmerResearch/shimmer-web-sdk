@@ -601,26 +601,33 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       sync.reject = reject;
     });
 
+    let watchdogRunning = false;
     sync.timer = setInterval(
       async () => {
-        if (!this._sync?.receiving) return;
-        const age = Date.now() - this._sync.lastRxAt;
-        if (age < this._sync.timeoutMs) return;
-
+        if (watchdogRunning) return;
+        watchdogRunning = true;
         try {
-          if (this._sync.lastReply === 'NONE') {
-            await this.writeBytes(READ_DATA_REQ, { withResponse: true });
-          } else {
-            this._clearSyncRxBuffers('timeout-nack');
-            await this.writeBytes(DATA_NACK);
-            this._sync.nackCount++;
-            this._sync.lastReply = 'NACK';
-            if (this._sync.nackCount >= this._sync.maxNack)
-              throw new Error('Too many NACK timeouts');
+          if (!this._sync?.receiving) return;
+          const age = Date.now() - this._sync.lastRxAt;
+          if (age < this._sync.timeoutMs) return;
+
+          try {
+            if (this._sync.lastReply === 'NONE') {
+              await this.writeBytes(READ_DATA_REQ, { withResponse: true });
+            } else {
+              this._clearSyncRxBuffers('timeout-nack');
+              await this.writeBytes(DATA_NACK);
+              this._sync.nackCount++;
+              this._sync.lastReply = 'NACK';
+              if (this._sync.nackCount >= this._sync.maxNack)
+                throw new Error('Too many NACK timeouts');
+            }
+            this._sync.lastRxAt = Date.now();
+          } catch (e) {
+            this._abortSync(e instanceof Error ? e : new Error(String(e)));
           }
-          this._sync.lastRxAt = Date.now();
-        } catch (e) {
-          this._abortSync(e instanceof Error ? e : new Error(String(e)));
+        } finally {
+          watchdogRunning = false;
         }
       },
       Math.max(250, Math.floor(timeoutMs / 2)),
