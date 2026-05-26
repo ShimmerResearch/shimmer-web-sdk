@@ -57,6 +57,32 @@ npm install
 npm run build    # produces dist/shimmer-web-sdk.esm.js, .umd.js, .d.ts
 ```
 
+### Build Helper Script (for consumer repos)
+
+Consumer repos can call this SDK-owned helper to keep build logic centralized:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-local-sdk.ps1
+```
+
+First run only (installs dependencies):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-local-sdk.ps1 -InstallDeps
+```
+
+Build from a specific tag version (for example `v0.1.7`) without switching your current checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-local-sdk.ps1 -Version 0.1.7
+```
+
+Build from the latest `v*` tag:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-local-sdk.ps1 -Latest
+```
+
 ## Testing
 
 ```bash
