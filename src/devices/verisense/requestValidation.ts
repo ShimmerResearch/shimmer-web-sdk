@@ -33,7 +33,17 @@ export function validatePendingResponse(
     );
   }
 
-  if (msg.property !== pending.expectedProperty) {
+  if (pending.acceptedProperties?.size) {
+    if (!pending.acceptedProperties.has(msg.property)) {
+      return new Error(
+        `Unexpected response property 0x${msg.property.toString(16)} (expected one of ${Array.from(
+          pending.acceptedProperties,
+        )
+          .map((p) => `0x${p.toString(16)}`)
+          .join(', ')})`,
+      );
+    }
+  } else if (msg.property !== pending.expectedProperty) {
     return new Error(
       `Unexpected response property 0x${msg.property.toString(16)} (expected 0x${pending.expectedProperty.toString(16)})`,
     );

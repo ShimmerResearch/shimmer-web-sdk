@@ -101,6 +101,8 @@ export type {
  * - `"commandPayload"` — `{ payload: Uint8Array }`
  */
 export class VerisenseBleDevice extends BaseShimmerClient {
+  private static readonly MAX_FRAME_PAYLOAD_LEN = 4096;
+  private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
   static readonly NUS_TX = NUS_TX;
@@ -555,6 +557,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const sync: SyncSession = {
       receiving: true,
       lastReply: 'NONE',
+      emptyAckCount: 0,
       nackCount: 0,
       nackCrcCount: 0,
       maxNack,
@@ -671,6 +674,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     payloadBytes: number[] | Uint8Array = [],
     timeoutMs = 3000,
     acceptedCommands?: ReadonlySet<AsmCommand>,
+    acceptedProperties?: ReadonlySet<AsmProperty>,
   ): Promise<VerisenseCommandResponse> {
     if (this._pending) throw new Error('A request is already pending');
     this._mode = 'command';
@@ -688,6 +692,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       this._pending = {
         expectedProperty: property,
         acceptedCommands: accepted,
+        acceptedProperties,
         resolve: (resp) => {
           clearTimeout(t);
           this._pending = null;
@@ -836,36 +841,115 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     return payload;
   }
 
+  private _debugIndexArgs(index: number): number[] {
+    const i = Math.max(0, Math.min(0xff, Math.trunc(index)));
+    return i > 0 ? [i] : [];
+  }
+
+  private _waitForDebugResponse(timeoutMs = 3000): Promise<{ payload: Uint8Array }> {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let off: (() => void) | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (off) {
+          try {
+            off();
+          } catch {
+            /* ignore */
+          }
+          off = null;
+        }
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      off = this.on<{
+        header: number;
+        command: AsmCommand;
+        property: AsmProperty;
+        payload: Uint8Array;
+      }>('commandPayload', (evt) => {
+        if (done || !evt) return;
+        if (evt.command !== ASM_COMMAND.RESPONSE || evt.property !== ASM_PROPERTY.DEBUG_COMMAND) return;
+        done = true;
+        cleanup();
+        resolve({ payload: evt.payload ?? new Uint8Array(0) });
+      });
+
+      timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new Error('Debug response timeout'));
+      }, timeoutMs);
+    });
+  }
+
   async readDebugCommand(
     debugId: DebugCommandId,
     args: Uint8Array | number[] = [],
+    timeoutMs = 3000,
   ): Promise<{ payload: Uint8Array }> {
-    const rsp = await this._requestByCommand(
-      ASM_COMMAND.READ,
-      ASM_PROPERTY.DEBUG_COMMAND,
-      this._buildDebugPayload(debugId, args),
-    );
-    return { payload: rsp.payload };
+    const payload = this._buildDebugPayload(debugId, args);
+    const debugAcceptedProps = new Set<AsmProperty>([ASM_PROPERTY.DEBUG_COMMAND, 0 as AsmProperty]);
+
+    // Python flow: WRITE DEBUG command, optional empty/transient frame, then RESPONSE DEBUG payload.
+    const responsePromise = this._waitForDebugResponse(timeoutMs);
+    try {
+      await this._requestByCommand(
+        ASM_COMMAND.WRITE,
+        ASM_PROPERTY.DEBUG_COMMAND,
+        payload,
+        timeoutMs,
+        undefined,
+        debugAcceptedProps,
+      );
+      return await responsePromise;
+    } catch (e) {
+      void responsePromise.catch(() => {});
+      const msg = e instanceof Error ? e.message : String(e);
+      const isDebugNack = /NACK command=0x(?:50|60|70) property=0x9/i.test(msg);
+      const isDebugAckPropertyZero = /Unexpected response property 0x0 \(expected 0x9\)/i.test(msg);
+      if (!isDebugNack && !isDebugAckPropertyZero) throw e;
+
+      const rsp = await this._requestByCommand(
+        ASM_COMMAND.READ,
+        ASM_PROPERTY.DEBUG_COMMAND,
+        payload,
+        timeoutMs,
+      );
+      return { payload: rsp.payload };
+    }
   }
 
   async sendDebugCommand(
     debugId: DebugCommandId,
     args: Uint8Array | number[] = [],
+    timeoutMs = 3000,
   ): Promise<{ payload: Uint8Array }> {
     const rsp = await this._requestByCommand(
       ASM_COMMAND.WRITE,
       ASM_PROPERTY.DEBUG_COMMAND,
       this._buildDebugPayload(debugId, args),
+      timeoutMs,
     );
     return { payload: rsp.payload };
   }
 
-  async readFlashLookupTable(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ, [index & 0xff]);
+  async readFlashLookupTable(index = 0, timeoutMs = 12000): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(
+      DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ,
+      this._debugIndexArgs(index),
+      timeoutMs,
+    );
   }
 
   async readRealWorldClockScheduler(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.RWC_SCHEDULER_READ, [index & 0xff]);
+    return this.readDebugCommand(DEBUG_COMMAND_ID.RWC_SCHEDULER_READ, this._debugIndexArgs(index));
   }
 
   async readRealWorldClockSchedulerParsed(index = 0): Promise<VerisenseSchedulerDebugPayload> {
@@ -874,11 +958,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async loadTestLookupTable(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.LOAD_TEST_LOOKUP_TABLE, [index & 0xff]);
+    return this.readDebugCommand(DEBUG_COMMAND_ID.LOAD_TEST_LOOKUP_TABLE, this._debugIndexArgs(index));
   }
 
   async checkPayloadCrcErrors(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.CHECK_PAYLOAD_CRC_ERRORS, [index & 0xff]);
+    return this.readDebugCommand(DEBUG_COMMAND_ID.CHECK_PAYLOAD_CRC_ERRORS, this._debugIndexArgs(index));
   }
 
   async checkPayloadCrcErrorsParsed(index = 0): Promise<number[]> {
@@ -887,7 +971,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async readEventLog(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_EVENT_LOG, [index & 0xff]);
+    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_EVENT_LOG, this._debugIndexArgs(index));
   }
 
   async readEventLogParsed(index = 0): Promise<VerisenseEventLogEntry[]> {
@@ -896,7 +980,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async readRecordBufferDetails(index = 0): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_RECORD_BUFFER_DETAILS, [index & 0xff]);
+    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_RECORD_BUFFER_DETAILS, this._debugIndexArgs(index));
   }
 
   async readRecordBufferDetailsParsed(index = 0): Promise<VerisenseRecordBufferDetails[]> {
@@ -916,8 +1000,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.sendDebugCommand(DEBUG_COMMAND_ID.CLEAR_PENDING_EVENTS);
   }
 
-  async eraseAllLoggedData(): Promise<void> {
-    await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_FLASH_AND_LOOKUP_TABLE);
+  async eraseAllLoggedData(timeoutMs = 12000): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_FLASH_AND_LOOKUP_TABLE, [], timeoutMs);
   }
 
   async testDataTransferLoop(loopCount: number): Promise<void> {
@@ -1094,6 +1178,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     }
 
     s.bytesWritten += payloadU8.length;
+    s.emptyAckCount = 0;
 
     s.lastReply = 'ACK';
     s.nackCount = 0;
@@ -1121,15 +1206,61 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (this.debugSync) console.warn('[sync] cleared RX buffers', { reason });
   }
 
+  private _isPlausibleHeaderByte(hdr: number): boolean {
+    const command = hdr & 0xf0;
+    const property = hdr & 0x0f;
+
+    const validCommand =
+      command === ASM_COMMAND.READ ||
+      command === ASM_COMMAND.WRITE ||
+      command === ASM_COMMAND.RESPONSE ||
+      command === ASM_COMMAND.ACK ||
+      command === ASM_COMMAND.NACK_BAD_HEADER_COMMAND ||
+      command === ASM_COMMAND.NACK_BAD_HEADER_PROPERTY ||
+      command === ASM_COMMAND.NACK_GENERIC ||
+      command === ASM_COMMAND.ACK_NEXT_STAGE;
+
+    if (!validCommand) return false;
+
+    // Known properties are 0x01..0x0C; keep 0x00 permissive for transient frames.
+    return property === 0 || (property >= ASM_PROPERTY.STATUS1 && property <= ASM_PROPERTY.STATUS2);
+  }
+
+  private _isPlausibleFrameStart(hdr: number, len: number): boolean {
+    if (!this._isPlausibleHeaderByte(hdr)) return false;
+
+    // Debug responses may carry large blobs (for example flash lookup tables),
+    // while normal properties and streaming/logged payloads should stay bounded.
+    const isPendingDebugCommand =
+      this._mode === 'command' && this._pending?.expectedProperty === ASM_PROPERTY.DEBUG_COMMAND;
+    const maxLen = isPendingDebugCommand
+      ? VerisenseBleDevice.MAX_DEBUG_FRAME_PAYLOAD_LEN
+      : VerisenseBleDevice.MAX_FRAME_PAYLOAD_LEN;
+    return len <= maxLen;
+  }
+
   private _resolvePendingCommand(msg: VerisenseMessage): void {
     const pending = this._pending;
-    this._pending = null;
-    if (this._mode === 'command') this._mode = 'idle';
-
     if (pending) {
+      // Some firmware/transport paths emit a transient empty 0x00/0x00 frame
+      // immediately before the real command response; ignore and keep waiting.
+      if (msg.command === (0 as AsmCommand) && msg.property === (0 as AsmProperty) && msg.payload.length === 0) {
+        return;
+      }
+
       const err = validatePendingResponse(pending, msg);
-      if (err) pending.reject(err);
-      else pending.resolve(toCommandResponse(msg));
+      if (err) {
+        this._pending = null;
+        if (this._mode === 'command') this._mode = 'idle';
+        pending.reject(err);
+      } else {
+        this._pending = null;
+        if (this._mode === 'command') this._mode = 'idle';
+        pending.resolve(toCommandResponse(msg));
+      }
+    } else {
+      this._pending = null;
+      if (this._mode === 'command') this._mode = 'idle';
     }
 
     this.emit('commandPayload', {
@@ -1151,6 +1282,18 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const hdr = this._rxStreamBuf[0];
       const len = (this._rxStreamBuf[1] | (this._rxStreamBuf[2] << 8)) >>> 0;
 
+      if (!this._isPlausibleFrameStart(hdr, len)) {
+        if (this.debugSync) {
+          console.warn('[rx] resync: dropping byte', {
+            dropped: hdr,
+            nextLen: len,
+            bufLen: this._rxStreamBuf.length,
+          });
+        }
+        this._rxStreamBuf = this._rxStreamBuf.slice(1);
+        continue;
+      }
+
       if (len === 0) {
         const header = hdr & 0xff;
         const decodedHeader = parseHeader(header);
@@ -1163,6 +1306,18 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         };
         this._rxStreamBuf = this._rxStreamBuf.slice(3);
         if (this._mode === 'logged' && hdr === buildHeader(ASM_COMMAND.ACK, ASM_PROPERTY.DATA)) {
+          const s = this._sync;
+          if (s && s.bytesWritten === 0 && s.emptyAckCount < 6) {
+            s.emptyAckCount++;
+            if (this.debugSync) console.log('[sync] empty ACK before payload; requesting next DATA chunk.');
+            void this
+              .writeBytes(buildMessage(ASM_COMMAND.READ, ASM_PROPERTY.DATA), {
+                withResponse: true,
+              })
+              .catch((e: Error) => this._abortSync(e));
+            continue;
+          }
+
           if (this.debugSync) console.log('[sync] EOS received. Finishing.');
           this._finishSync();
           continue;

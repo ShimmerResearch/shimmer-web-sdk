@@ -177,6 +177,12 @@ export interface VerisenseStatusPayload {
   memoryFreeKb: number;
   memoryCapacityKb: number | null;
   memoryUsedKb: number | null;
+  /** kB of FULL (ready-to-sync) flash banks. Only populated for payloads >= 57 bytes. */
+  memoryFullBanksKb: number | null;
+  /** kB of 2DEL (partially-deleted) flash banks. Only populated for payloads >= 57 bytes. */
+  memoryTwoDelBanksKb: number | null;
+  /** kB of BAD flash banks. Only populated for payloads >= 57 bytes. */
+  memoryBadBanksKb: number | null;
   statusFlags: VerisenseStatusFlags | null;
   batteryFallCounter: number | null;
 }
@@ -533,6 +539,13 @@ export function parseStatusPayload(
   const memoryCapacityKb = hasExtendedCapacity ? u32le_at(response, 60) : null;
   const memoryUsedKb = memoryCapacityKb == null ? null : Math.max(0, memoryCapacityKb - memoryFreeKb);
 
+  // Bank breakdown: FULL=syncable data, 2DEL=partially-deleted, BAD=unusable flash.
+  // Present in payloads >= 57 bytes (tick-capable extended format).
+  const hasBankData = response.length >= 57;
+  const memoryFullBanksKb = hasBankData ? u32le_at(response, 45) : null;
+  const memoryTwoDelBanksKb = hasBankData ? u32le_at(response, 49) : null;
+  const memoryBadBanksKb = hasBankData ? u32le_at(response, 53) : null;
+
   const batteryFallCounter = response.length >= 26 ? u16le_at(response, 24) : null;
 
   let statusFlags: VerisenseStatusFlags | null = null;
@@ -561,6 +574,9 @@ export function parseStatusPayload(
     memoryFreeKb,
     memoryCapacityKb,
     memoryUsedKb,
+    memoryFullBanksKb,
+    memoryTwoDelBanksKb,
+    memoryBadBanksKb,
     statusFlags,
     batteryFallCounter,
   };

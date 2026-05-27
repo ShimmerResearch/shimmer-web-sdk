@@ -59,6 +59,7 @@ export interface VerisenseCommandResponse {
 export interface PendingCommandRequest {
   expectedProperty: AsmProperty;
   acceptedCommands: ReadonlySet<AsmCommand>;
+  acceptedProperties?: ReadonlySet<AsmProperty>;
   resolve: (v: VerisenseCommandResponse) => void;
   reject: (e: Error) => void;
 }
@@ -66,6 +67,7 @@ export interface PendingCommandRequest {
 export interface SyncSession {
   receiving: boolean;
   lastReply: string;
+  emptyAckCount: number;
   nackCount: number;
   nackCrcCount: number;
   maxNack: number;
