@@ -102,7 +102,9 @@ export function normalizeBytePayload(
  * followed by the decimal value of the final byte padded to 3 digits.
  */
 export function computeVerisensePairingPin(uniqueId: string): string {
-  const normalized = String(uniqueId ?? '').trim().replace(/^Verisense-/i, '');
+  const normalized = String(uniqueId ?? '')
+    .trim()
+    .replace(/^Verisense-/i, '');
   if (!/^[0-9a-fA-F]{8,}$/.test(normalized)) {
     throw new Error('computeVerisensePairingPin: uniqueId must be a hex identifier string');
   }
@@ -392,7 +394,9 @@ export function buildProductionConfigPayload(opts: ProductionConfigBuildOptions)
   const mo = String(opts.manufacturingOrderNumberHex ?? '').trim();
   const mac = String(opts.macIdHex ?? '').trim();
   if (!/^[0-9a-fA-F]{8}$/.test(mo)) {
-    throw new Error('buildProductionConfigPayload: manufacturingOrderNumberHex must be 8 hex chars');
+    throw new Error(
+      'buildProductionConfigPayload: manufacturingOrderNumberHex must be 8 hex chars',
+    );
   }
   if (!/^[0-9a-fA-F]{4}$/.test(mac)) {
     throw new Error('buildProductionConfigPayload: macIdHex must be 4 hex chars');
@@ -473,7 +477,8 @@ export function parseProductionConfigPayloadFull(response: Uint8Array): Producti
 
   const passkeyId = response.length >= 17 ? decodeAsciiTrimFF(response.slice(15, 17)) : '';
   const passkey = response.length >= 23 ? decodeAsciiTrimFF(response.slice(17, 23)) : '';
-  const advertisingNamePrefix = response.length >= 55 ? decodeAsciiTrimFF(response.slice(23, 55)) : '';
+  const advertisingNamePrefix =
+    response.length >= 55 ? decodeAsciiTrimFF(response.slice(23, 55)) : '';
   const dfuEnabled = response.length >= 56 ? !!(response[55] & PROD_CONFIG_FLAG_DFU_ENABLED) : true;
 
   return {
@@ -518,26 +523,33 @@ export function parseStatusPayload(
   const hasExtendedCapacity = response.length >= 65;
 
   const statusTimestampSeconds = hasTickFields
-    ? asmRtcBytesToUnixSeconds(new Uint8Array([...response.slice(6, 10), ...response.slice(34, 37)]))
+    ? asmRtcBytesToUnixSeconds(
+        new Uint8Array([...response.slice(6, 10), ...response.slice(34, 37)]),
+      )
     : u32le_at(response, 6) * 60;
 
   const batteryMilliVolts = u16le_at(response, 10);
   const batteryPercent = response[12] ?? 0;
 
   const lastOkTransferSeconds = hasTickFields
-    ? asmRtcBytesToUnixSeconds(new Uint8Array([...response.slice(13, 17), ...response.slice(37, 40)]))
+    ? asmRtcBytesToUnixSeconds(
+        new Uint8Array([...response.slice(13, 17), ...response.slice(37, 40)]),
+      )
     : u32le_at(response, 13) * 60;
 
   const lastFailTransferSeconds = hasTickFields
-    ? asmRtcBytesToUnixSeconds(new Uint8Array([...response.slice(17, 21), ...response.slice(40, 43)]))
+    ? asmRtcBytesToUnixSeconds(
+        new Uint8Array([...response.slice(17, 21), ...response.slice(40, 43)]),
+      )
     : u32le_at(response, 17) * 60;
 
   const memoryFreeKb = hasExtendedCapacity
-    ? ((response[21] | (response[22] << 8) | (response[23] << 16) | (response[57] << 24)) >>> 0)
-    : ((response[21] | (response[22] << 8) | (response[23] << 16)) >>> 0);
+    ? (response[21] | (response[22] << 8) | (response[23] << 16) | (response[57] << 24)) >>> 0
+    : (response[21] | (response[22] << 8) | (response[23] << 16)) >>> 0;
 
   const memoryCapacityKb = hasExtendedCapacity ? u32le_at(response, 60) : null;
-  const memoryUsedKb = memoryCapacityKb == null ? null : Math.max(0, memoryCapacityKb - memoryFreeKb);
+  const memoryUsedKb =
+    memoryCapacityKb == null ? null : Math.max(0, memoryCapacityKb - memoryFreeKb);
 
   // Bank breakdown: FULL=syncable data, 2DEL=partially-deleted, BAD=unusable flash.
   // Present in payloads >= 57 bytes (tick-capable extended format).
@@ -703,7 +715,9 @@ export function parseEventLogPayload(payload: Uint8Array): VerisenseEventLogEntr
 }
 
 /** Parse record-buffer details payload (26-byte current layout, 19-byte legacy layout). */
-export function parseRecordBufferDetailsPayload(payload: Uint8Array): VerisenseRecordBufferDetails[] {
+export function parseRecordBufferDetailsPayload(
+  payload: Uint8Array,
+): VerisenseRecordBufferDetails[] {
   const bytesPerBuffer = payload.length % 26 === 0 ? 26 : payload.length % 19 === 0 ? 19 : 0;
   if (!bytesPerBuffer) {
     throw new Error('parseRecordBufferDetailsPayload: unsupported payload length');

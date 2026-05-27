@@ -38,7 +38,9 @@ describe('Verisense protocol header helpers', () => {
 
 describe('Verisense protocol message helpers', () => {
   it('builds and parses a payload-bearing message', () => {
-    const msg = buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, [DEBUG_COMMAND_ID.CLEAR_PENDING_EVENTS]);
+    const msg = buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, [
+      DEBUG_COMMAND_ID.CLEAR_PENDING_EVENTS,
+    ]);
     expect(msg).toEqual(new Uint8Array([0x29, 0x01, 0x00, 0x09]));
 
     const parsed = parseMessage(msg);
@@ -60,11 +62,7 @@ describe('Verisense protocol message helpers', () => {
 
   it('parses pending-events payload into property IDs', () => {
     const pending = parsePendingEvents(new Uint8Array([0x01, 0x02, 0x05]));
-    expect(pending).toEqual([
-      ASM_PROPERTY.STATUS1,
-      ASM_PROPERTY.DATA,
-      ASM_PROPERTY.TIME,
-    ]);
+    expect(pending).toEqual([ASM_PROPERTY.STATUS1, ASM_PROPERTY.DATA, ASM_PROPERTY.TIME]);
   });
 });
 
