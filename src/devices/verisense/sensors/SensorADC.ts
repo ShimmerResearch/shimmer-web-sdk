@@ -3,7 +3,7 @@ import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
 import { normalizeOperationalConfig } from '../protocol.js';
 
-export interface GSRSample {
+export interface ADCGSRSample {
   raw: number;
   adc12: number;
   range: number;
@@ -13,28 +13,35 @@ export interface GSRSample {
   connectivity: 'Connected' | 'Disconnected';
 }
 
-export interface GSRBatterySample {
-  raw: number;
+export interface ADCBatterySample {
+  /** Full 16-bit packed ADC/flags word from payload. */
+  raw16: number;
+  /** 12-bit ADC value extracted from `raw16`. */
+  adc12: number;
   mV: number;
+  usbPluggedIn: boolean;
+  chargerStatusBits: number;
+  chargerStatus: string;
 }
 
-export interface GSRPayloadSample {
-  gsr: GSRSample | null;
-  batt: GSRBatterySample | null;
+export interface ADCPayloadSample {
+  gsr: ADCGSRSample | null;
+  batt: ADCBatterySample | null;
 }
 
 type HardwareIdentifier = 'VERISENSE_PULSE_PLUS' | 'VERISENSE_GSR_PLUS' | string;
 
 /**
- * Decoder for the GSR (galvanic skin response) sensor (Verisense sensor id = 1).
+ * Decoder for grouped ADC channels (Verisense sensor id = 1).
  *
+ * Includes GSR plus battery/ADC channels carried in the same packet source.
  * Implements C# `SensorGSR.cs` including:
  * - Per-hardware reference resistor selection (SR68 vs Shimmer3 resistors).
  * - Auto-range decoding from the raw ADC value's upper bits.
  * - Range-3 clamping threshold that differs by hardware.
- * - Conductance (µS) output with connectivity detection.
+ * - Conductance (uS) output with connectivity detection.
  */
-export class SensorGSR extends SensorBase {
+export class SensorADC extends SensorBase {
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
   readonly GSR_UNCAL_LIMIT_RANGE3_SR68 = 1134;
   readonly GSR_UNCAL_LIMIT_RANGE3_SR62 = 683;
@@ -44,7 +51,7 @@ export class SensorGSR extends SensorBase {
 
   gsrEnabled = true;
   battEnabled = false;
-  /** GSR range 0–3 (fixed) or 4 (auto-range). */
+  /** GSR range 0-3 (fixed) or 4 (auto-range). */
   gsrRangeSetting = 4;
   hardwareIdentifier: HardwareIdentifier = 'VERISENSE_PULSE_PLUS';
 
@@ -65,26 +72,6 @@ export class SensorGSR extends SensorBase {
     this.gsrRangeSetting = v;
   }
 
-  // Convenience aliases
-  setGSREnabled(
-    enabled: boolean,
-    opConfigBytes?: Uint8Array | null,
-  ): Uint8Array | Record<string, boolean> {
-    return this.setEnabled(enabled, opConfigBytes);
-  }
-
-  setBattEnabled(
-    enabled: boolean,
-    opConfigBytes?: Uint8Array | null,
-  ): Uint8Array | Record<string, boolean> {
-    return this.setEnabled({ batt: enabled }, opConfigBytes);
-  }
-
-  /**
-   * Dual-mode setter:
-   * - If `opConfigBytes` is provided: returns a new Uint8Array with the enable bits patched.
-   * - Otherwise: updates local decoder flags only.
-   */
   setEnabled(
     arg1: boolean | { gsr?: boolean; batt?: boolean },
     opConfigBytes?: Uint8Array | null,
@@ -123,8 +110,6 @@ export class SensorGSR extends SensorBase {
     return out;
   }
 
-  // --- Operational config patch helpers ---
-
   patchGsrRange(rangeCfg: number, op: Uint8Array): Uint8Array {
     const out = new Uint8Array(op);
     const i = OP_IDX.ADC_CHANNEL_SETTINGS_1;
@@ -145,8 +130,6 @@ export class SensorGSR extends SensorBase {
     out[i] = (out[i] & 0b00001111) | ((overCfg & 0x0f) << 4);
     return out;
   }
-
-  // --- Calibration ---
 
   calibrateAdcToVolts(uncal12bit: number): number {
     const adcRange = 2 ** 12 - 1;
@@ -183,15 +166,15 @@ export class SensorGSR extends SensorBase {
     return 1000.0 / kOhms;
   }
 
-  override parsePayload(sensorPayloadBytes: Uint8Array): GSRPayloadSample[] {
+  override parsePayload(sensorPayloadBytes: Uint8Array): ADCPayloadSample[] {
     const bytesPerSample = this.gsrEnabled && this.battEnabled ? 4 : 2;
     const n = Math.floor(sensorPayloadBytes.length / bytesPerSample);
-    const out: GSRPayloadSample[] = [];
+    const out: ADCPayloadSample[] = [];
 
     for (let i = 0; i < n; i++) {
       const base = i * bytesPerSample;
-      let batt: GSRBatterySample | null = null;
-      let gsr: GSRSample | null = null;
+      let batt: ADCBatterySample | null = null;
+      let gsr: ADCGSRSample | null = null;
 
       const gsrStart = this.battEnabled && this.gsrEnabled ? 2 : 0;
 
@@ -220,9 +203,31 @@ export class SensorGSR extends SensorBase {
       }
 
       if (this.battEnabled) {
-        const braw = i16le(sensorPayloadBytes, base) & 0x0fff;
-        const mv = this.calibrateAdcToVolts(braw) * 1000.0;
-        batt = { raw: braw, mV: mv };
+        const raw16 = i16le(sensorPayloadBytes, base) & 0xffff;
+        const adc12 = raw16 & 0x0fff;
+        const usbPluggedIn = ((raw16 >> 15) & 0x01) === 1;
+        const chargerStatusBits = (raw16 >> 13) & 0x03;
+
+        let mv = this.calibrateAdcToVolts(adc12) * 1000.0;
+        if (this.hardwareIdentifier === 'VERISENSE_GSR_PLUS') {
+          mv *= 1.988;
+        }
+
+        const chargerStatusMap: Record<number, string> = {
+          0: 'Power-Down/Suspended',
+          1: 'Charging',
+          2: 'Charging Complete',
+          3: 'Bad Battery/LDO',
+        };
+
+        batt = {
+          raw16,
+          adc12,
+          mV: mv,
+          usbPluggedIn,
+          chargerStatusBits,
+          chargerStatus: chargerStatusMap[chargerStatusBits] ?? 'Unknown',
+        };
       }
 
       out.push({ gsr, batt });

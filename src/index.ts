@@ -56,24 +56,80 @@ export type {
   StreamPacket,
   TransferLoggedDataOptions,
   TransferLoggedDataResult,
+  VerisenseCommandResponse,
 } from './devices/verisense/VerisenseClient.js';
-export { NUS_SERVICE, NUS_TX, NUS_RX, OP_IDX } from './devices/verisense/constants.js';
-export type { OpIdx } from './devices/verisense/constants.js';
 export {
+  NUS_SERVICE,
+  NUS_TX,
+  NUS_RX,
+  OP_IDX,
+  ASM_COMMAND,
+  ASM_PROPERTY,
+  STREAM_MODE,
+  TEST_MODE_ID,
+  DEBUG_COMMAND_ID,
+} from './devices/verisense/constants.js';
+export type {
+  OpIdx,
+  AsmCommand,
+  AsmProperty,
+  TestModeId,
+  DebugCommandId,
+} from './devices/verisense/constants.js';
+export {
+  buildHeader,
+  parseHeader,
+  buildMessage,
+  parseMessage,
+  parsePendingEvents,
+  isAckCommand,
+  isNackCommand,
   crc16_ccitt_false,
+  computeVerisensePairingPin,
+  unixSecondsToAsmRtcBytes,
+  asmRtcBytesToUnixSeconds,
+  asmRtcMinutesBytesToUnixSeconds,
+  normalizeBytePayload,
   normalizeOperationalConfig,
+  buildProductionConfigPayload,
+  parseSchedulerDebugPayload,
+  parsePayloadCrcErrorBankIndexes,
+  parseEventLogPayload,
+  parseRecordBufferDetailsPayload,
+  parseLookupTablePayload,
+  buildUploadBinaryFileName,
+  buildParsedCsvFileName,
+  applyDuplicateSuffix,
+  nextAvailableDuplicateFileName,
+  getFirstPayloadIndex,
+  evaluateParsedFileSplit,
   parseProductionConfigPayload,
+  parseProductionConfigPayloadFull,
+  parseStatusPayload,
 } from './devices/verisense/protocol.js';
-export type { ProductionConfig } from './devices/verisense/protocol.js';
+export type {
+  ProductionConfig,
+  ProductionConfigBuildOptions,
+  ProductionConfigFull,
+  VerisenseSchedulerDebugPayload,
+  VerisenseEventLogEntry,
+  VerisenseRecordBufferDetails,
+  VerisenseLookupTableEntry,
+  VerisenseLookupTablePayload,
+  ParsedSplitReason,
+  EvaluateParsedSplitInput,
+  VerisenseStatusPayload,
+  VerisenseMessage,
+} from './devices/verisense/protocol.js';
 
 // Verisense sensors
 export { SensorBase } from './devices/verisense/sensors/SensorBase.js';
-export { SensorGSR } from './devices/verisense/sensors/SensorGSR.js';
+export { SensorADC } from './devices/verisense/sensors/SensorADC.js';
 export type {
-  GSRSample,
-  GSRBatterySample,
-  GSRPayloadSample,
-} from './devices/verisense/sensors/SensorGSR.js';
+  ADCGSRSample,
+  ADCBatterySample,
+  ADCPayloadSample,
+} from './devices/verisense/sensors/SensorADC.js';
 export { SensorLIS2DW12 } from './devices/verisense/sensors/SensorLIS2DW12.js';
 export type { LIS2DW12Sample } from './devices/verisense/sensors/SensorLIS2DW12.js';
 export { SensorLSM6DS3 } from './devices/verisense/sensors/SensorLSM6DS3.js';

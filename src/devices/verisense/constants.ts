@@ -12,23 +12,93 @@ export const NUS_TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 export const NUS_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 // ---------------------------------------------------------------------------
-// Protocol command bytes
+// Verisense protocol command/property constants
 // ---------------------------------------------------------------------------
 
-/** Request the device to send logged data. */
-export const READ_DATA_REQ = new Uint8Array([0x12, 0x00, 0x00]);
+/** Upper-nibble command classes used in protocol headers. */
+export const ASM_COMMAND = Object.freeze({
+  READ: 0x10,
+  WRITE: 0x20,
+  RESPONSE: 0x30,
+  ACK: 0x40,
+  NACK_BAD_HEADER_COMMAND: 0x50,
+  NACK_BAD_HEADER_PROPERTY: 0x60,
+  NACK_GENERIC: 0x70,
+  ACK_NEXT_STAGE: 0x80,
+} as const);
 
-/** Request the device to disconnect cleanly. */
-export const DISCONNECT_REQ = new Uint8Array([0x2b, 0x00, 0x00]);
+export type AsmCommand = (typeof ASM_COMMAND)[keyof typeof ASM_COMMAND];
 
-/** Acknowledge a correctly-received logged data payload. */
-export const DATA_ACK = new Uint8Array([0x82, 0x00, 0x00]);
+/** Lower-nibble property IDs used in protocol headers. */
+export const ASM_PROPERTY = Object.freeze({
+  STATUS1: 0x01,
+  DATA: 0x02,
+  PRODUCTION_CONFIGURATION: 0x03,
+  OPERATIONAL_CONFIGURATION: 0x04,
+  TIME: 0x05,
+  DFU_MODE: 0x06,
+  PENDING_EVENTS: 0x07,
+  TEST_MODE: 0x08,
+  DEBUG_COMMAND: 0x09,
+  STREAM_MODE: 0x0a,
+  DEVICE_DISCONNECT: 0x0b,
+  STATUS2: 0x0c,
+} as const);
 
-/** Negative-acknowledge a logged data payload (triggers retransmission). */
-export const DATA_NACK = new Uint8Array([0x72, 0x00, 0x00]);
+export type AsmProperty = (typeof ASM_PROPERTY)[keyof typeof ASM_PROPERTY];
 
-/** Header byte that signals End-of-Stream for logged data transfer. */
-export const DATA_EOS_HDR = 0x42;
+/** Stream mode payload values. */
+export const STREAM_MODE = Object.freeze({
+  ENABLE: 0x01,
+  DISABLE: 0x02,
+} as const);
+
+/** Test mode IDs documented by Verisense firmware. */
+export const TEST_MODE_ID = Object.freeze({
+  STOP: 0x00,
+  FLASH_8MB_1: 0x01,
+  FLASH_8MB_2: 0x02,
+  FLASH_128MB_512MB: 0x03,
+  EEPROM: 0x04,
+  ACCEL1_LIS2DW12: 0x05,
+  BATTERY_VOLTAGE: 0x06,
+  USB_POWER: 0x07,
+  ACCEL2_GYRO_LSM6DS3: 0x08,
+  PPG_MAX86XXX: 0x09,
+  BIOZ_MAX30002: 0x0b,
+  ACCEL2_GYRO_LSM6DSV: 0x0c,
+  MAG_LIS2MDL: 0x0d,
+  ALL_TESTS: 0xff,
+} as const);
+
+export type TestModeId = (typeof TEST_MODE_ID)[keyof typeof TEST_MODE_ID];
+
+/** Debug command IDs documented by Verisense firmware. */
+export const DEBUG_COMMAND_ID = Object.freeze({
+  FLASH_LOOKUP_TABLE_READ: 0x01,
+  FLASH_LOOKUP_TABLE_ERASE: 0x02,
+  RWC_SCHEDULER_READ: 0x03,
+  ERASE_128MB_512MB_FLASH: 0x04,
+  ERASE_8MB_FLASH_1: 0x05,
+  ERASE_8MB_FLASH_2: 0x06,
+  ERASE_OPERATIONAL_CONFIG: 0x07,
+  ERASE_PRODUCTION_CONFIG: 0x08,
+  CLEAR_PENDING_EVENTS: 0x09,
+  ERASE_FLASH_AND_LOOKUP_TABLE: 0x0a,
+  TEST_DATA_TRANSFER_LOOP: 0x0b,
+  LOAD_TEST_LOOKUP_TABLE: 0x0c,
+  LED_TEST: 0x0d,
+  MAX86XXX_LED_TEST: 0x0e,
+  CHECK_PAYLOAD_CRC_ERRORS: 0x0f,
+  READ_EVENT_LOG: 0x10,
+  POWER_PROFILER_TEST: 0x11,
+  READ_RECORD_BUFFER_DETAILS: 0x12,
+  SYSTEM_RESET: 0x13,
+  IC_POWER_CONSUMPTION_TEST: 0x14,
+  DELETE_ALL_BONDS: 0x15,
+} as const);
+
+export type DebugCommandId = (typeof DEBUG_COMMAND_ID)[keyof typeof DEBUG_COMMAND_ID];
 
 // ---------------------------------------------------------------------------
 // Operational config byte offsets

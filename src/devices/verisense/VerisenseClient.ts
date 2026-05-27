@@ -1,100 +1,78 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import {
+  ASM_COMMAND,
+  ASM_PROPERTY,
+  DEBUG_COMMAND_ID,
+  STREAM_MODE,
+  type AsmCommand,
+  type AsmProperty,
+  type DebugCommandId,
+  type TestModeId,
   NUS_SERVICE,
   NUS_TX,
   NUS_RX,
-  READ_DATA_REQ,
-  DISCONNECT_REQ,
-  DATA_ACK,
-  DATA_NACK,
-  DATA_EOS_HDR,
 } from './constants.js';
 import {
+  buildHeader,
+  buildMessage,
+  parseHeader,
+  normalizeBytePayload,
+  parsePendingEvents,
+  type VerisenseMessage,
   u16le_at,
   u24le,
   nowMillis,
   computeCrcLikeCSharp,
   getOriginalCrcLE,
   crc16_ccitt_false,
+  parseStatusPayload,
+  asmRtcBytesToUnixSeconds,
+  unixSecondsToAsmRtcBytes,
+  parseEventLogPayload,
+  parsePayloadCrcErrorBankIndexes,
+  parseRecordBufferDetailsPayload,
+  parseSchedulerDebugPayload,
   normalizeOperationalConfig,
   parseProductionConfigPayload,
   type ProductionConfig,
+  type VerisenseEventLogEntry,
+  type VerisenseRecordBufferDetails,
+  type VerisenseSchedulerDebugPayload,
+  type VerisenseStatusPayload,
 } from './protocol.js';
 import { SensorBase } from './sensors/SensorBase.js';
-import { SensorGSR } from './sensors/SensorGSR.js';
+import { SensorADC } from './sensors/SensorADC.js';
 import { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
 import { SensorPPG } from './sensors/SensorPPG.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-export type TransportKind = 'ble' | 'serial' | null;
-export type DeviceMode = 'idle' | 'streaming' | 'command' | 'logged';
-
-export interface SensorMap {
-  1: SensorGSR;
-  2: SensorLIS2DW12;
-  3: SensorLSM6DS3;
-  4: SensorPPG;
-}
-
-export interface StreamPacket {
-  sensorId: number;
-  tick_u24: number;
-  decoded: unknown[] | null;
-  rawPayload: Uint8Array;
-  crcOk: boolean | null;
-}
-
-export interface TransferLoggedDataOptions {
-  fileHandle?: FileSystemFileHandle | null;
-  timeoutMs?: number;
-  maxNack?: number;
-  maxCrcNack?: number;
-  onProgress?:
-    | ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void)
-    | null;
-}
-
-export interface TransferLoggedDataResult {
-  ok: boolean;
-  bytesWritten: number;
-  blob?: Blob;
-}
-
-export interface VerisenseClientOptions {
-  hardwareIdentifier?: string;
-  stripStreamCrc?: boolean;
-  verifyStreamCrc?: boolean;
-  debug?: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Internal sync state
-// ---------------------------------------------------------------------------
-
-interface SyncSession {
-  receiving: boolean;
-  lastReply: string;
-  nackCount: number;
-  nackCrcCount: number;
-  maxNack: number;
-  maxCrcNack: number;
-  lastRxAt: number;
-  timeoutMs: number;
-  bytesWritten: number;
-  resolve: (v: { ok: boolean; bytesWritten: number }) => void;
-  reject: (e: Error) => void;
-  timer: ReturnType<typeof setInterval> | null;
-  writable: FileSystemWritableFileStream | null;
-  chunks: Uint8Array[];
-  onProgress:
-    | ((info: { payloadIndex: number; bytesWritten: number; crcOk: boolean }) => void)
-    | null;
-}
+import {
+  defaultAcceptedCommands,
+  toCommandResponse,
+  validatePendingResponse,
+} from './requestValidation.js';
+import type {
+  DeviceMode,
+  PendingCommandRequest,
+  SensorMap,
+  StreamPacket,
+  SyncSession,
+  TransferLoggedDataOptions,
+  TransferLoggedDataResult,
+  TransportKind,
+  VerisenseClientOptions,
+  VerisenseCommandResponse,
+} from './VerisenseTypes.js';
+export type {
+  DeviceMode,
+  SensorMap,
+  StreamPacket,
+  TransferLoggedDataOptions,
+  TransferLoggedDataResult,
+  TransportKind,
+  VerisenseClientOptions,
+  VerisenseCommandResponse,
+} from './VerisenseTypes.js';
 
 // ---------------------------------------------------------------------------
 // VerisenseBleDevice
@@ -107,7 +85,7 @@ interface SyncSession {
  * (on/off/emit) for the richer event model the Verisense protocol needs.
  *
  * Supports:
- * - BLE streaming (accel, GSR, gyro, PPG)
+ * - BLE streaming (accel, ADC/GSR, gyro, PPG)
  * - Web Serial (USB COM port) as an alternative transport
  * - Logged-data download (`transferLoggedData`)
  * - Operational config read/write
@@ -162,13 +140,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   // Protocol state
   private _mode: DeviceMode = 'idle';
   private _rxStreamBuf = new Uint8Array(0);
-  private _buf = new Uint8Array(0);
-  private _newPayload = true;
-  private _expectedLen = 0;
-  private _pending: {
-    resolve: (v: { payload: Uint8Array }) => void;
-    reject: (e: Error) => void;
-  } | null = null;
+  private _pending: PendingCommandRequest | null = null;
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
 
@@ -195,7 +167,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this.verifyStreamCrc = opts.verifyStreamCrc ?? false;
 
     this.sensors = {
-      1: new SensorGSR(),
+      1: new SensorADC(),
       2: new SensorLIS2DW12(),
       3: new SensorLSM6DS3(),
       4: new SensorPPG(),
@@ -208,8 +180,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (this.debug) console.log('[Verisense]', ...args);
   }
 
-  // Quick access aliases
-  get gsr(): SensorGSR {
+  // Quick accessors
+  get adc(): SensorADC {
     return this.sensors[1];
   }
   get accel1(): SensorLIS2DW12 {
@@ -499,7 +471,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         /* ignore */
       }
     } else {
-      void this.writeBytes(DISCONNECT_REQ, { withResponse: false });
+      void this.writeBytes(buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEVICE_DISCONNECT), {
+        withResponse: false,
+      });
       try {
         if (this.rx) await this.rx.stopNotifications?.();
       } catch {
@@ -535,14 +509,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   override async startStreaming(): Promise<void> {
+    await this.setStreamingMode(true);
     this._mode = 'streaming';
-    this._resetAssembler();
-    await this.writeBytes(this._makeReq(0x2a, [0x01]));
     this.emit('streaming', { on: true });
   }
 
   override async stopStreaming(): Promise<void> {
-    await this.writeBytes(this._makeReq(0x2a, [0x02]));
+    await this.setStreamingMode(false);
     this._mode = 'idle';
     this.emit('streaming', { on: false });
   }
@@ -615,10 +588,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
           try {
             if (this._sync.lastReply === 'NONE') {
-              await this.writeBytes(READ_DATA_REQ, { withResponse: true });
+              await this.writeBytes(buildMessage(ASM_COMMAND.READ, ASM_PROPERTY.DATA), {
+                withResponse: true,
+              });
             } else {
               this._clearSyncRxBuffers('timeout-nack');
-              await this.writeBytes(DATA_NACK);
+              await this.writeBytes(buildMessage(ASM_COMMAND.NACK_GENERIC, ASM_PROPERTY.DATA));
               this._sync.nackCount++;
               this._sync.lastReply = 'NACK';
               if (this._sync.nackCount >= this._sync.maxNack)
@@ -636,7 +611,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     );
 
     try {
-      await this.writeBytes(READ_DATA_REQ, { withResponse: true });
+      await this.writeBytes(buildMessage(ASM_COMMAND.READ, ASM_PROPERTY.DATA), {
+        withResponse: true,
+      });
       const result = await donePromise;
       await (this._loggedChain ?? Promise.resolve());
 
@@ -688,38 +665,33 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     }
   }
 
-  private _makeReq(opcode: number, payloadBytes: number[] | Uint8Array = []): Uint8Array {
-    const p = payloadBytes instanceof Uint8Array ? payloadBytes : new Uint8Array(payloadBytes);
-    const out = new Uint8Array(3 + p.length);
-    out[0] = opcode & 0xff;
-    out[1] = p.length & 0xff;
-    out[2] = (p.length >> 8) & 0xff;
-    out.set(p, 3);
-    return out;
-  }
-
-  async request(
-    opcode: number,
+  private async _requestByCommand(
+    command: AsmCommand,
+    property: AsmProperty,
     payloadBytes: number[] | Uint8Array = [],
     timeoutMs = 3000,
-  ): Promise<{ payload: Uint8Array }> {
+    acceptedCommands?: ReadonlySet<AsmCommand>,
+  ): Promise<VerisenseCommandResponse> {
     if (this._pending) throw new Error('A request is already pending');
     this._mode = 'command';
     this._resetAssembler();
 
-    const req = this._makeReq(opcode, payloadBytes);
+    const req = buildMessage(command, property, payloadBytes);
+    const accepted = acceptedCommands ?? defaultAcceptedCommands(command);
 
-    const p = new Promise<{ payload: Uint8Array }>((resolve, reject) => {
+    const pendingPromise = new Promise<VerisenseCommandResponse>((resolve, reject) => {
       const t = setTimeout(() => {
         this._pending = null;
         reject(new Error('Request timeout'));
       }, timeoutMs);
 
       this._pending = {
-        resolve: (x) => {
+        expectedProperty: property,
+        acceptedCommands: accepted,
+        resolve: (resp) => {
           clearTimeout(t);
           this._pending = null;
-          resolve(x);
+          resolve(resp);
         },
         reject: (e) => {
           clearTimeout(t);
@@ -730,30 +702,279 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     });
 
     await this.writeBytes(req);
-    return p;
+    return pendingPromise;
   }
 
-  // Convenience command methods
-  readStatus() {
-    return this.request(0x11);
+  async readProperty(property: AsmProperty, timeoutMs = 3000): Promise<VerisenseCommandResponse> {
+    return this._requestByCommand(ASM_COMMAND.READ, property, [], timeoutMs);
   }
+
+  async writeProperty(
+    property: AsmProperty,
+    payloadBytes: number[] | Uint8Array = [],
+    timeoutMs = 3000,
+  ): Promise<VerisenseCommandResponse> {
+    return this._requestByCommand(ASM_COMMAND.WRITE, property, payloadBytes, timeoutMs);
+  }
+
+  async request(
+    opcode: number,
+    payloadBytes: number[] | Uint8Array = [],
+    timeoutMs = 3000,
+  ): Promise<{ payload: Uint8Array }> {
+    const { command, property } = parseHeader(opcode & 0xff);
+    const rsp = await this._requestByCommand(command, property, payloadBytes, timeoutMs);
+    return { payload: rsp.payload };
+  }
+
+  // Convenience command methods (all protocol properties)
+  readStatus() {
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.STATUS1);
+  }
+
+  async readStatusParsed(): Promise<VerisenseStatusPayload> {
+    const { payload } = await this.readStatus();
+    return parseStatusPayload(payload, 'status1');
+  }
+
   readStatus2() {
-    return this.request(0x1c);
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.STATUS2);
+  }
+
+  async readStatus2Parsed(): Promise<VerisenseStatusPayload> {
+    const { payload } = await this.readStatus2();
+    return parseStatusPayload(payload, 'status2');
+  }
+
+  readData() {
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.DATA);
   }
   readProductionConfig() {
-    return this.request(0x13);
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.PRODUCTION_CONFIGURATION);
   }
   readOperationalConfig() {
-    return this.request(0x14);
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.OPERATIONAL_CONFIGURATION);
   }
   readTime() {
-    return this.request(0x15);
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.TIME);
+  }
+
+  async readTimeUnixSeconds(): Promise<number> {
+    const { payload } = await this.readTime();
+    return asmRtcBytesToUnixSeconds(payload);
   }
   readPendingEvents() {
-    return this.request(0x17);
+    return this.request(ASM_COMMAND.READ | ASM_PROPERTY.PENDING_EVENTS);
   }
-  disconnectRequest() {
-    return this.request(0x2b);
+
+  async readPendingEventsParsed(): Promise<AsmProperty[]> {
+    const { payload } = await this.readPendingEvents();
+    return parsePendingEvents(payload);
+  }
+
+  async writeProductionConfig(bytes: Uint8Array | number[]): Promise<void> {
+    const payload = normalizeBytePayload(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    if (!payload || payload.length < 11 || payload.length > 56) {
+      throw new Error('writeProductionConfig: payload length must be between 11 and 56 bytes');
+    }
+    await this.writeProperty(ASM_PROPERTY.PRODUCTION_CONFIGURATION, payload);
+  }
+
+  async writeOperationalConfig(bytes: Uint8Array | number[]): Promise<void> {
+    const payload = normalizeBytePayload(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    if (!payload || payload.length < 50) {
+      throw new Error('writeOperationalConfig: payload length must be at least 50 bytes');
+    }
+    await this.writeProperty(ASM_PROPERTY.OPERATIONAL_CONFIGURATION, payload);
+  }
+
+  async writeTime(rtc7: Uint8Array | number[]): Promise<void> {
+    const payload = normalizeBytePayload(rtc7 instanceof Uint8Array ? rtc7 : new Uint8Array(rtc7));
+    if (!payload || payload.length !== 7) {
+      throw new Error('writeTime: payload must be exactly 7 bytes');
+    }
+    await this.writeProperty(ASM_PROPERTY.TIME, payload);
+  }
+
+  async writeTimeUnixSeconds(unixSeconds: number): Promise<void> {
+    await this.writeTime(unixSecondsToAsmRtcBytes(unixSeconds));
+  }
+
+  async enterDfuMode(): Promise<void> {
+    await this.writeProperty(ASM_PROPERTY.DFU_MODE, []);
+  }
+
+  async runTestMode(testPayload: Uint8Array | number[]): Promise<void> {
+    const payload = normalizeBytePayload(
+      testPayload instanceof Uint8Array ? testPayload : new Uint8Array(testPayload),
+    );
+    if (!payload || payload.length < 2) {
+      throw new Error('runTestMode: payload must contain at least [testId, hwMajor]');
+    }
+    await this.writeProperty(ASM_PROPERTY.TEST_MODE, payload);
+  }
+
+  async runHardwareTest(testId: TestModeId, hwMajor: number, hwMinor = 0, hwInternal = 0): Promise<void> {
+    const payload = new Uint8Array([
+      testId & 0xff,
+      hwMajor & 0xff,
+      hwMinor & 0xff,
+      hwInternal & 0xff,
+      (hwInternal >> 8) & 0xff,
+    ]);
+    await this.runTestMode(payload);
+  }
+
+  private _buildDebugPayload(
+    debugId: DebugCommandId,
+    args: Uint8Array | number[] = [],
+  ): Uint8Array {
+    const argBytes = args instanceof Uint8Array ? args : new Uint8Array(args);
+    const payload = new Uint8Array(1 + argBytes.length);
+    payload[0] = debugId & 0xff;
+    payload.set(argBytes, 1);
+    return payload;
+  }
+
+  async readDebugCommand(
+    debugId: DebugCommandId,
+    args: Uint8Array | number[] = [],
+  ): Promise<{ payload: Uint8Array }> {
+    const rsp = await this._requestByCommand(
+      ASM_COMMAND.READ,
+      ASM_PROPERTY.DEBUG_COMMAND,
+      this._buildDebugPayload(debugId, args),
+    );
+    return { payload: rsp.payload };
+  }
+
+  async sendDebugCommand(
+    debugId: DebugCommandId,
+    args: Uint8Array | number[] = [],
+  ): Promise<{ payload: Uint8Array }> {
+    const rsp = await this._requestByCommand(
+      ASM_COMMAND.WRITE,
+      ASM_PROPERTY.DEBUG_COMMAND,
+      this._buildDebugPayload(debugId, args),
+    );
+    return { payload: rsp.payload };
+  }
+
+  async readFlashLookupTable(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ, [index & 0xff]);
+  }
+
+  async readRealWorldClockScheduler(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.RWC_SCHEDULER_READ, [index & 0xff]);
+  }
+
+  async readRealWorldClockSchedulerParsed(index = 0): Promise<VerisenseSchedulerDebugPayload> {
+    const { payload } = await this.readRealWorldClockScheduler(index);
+    return parseSchedulerDebugPayload(payload);
+  }
+
+  async loadTestLookupTable(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.LOAD_TEST_LOOKUP_TABLE, [index & 0xff]);
+  }
+
+  async checkPayloadCrcErrors(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.CHECK_PAYLOAD_CRC_ERRORS, [index & 0xff]);
+  }
+
+  async checkPayloadCrcErrorsParsed(index = 0): Promise<number[]> {
+    const { payload } = await this.checkPayloadCrcErrors(index);
+    return parsePayloadCrcErrorBankIndexes(payload);
+  }
+
+  async readEventLog(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_EVENT_LOG, [index & 0xff]);
+  }
+
+  async readEventLogParsed(index = 0): Promise<VerisenseEventLogEntry[]> {
+    const { payload } = await this.readEventLog(index);
+    return parseEventLogPayload(payload);
+  }
+
+  async readRecordBufferDetails(index = 0): Promise<{ payload: Uint8Array }> {
+    return this.readDebugCommand(DEBUG_COMMAND_ID.READ_RECORD_BUFFER_DETAILS, [index & 0xff]);
+  }
+
+  async readRecordBufferDetailsParsed(index = 0): Promise<VerisenseRecordBufferDetails[]> {
+    const { payload } = await this.readRecordBufferDetails(index);
+    return parseRecordBufferDetailsPayload(payload);
+  }
+
+  async eraseOperationalConfig(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_OPERATIONAL_CONFIG);
+  }
+
+  async eraseProductionConfig(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_PRODUCTION_CONFIG);
+  }
+
+  async clearPendingEvents(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.CLEAR_PENDING_EVENTS);
+  }
+
+  async eraseAllLoggedData(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_FLASH_AND_LOOKUP_TABLE);
+  }
+
+  async testDataTransferLoop(loopCount: number): Promise<void> {
+    const clamped = Math.max(0, Math.min(0xffff, Math.trunc(loopCount)));
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.TEST_DATA_TRANSFER_LOOP, [
+      clamped & 0xff,
+      (clamped >> 8) & 0xff,
+    ]);
+  }
+
+  async ledTest(ledIndex: number): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.LED_TEST, [ledIndex & 0xff]);
+  }
+
+  async max86xxxLedTest(start: boolean): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.MAX86XXX_LED_TEST, [start ? 0x01 : 0x00]);
+  }
+
+  async startPowerProfilerTest(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.POWER_PROFILER_TEST);
+  }
+
+  async requestSystemReset(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.SYSTEM_RESET);
+  }
+
+  async startIcPowerConsumptionTest(loopCount: number, stageIntervalMs: number): Promise<void> {
+    const clampedLoopCount = Math.max(0, Math.min(0xffff, Math.trunc(loopCount)));
+    const clampedStageInterval = Math.max(0, Math.min(0xffff, Math.trunc(stageIntervalMs)));
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.IC_POWER_CONSUMPTION_TEST, [
+      clampedLoopCount & 0xff,
+      (clampedLoopCount >> 8) & 0xff,
+      clampedStageInterval & 0xff,
+      (clampedStageInterval >> 8) & 0xff,
+    ]);
+  }
+
+  async deleteAllBonds(): Promise<void> {
+    await this.sendDebugCommand(DEBUG_COMMAND_ID.DELETE_ALL_BONDS);
+  }
+
+  async setStreamingMode(enabled: boolean): Promise<void> {
+    await this.writeProperty(
+      ASM_PROPERTY.STREAM_MODE,
+      [enabled ? STREAM_MODE.ENABLE : STREAM_MODE.DISABLE],
+      3000,
+    );
+  }
+
+  async disconnectRequest(): Promise<{ payload: Uint8Array }> {
+    try {
+      return await this.request(ASM_COMMAND.WRITE | ASM_PROPERTY.DEVICE_DISCONNECT, [], 1500);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/timeout/i.test(msg)) return { payload: new Uint8Array(0) };
+      throw e;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -787,7 +1008,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     try {
       this.accel1.applyOperationalConfig(op);
       this.gyroAccel2.applyOperationalConfig(op);
-      this.gsr.applyOperationalConfig(op);
+      this.adc.applyOperationalConfig(op);
       this.ppg.applyOperationalConfig(op);
     } catch (e) {
       console.warn('[opcfg] apply after read failed:', e);
@@ -804,16 +1025,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!op || op.length < 4) throw new Error('writeOpConfig: invalid opconfig');
     if (op[0] !== 0x5a) throw new Error('writeOpConfig: opconfig must start with 0x5A');
 
-    const req = this._makeReq(0x24, op);
-    await this.writeBytes(req, { withResponse: true });
+    await this.writeOperationalConfig(op);
     await this.readOpConfigFromDevice();
-  }
-
-  async getopconfig(): Promise<Uint8Array> {
-    return this.getOpConfig();
-  }
-  async writeopconfig(op: Uint8Array | number[]): Promise<void> {
-    return this.writeOpConfig(op);
   }
 
   getSensor(name: string | number): SensorBase | null {
@@ -822,13 +1035,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (k.includes('lis2dw12') || k.includes('accel1') || k === '2') return this.accel1;
     if (k.includes('lsm6') || k.includes('gyro') || k.includes('accel2') || k === '3')
       return this.gyroAccel2;
-    if (k.includes('gsr') || k === '1') return this.gsr;
+    if (k.includes('vbatt') || k.includes('batt') || k.includes('battery') || k.includes('adc'))
+      return this.adc;
+    if (k.includes('gsr') || k === '1') return this.adc;
     if (k.includes('ppg') || k === '4') return this.ppg;
     return null;
-  }
-
-  GetSensor(name: string | number): SensorBase | null {
-    return this.getSensor(name);
   }
 
   // ---------------------------------------------------------------------------
@@ -870,7 +1081,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       s.lastReply = 'NACK';
       s.nackCrcCount++;
       this._clearSyncRxBuffers('crc-nack');
-      await this.writeBytes(DATA_NACK);
+      await this.writeBytes(buildMessage(ASM_COMMAND.NACK_GENERIC, ASM_PROPERTY.DATA));
       if (s.nackCrcCount >= s.maxCrcNack) this._abortSync(new Error('Too many CRC failures'));
       s.onProgress?.({ payloadIndex, bytesWritten: s.bytesWritten, crcOk: false });
       return;
@@ -879,21 +1090,22 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (s.writable) {
       await s.writable.write(toArrayBuffer(payloadU8));
     } else {
-      s.chunks.push(payloadU8.slice());
+      s.chunks.push(new Uint8Array(payloadU8));
     }
+
     s.bytesWritten += payloadU8.length;
 
     s.lastReply = 'ACK';
     s.nackCount = 0;
     s.nackCrcCount = 0;
-    await this.writeBytes(DATA_ACK, { withResponse: true });
+    await this.writeBytes(buildMessage(ASM_COMMAND.ACK_NEXT_STAGE, ASM_PROPERTY.DATA), {
+      withResponse: true,
+    });
     s.onProgress?.({ payloadIndex, bytesWritten: s.bytesWritten, crcOk: true });
   }
 
   private _resetAssembler(): void {
-    this._newPayload = true;
-    this._expectedLen = 0;
-    this._buf = new Uint8Array(0);
+    this._rxStreamBuf = new Uint8Array(0);
   }
 
   private _appendStreamBuf(chunk: Uint8Array): void {
@@ -909,6 +1121,25 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (this.debugSync) console.warn('[sync] cleared RX buffers', { reason });
   }
 
+  private _resolvePendingCommand(msg: VerisenseMessage): void {
+    const pending = this._pending;
+    this._pending = null;
+    if (this._mode === 'command') this._mode = 'idle';
+
+    if (pending) {
+      const err = validatePendingResponse(pending, msg);
+      if (err) pending.reject(err);
+      else pending.resolve(toCommandResponse(msg));
+    }
+
+    this.emit('commandPayload', {
+      header: msg.header,
+      command: msg.command,
+      property: msg.property,
+      payload: msg.payload,
+    });
+  }
+
   private _feedStreamBytes(chunk: Uint8Array): void {
     if (this._mode === 'logged' && this._sync) this._sync.lastRxAt = Date.now();
 
@@ -921,10 +1152,24 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const len = (this._rxStreamBuf[1] | (this._rxStreamBuf[2] << 8)) >>> 0;
 
       if (len === 0) {
+        const header = hdr & 0xff;
+        const decodedHeader = parseHeader(header);
+        const msg: VerisenseMessage = {
+          header,
+          command: decodedHeader.command,
+          property: decodedHeader.property,
+          payloadLength: 0,
+          payload: new Uint8Array(0),
+        };
         this._rxStreamBuf = this._rxStreamBuf.slice(3);
-        if (this._mode === 'logged' && hdr === DATA_EOS_HDR) {
+        if (this._mode === 'logged' && hdr === buildHeader(ASM_COMMAND.ACK, ASM_PROPERTY.DATA)) {
           if (this.debugSync) console.log('[sync] EOS received. Finishing.');
           this._finishSync();
+          continue;
+        }
+
+        if (this._mode === 'command') {
+          this._resolvePendingCommand(msg);
         }
         continue;
       }
@@ -933,24 +1178,29 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       const payload = this._rxStreamBuf.slice(3, 3 + len);
       this._rxStreamBuf = this._rxStreamBuf.slice(3 + len);
+      const header = hdr & 0xff;
+      const decodedHeader = parseHeader(header);
+      const msg: VerisenseMessage = {
+        header,
+        command: decodedHeader.command,
+        property: decodedHeader.property,
+        payloadLength: payload.length,
+        payload,
+      };
 
       if (this._mode === 'logged') {
         this._loggedChain = (this._loggedChain ?? Promise.resolve())
-          .then(() => this._handleLoggedPayload(payload))
+          .then(() => this._handleLoggedPayload(msg.payload))
           .catch((e: Error) => this._abortSync(e));
         continue;
       }
 
       if (this._mode === 'streaming') {
-        this._handleStreamingPayload(payload);
+        this._handleStreamingPayload(msg.payload);
         continue;
       }
 
-      const pending = this._pending;
-      this._pending = null;
-      if (this._mode === 'command') this._mode = 'idle';
-      if (pending) pending.resolve({ payload });
-      this.emit('commandPayload', { payload });
+      this._resolvePendingCommand(msg);
     }
   }
 
