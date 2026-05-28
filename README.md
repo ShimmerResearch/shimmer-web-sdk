@@ -130,7 +130,7 @@ src/
       protocol.ts               ← CRC-16, packet framing, config helpers
       sensors/
         SensorBase.ts           ← timestamp unwrap + extrapolation
-        SensorGSR.ts            ← GSR decoder (id=1)
+        SensorADC.ts            ← ADC/GSR + battery decoder (id=1)
         SensorLIS2DW12.ts       ← LIS2DW12 accelerometer (id=2)
         SensorLSM6DS3.ts        ← LSM6DS3 gyro+accel (id=3)
         SensorPPG.ts            ← PPG decoder (id=4)

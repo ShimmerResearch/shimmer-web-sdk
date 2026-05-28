@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SensorGSR } from '../../src/devices/verisense/sensors/SensorGSR.js';
+import { SensorADC } from '../../src/devices/verisense/sensors/SensorADC.js';
 import { SensorLIS2DW12 } from '../../src/devices/verisense/sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from '../../src/devices/verisense/sensors/SensorLSM6DS3.js';
 import { SensorPPG } from '../../src/devices/verisense/sensors/SensorPPG.js';
@@ -67,13 +67,13 @@ describe('SensorBase.extrapolateSampleTimes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SensorGSR
+// SensorADC
 // ---------------------------------------------------------------------------
 
-describe('SensorGSR', () => {
-  let gsr: SensorGSR;
+describe('SensorADC', () => {
+  let gsr: SensorADC;
   beforeEach(() => {
-    gsr = new SensorGSR();
+    gsr = new SensorADC();
   });
 
   it('defaults to auto-range (4)', () => {
@@ -99,6 +99,37 @@ describe('SensorGSR', () => {
     const buf = new Uint8Array([0x00, 0x08, 0x00, 0x08]);
     const out = gsr.parsePayload(buf);
     expect(out).toHaveLength(2);
+  });
+
+  it('parses explicit battery fields from ADC payload words', () => {
+    gsr.gsrEnabled = false;
+    gsr.battEnabled = true;
+    // raw16 = 0xCABC -> usb bit=1, charger bits=2, adc12=0xABC
+    const buf = new Uint8Array([0xbc, 0xca]);
+    const out = gsr.parsePayload(buf);
+    expect(out).toHaveLength(1);
+    expect(out[0].batt).not.toBeNull();
+    expect(out[0].batt?.raw16).toBe(0xcabc);
+    expect(out[0].batt?.adc12).toBe(0x0abc);
+    expect(out[0].batt?.usbPluggedIn).toBe(true);
+    expect(out[0].batt?.chargerStatusBits).toBe(2);
+  });
+
+  it('applies GSR+ battery scaling to mV output', () => {
+    const base = new SensorADC();
+    base.gsrEnabled = false;
+    base.battEnabled = true;
+    base.setHardwareIdentifier('VERISENSE_PULSE_PLUS');
+
+    const gsrPlus = new SensorADC();
+    gsrPlus.gsrEnabled = false;
+    gsrPlus.battEnabled = true;
+    gsrPlus.setHardwareIdentifier('VERISENSE_GSR_PLUS');
+
+    const buf = new Uint8Array([0xff, 0x0f]);
+    const mVBase = base.parsePayload(buf)[0].batt?.mV ?? 0;
+    const mVGsrPlus = gsrPlus.parsePayload(buf)[0].batt?.mV ?? 0;
+    expect(mVGsrPlus).toBeGreaterThan(mVBase);
   });
 });
 
