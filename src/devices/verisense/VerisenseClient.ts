@@ -3,6 +3,10 @@ import {
   ASM_COMMAND,
   ASM_PROPERTY,
   DEBUG_COMMAND_ID,
+  NORDIC_DFU_BUTTONLESS_CHAR,
+  NORDIC_DFU_CONTROL_CHAR,
+  NORDIC_DFU_PACKET_CHAR,
+  NORDIC_DFU_SERVICE,
   STREAM_MODE,
   type AsmCommand,
   type AsmProperty,
@@ -107,6 +111,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   static readonly NUS_SERVICE = NUS_SERVICE;
   static readonly NUS_TX = NUS_TX;
   static readonly NUS_RX = NUS_RX;
+  static readonly NORDIC_DFU_SERVICE = NORDIC_DFU_SERVICE;
+  static readonly NORDIC_DFU_BUTTONLESS_CHAR = NORDIC_DFU_BUTTONLESS_CHAR;
 
   // Event emitter state
   private readonly _evMap = new Map<string, Set<(data: unknown) => void>>();
@@ -805,8 +811,115 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.writeTime(unixSecondsToAsmRtcBytes(unixSeconds));
   }
 
-  async enterDfuMode(): Promise<void> {
+  /**
+   * Enables Nordic Secure DFU service advertisement after the next disconnect.
+   *
+   * This sends ASM DFU_MODE property write (equivalent to [0x26, 0x00, 0x00]).
+   * It does not immediately reboot into bootloader mode.
+   */
+  async enableDfuServiceOnNextDisconnect(): Promise<void> {
     await this.writeProperty(ASM_PROPERTY.DFU_MODE, []);
+  }
+
+  /**
+   * @deprecated Use enableDfuServiceOnNextDisconnect() for clearer semantics.
+   */
+  async enterDfuMode(): Promise<void> {
+    await this.enableDfuServiceOnNextDisconnect();
+  }
+
+  /**
+   * Uses Nordic buttonless DFU characteristic to reboot the connected device into bootloader mode.
+   *
+   * Requirements:
+   * - BLE transport must be connected
+   * - Nordic Secure DFU service and buttonless characteristic must be present
+   */
+  async rebootToDfuBootloader(
+    opts: {
+      waitForDisconnect?: boolean;
+      disconnectAfterCommand?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<void> {
+    if (this._transportKind !== 'ble' || !this.device?.gatt?.connected || !this.server) {
+      throw new Error('rebootToDfuBootloader: requires an active BLE connection');
+    }
+
+    const waitForDisconnect = opts.waitForDisconnect ?? true;
+    const disconnectAfterCommand = opts.disconnectAfterCommand ?? true;
+    const timeoutMs = Math.max(500, Math.trunc(opts.timeoutMs ?? 8000));
+
+    const dfuService = await this.server.getPrimaryService(NORDIC_DFU_SERVICE);
+
+    let buttonlessChar: BluetoothRemoteGATTCharacteristic;
+    try {
+      buttonlessChar = await dfuService.getCharacteristic(NORDIC_DFU_BUTTONLESS_CHAR);
+    } catch {
+      const hasControl = await dfuService
+        .getCharacteristic(NORDIC_DFU_CONTROL_CHAR)
+        .then(() => true)
+        .catch(() => false);
+      const hasPacket = await dfuService
+        .getCharacteristic(NORDIC_DFU_PACKET_CHAR)
+        .then(() => true)
+        .catch(() => false);
+      if (hasControl && hasPacket) {
+        throw new Error('Device already appears to be in DFU bootloader mode');
+      }
+      throw new Error('Nordic buttonless DFU characteristic not found');
+    }
+
+    if (buttonlessChar.properties.notify || buttonlessChar.properties.indicate) {
+      try {
+        await buttonlessChar.startNotifications();
+      } catch {
+        /* some stacks may still allow write without notifications */
+      }
+    }
+
+    const device = this.device;
+    let disconnectPromise: Promise<void> | null = null;
+    if (waitForDisconnect) {
+      let offDisconnect: (() => void) | null = null;
+      disconnectPromise = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (offDisconnect) offDisconnect();
+          reject(new Error(`Timed out waiting for reboot/disconnect (${timeoutMs} ms)`));
+        }, timeoutMs);
+
+        const onDisconnect = () => {
+          clearTimeout(timer);
+          if (offDisconnect) offDisconnect();
+          resolve();
+        };
+
+        device.addEventListener('gattserverdisconnected', onDisconnect, { once: true });
+        offDisconnect = () => {
+          try {
+            device.removeEventListener('gattserverdisconnected', onDisconnect);
+          } catch {
+            /* ignore */
+          }
+        };
+      });
+    }
+
+    const cmd = new Uint8Array([0x01]);
+    await buttonlessChar.writeValue(cmd);
+
+    if (disconnectAfterCommand && device.gatt?.connected) {
+      try {
+        device.gatt.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (waitForDisconnect) {
+      if (!device.gatt?.connected) return;
+      if (disconnectPromise) await disconnectPromise;
+    }
   }
 
   async runTestMode(testPayload: Uint8Array | number[]): Promise<void> {
