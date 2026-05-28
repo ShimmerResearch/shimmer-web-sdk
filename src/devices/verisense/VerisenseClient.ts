@@ -101,7 +101,7 @@ export type {
  * - `"commandPayload"` — `{ payload: Uint8Array }`
  */
 export class VerisenseBleDevice extends BaseShimmerClient {
-  private static readonly MAX_FRAME_PAYLOAD_LEN = 4096;
+  private static readonly MAX_FRAME_PAYLOAD_LEN = 40000;
   private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
@@ -320,6 +320,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     this._emitStatus('Connected via USB Serial');
     this.emit('connected', { kind: 'serial' });
+    await this.readProductionConfigFromDevice();
     await this.readOpConfigFromDevice();
     return true;
   }
@@ -565,6 +566,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       lastRxAt: Date.now(),
       timeoutMs,
       bytesWritten: 0,
+      lastPayloadIndex: 0,
       resolve: null!,
       reject: null!,
       timer: null,
@@ -574,10 +576,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     };
     this._sync = sync;
 
-    const donePromise = new Promise<{ ok: boolean; bytesWritten: number }>((resolve, reject) => {
-      sync.resolve = resolve;
-      sync.reject = reject;
-    });
+    const donePromise = new Promise<{ ok: boolean; bytesWritten: number; payloadIndex: number }>(
+      (resolve, reject) => {
+        sync.resolve = resolve;
+        sync.reject = reject;
+      },
+    );
 
     let watchdogRunning = false;
     sync.timer = setInterval(
@@ -924,15 +928,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const msg = e instanceof Error ? e.message : String(e);
       const isDebugNack = /NACK command=0x(?:50|60|70) property=0x9/i.test(msg);
       const isDebugAckPropertyZero = /Unexpected response property 0x0 \(expected 0x9\)/i.test(msg);
-      if (!isDebugNack && !isDebugAckPropertyZero) throw e;
-
-      const rsp = await this._requestByCommand(
-        ASM_COMMAND.READ,
-        ASM_PROPERTY.DEBUG_COMMAND,
-        payload,
-        timeoutMs,
-      );
-      return { payload: rsp.payload };
+      if (isDebugNack || isDebugAckPropertyZero) {
+        return this._waitForDebugResponse(timeoutMs);
+      }
+      throw e;
     }
   }
 
@@ -1165,9 +1164,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     s.receiving = false;
     if (s.timer) clearInterval(s.timer);
     const bytesWritten = s.bytesWritten;
+    const payloadIndex = s.lastPayloadIndex;
     this._sync = null;
     this._mode = 'idle';
-    s.resolve({ ok: true, bytesWritten });
+    s.resolve({ ok: true, bytesWritten, payloadIndex });
   }
 
   private async _handleLoggedPayload(payloadU8: Uint8Array): Promise<void> {
@@ -1189,6 +1189,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       s.onProgress?.({ payloadIndex, bytesWritten: s.bytesWritten, crcOk: false });
       return;
     }
+
+    s.lastPayloadIndex = payloadIndex;
 
     if (s.writable) {
       await s.writable.write(toArrayBuffer(payloadU8));
@@ -1246,6 +1248,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   private _isPlausibleFrameStart(hdr: number, len: number): boolean {
+    // Logged sync frames can be large and should be length-gated like the working single-file implementation.
+    if (this._mode === 'logged') {
+      return len <= VerisenseBleDevice.MAX_FRAME_PAYLOAD_LEN;
+    }
+
     if (!this._isPlausibleHeaderByte(hdr)) return false;
 
     // Debug responses may carry large blobs (for example flash lookup tables),

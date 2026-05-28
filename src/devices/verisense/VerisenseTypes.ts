@@ -39,6 +39,7 @@ export interface TransferLoggedDataOptions {
 export interface TransferLoggedDataResult {
   ok: boolean;
   bytesWritten: number;
+  payloadIndex?: number;
   blob?: Blob;
 }
 
@@ -75,7 +76,8 @@ export interface SyncSession {
   lastRxAt: number;
   timeoutMs: number;
   bytesWritten: number;
-  resolve: (v: { ok: boolean; bytesWritten: number }) => void;
+  lastPayloadIndex: number;
+  resolve: (v: { ok: boolean; bytesWritten: number; payloadIndex: number }) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setInterval> | null;
   writable: FileSystemWritableFileStream | null;
