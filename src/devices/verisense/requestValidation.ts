@@ -5,11 +5,7 @@ import type { PendingCommandRequest, VerisenseCommandResponse } from './Verisens
 export function defaultAcceptedCommands(command: AsmCommand): ReadonlySet<AsmCommand> {
   if (command === ASM_COMMAND.READ) return new Set<AsmCommand>([ASM_COMMAND.RESPONSE]);
   if (command === ASM_COMMAND.WRITE) {
-    return new Set<AsmCommand>([
-      ASM_COMMAND.ACK,
-      ASM_COMMAND.ACK_NEXT_STAGE,
-      ASM_COMMAND.RESPONSE,
-    ]);
+    return new Set<AsmCommand>([ASM_COMMAND.ACK, ASM_COMMAND.ACK_NEXT_STAGE, ASM_COMMAND.RESPONSE]);
   }
   return new Set<AsmCommand>([ASM_COMMAND.ACK, ASM_COMMAND.ACK_NEXT_STAGE, ASM_COMMAND.RESPONSE]);
 }

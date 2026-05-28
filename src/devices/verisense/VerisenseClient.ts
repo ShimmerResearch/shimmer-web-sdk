@@ -784,7 +784,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async writeProductionConfig(bytes: Uint8Array | number[]): Promise<void> {
-    const payload = normalizeBytePayload(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    const payload = normalizeBytePayload(
+      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
+    );
     if (!payload || payload.length < 11 || payload.length > 56) {
       throw new Error('writeProductionConfig: payload length must be between 11 and 56 bytes');
     }
@@ -792,7 +794,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   async writeOperationalConfig(bytes: Uint8Array | number[]): Promise<void> {
-    const payload = normalizeBytePayload(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    const payload = normalizeBytePayload(
+      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
+    );
     if (!payload || payload.length < 50) {
       throw new Error('writeOperationalConfig: payload length must be at least 50 bytes');
     }
@@ -932,7 +936,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.writeProperty(ASM_PROPERTY.TEST_MODE, payload);
   }
 
-  async runHardwareTest(testId: TestModeId, hwMajor: number, hwMinor = 0, hwInternal = 0): Promise<void> {
+  async runHardwareTest(
+    testId: TestModeId,
+    hwMajor: number,
+    hwMinor = 0,
+    hwInternal = 0,
+  ): Promise<void> {
     const payload = new Uint8Array([
       testId & 0xff,
       hwMajor & 0xff,
@@ -987,7 +996,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         payload: Uint8Array;
       }>('commandPayload', (evt) => {
         if (done || !evt) return;
-        if (evt.command !== ASM_COMMAND.RESPONSE || evt.property !== ASM_PROPERTY.DEBUG_COMMAND) return;
+        if (evt.command !== ASM_COMMAND.RESPONSE || evt.property !== ASM_PROPERTY.DEBUG_COMMAND)
+          return;
         done = true;
         cleanup();
         resolve({ payload: evt.payload ?? new Uint8Array(0) });
@@ -1353,7 +1363,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (pending) {
       // Some firmware/transport paths emit a transient empty 0x00/0x00 frame
       // immediately before the real command response; ignore and keep waiting.
-      if (msg.command === (0 as AsmCommand) && msg.property === (0 as AsmProperty) && msg.payload.length === 0) {
+      if (
+        msg.command === (0 as AsmCommand) &&
+        msg.property === (0 as AsmProperty) &&
+        msg.payload.length === 0
+      ) {
         return;
       }
 
@@ -1418,12 +1432,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
           const s = this._sync;
           if (s && s.bytesWritten === 0 && s.emptyAckCount < 6) {
             s.emptyAckCount++;
-            if (this.debugSync) console.log('[sync] empty ACK before payload; requesting next DATA chunk.');
-            void this
-              .writeBytes(buildMessage(ASM_COMMAND.READ, ASM_PROPERTY.DATA), {
-                withResponse: true,
-              })
-              .catch((e: Error) => this._abortSync(e));
+            if (this.debugSync)
+              console.log('[sync] empty ACK before payload; requesting next DATA chunk.');
+            void this.writeBytes(buildMessage(ASM_COMMAND.READ, ASM_PROPERTY.DATA), {
+              withResponse: true,
+            }).catch((e: Error) => this._abortSync(e));
             continue;
           }
 
