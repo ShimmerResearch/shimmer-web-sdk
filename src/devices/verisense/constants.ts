@@ -188,9 +188,9 @@ export type OpIdx = keyof typeof OP_IDX;
  * Mirrors the firmware `factory_test_t` enum.
  */
 export const FACTORY_TEST = Object.freeze({
-  MAIN:       0,
-  LEDS:       1,
-  ICS:        2,
+  MAIN: 0,
+  LEDS: 1,
+  ICS: 2,
   LED_STATES: 3,
 } as const);
 

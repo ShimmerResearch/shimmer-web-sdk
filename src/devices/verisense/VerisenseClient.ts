@@ -1022,7 +1022,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }
 
         const bannerStart = cap.aggregateText.lastIndexOf('//', hintIdx);
-        let lineStart = bannerStart >= 0 ? bannerStart : cap.aggregateText.lastIndexOf('\n', hintIdx);
+        let lineStart =
+          bannerStart >= 0 ? bannerStart : cap.aggregateText.lastIndexOf('\n', hintIdx);
         lineStart = lineStart >= 0 ? lineStart + (bannerStart >= 0 ? 0 : 1) : 0;
         cap.started = true;
         if (lineStart > 0) {
@@ -1053,9 +1054,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         const secondHint = cap.aggregateText.indexOf(hint, firstHint + hint.length);
         if (secondHint >= 0) {
           const endOfSecondLine = cap.aggregateText.indexOf('\n', secondHint);
-          full = endOfSecondLine >= 0
-            ? cap.aggregateText.slice(0, endOfSecondLine + 1)
-            : cap.aggregateText;
+          full =
+            endOfSecondLine >= 0
+              ? cap.aggregateText.slice(0, endOfSecondLine + 1)
+              : cap.aggregateText;
         }
       }
     }
@@ -1091,7 +1093,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         : VerisenseBleDevice.TEST_REPORT_DELIMITER;
     const maxChars = Math.max(4096, Math.trunc(opts.maxChars ?? 2 * 1024 * 1024));
 
-    this._clearHardwareTestReportCapture(new Error('Hardware test report capture was replaced'), null);
+    this._clearHardwareTestReportCapture(
+      new Error('Hardware test report capture was replaced'),
+      null,
+    );
     this._testReportDecoder.decode();
 
     const reportPromise = new Promise<string>((resolve, reject) => {
