@@ -101,7 +101,7 @@ export type {
  * - `"commandPayload"` — `{ payload: Uint8Array }`
  */
 export class VerisenseBleDevice extends BaseShimmerClient {
-  private static readonly MAX_FRAME_PAYLOAD_LEN = 4096;
+  private static readonly MAX_FRAME_PAYLOAD_LEN = 40000;
   private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
@@ -928,15 +928,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const msg = e instanceof Error ? e.message : String(e);
       const isDebugNack = /NACK command=0x(?:50|60|70) property=0x9/i.test(msg);
       const isDebugAckPropertyZero = /Unexpected response property 0x0 \(expected 0x9\)/i.test(msg);
-      if (!isDebugNack && !isDebugAckPropertyZero) throw e;
-
-      const rsp = await this._requestByCommand(
-        ASM_COMMAND.READ,
-        ASM_PROPERTY.DEBUG_COMMAND,
-        payload,
-        timeoutMs,
-      );
-      return { payload: rsp.payload };
+      if (isDebugNack || isDebugAckPropertyZero) {
+        return this._waitForDebugResponse(timeoutMs);
+      }
+      throw e;
     }
   }
 
@@ -1253,6 +1248,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   private _isPlausibleFrameStart(hdr: number, len: number): boolean {
+    // Logged sync frames can be large and should be length-gated like the working single-file implementation.
+    if (this._mode === 'logged') {
+      return len <= VerisenseBleDevice.MAX_FRAME_PAYLOAD_LEN;
+    }
+
     if (!this._isPlausibleHeaderByte(hdr)) return false;
 
     // Debug responses may carry large blobs (for example flash lookup tables),
@@ -1313,7 +1313,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const len = (this._rxStreamBuf[1] | (this._rxStreamBuf[2] << 8)) >>> 0;
 
       if (!this._isPlausibleFrameStart(hdr, len)) {
-        if this.debugSync) {
+        if (this.debugSync) {
           console.warn('[rx] resync: dropping byte', {
             dropped: hdr,
             nextLen: len,
