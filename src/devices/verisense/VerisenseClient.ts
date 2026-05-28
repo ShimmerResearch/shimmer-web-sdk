@@ -320,6 +320,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     this._emitStatus('Connected via USB Serial');
     this.emit('connected', { kind: 'serial' });
+    await this.readProductionConfigFromDevice();
     await this.readOpConfigFromDevice();
     return true;
   }
@@ -565,6 +566,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       lastRxAt: Date.now(),
       timeoutMs,
       bytesWritten: 0,
+      lastPayloadIndex: 0,
       resolve: null!,
       reject: null!,
       timer: null,
@@ -574,10 +576,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     };
     this._sync = sync;
 
-    const donePromise = new Promise<{ ok: boolean; bytesWritten: number }>((resolve, reject) => {
-      sync.resolve = resolve;
-      sync.reject = reject;
-    });
+    const donePromise = new Promise<{ ok: boolean; bytesWritten: number; payloadIndex: number }>(
+      (resolve, reject) => {
+        sync.resolve = resolve;
+        sync.reject = reject;
+      },
+    );
 
     let watchdogRunning = false;
     sync.timer = setInterval(
@@ -1165,9 +1169,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     s.receiving = false;
     if (s.timer) clearInterval(s.timer);
     const bytesWritten = s.bytesWritten;
+    const payloadIndex = s.lastPayloadIndex;
     this._sync = null;
     this._mode = 'idle';
-    s.resolve({ ok: true, bytesWritten });
+    s.resolve({ ok: true, bytesWritten, payloadIndex });
   }
 
   private async _handleLoggedPayload(payloadU8: Uint8Array): Promise<void> {
@@ -1189,6 +1194,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       s.onProgress?.({ payloadIndex, bytesWritten: s.bytesWritten, crcOk: false });
       return;
     }
+
+    s.lastPayloadIndex = payloadIndex;
 
     if (s.writable) {
       await s.writable.write(toArrayBuffer(payloadU8));
@@ -1306,7 +1313,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const len = (this._rxStreamBuf[1] | (this._rxStreamBuf[2] << 8)) >>> 0;
 
       if (!this._isPlausibleFrameStart(hdr, len)) {
-        if (this.debugSync) {
+        if this.debugSync) {
           console.warn('[rx] resync: dropping byte', {
             dropped: hdr,
             nextLen: len,
