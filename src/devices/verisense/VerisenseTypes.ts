@@ -56,6 +56,15 @@ export interface VerisenseCommandResponse {
   payload: Uint8Array;
 }
 
+export interface HardwareTestReportOptions {
+  timeoutMs?: number;
+  marker?: string;
+  maxChars?: number;
+  /** Factory test type byte (factory_test_t). Appended after the HW revision bytes in the TX payload. Defaults to 0 (MAIN). */
+  factoryTestType?: number;
+  onChunk?: ((chunkText: string, aggregateText: string) => void) | null;
+}
+
 export interface PendingCommandRequest {
   expectedProperty: AsmProperty;
   acceptedCommands: ReadonlySet<AsmCommand>;

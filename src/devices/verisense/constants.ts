@@ -80,6 +80,7 @@ export const TEST_MODE_ID = Object.freeze({
   BIOZ_MAX30002: 0x0b,
   ACCEL2_GYRO_LSM6DSV: 0x0c,
   MAG_LIS2MDL: 0x0d,
+  TEST_REPORT: 0xfe,
   ALL_TESTS: 0xff,
 } as const);
 
@@ -181,3 +182,16 @@ export const OP_IDX = Object.freeze({
 } as const);
 
 export type OpIdx = keyof typeof OP_IDX;
+
+/**
+ * Factory test type selection byte sent as the last byte of a TEST_REPORT (0xFE) payload.
+ * Mirrors the firmware `factory_test_t` enum.
+ */
+export const FACTORY_TEST = Object.freeze({
+  MAIN:       0,
+  LEDS:       1,
+  ICS:        2,
+  LED_STATES: 3,
+} as const);
+
+export type FactoryTestType = (typeof FACTORY_TEST)[keyof typeof FACTORY_TEST];

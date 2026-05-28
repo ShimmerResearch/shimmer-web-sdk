@@ -72,6 +72,7 @@ export {
   STREAM_MODE,
   TEST_MODE_ID,
   DEBUG_COMMAND_ID,
+  FACTORY_TEST,
 } from './devices/verisense/constants.js';
 export type {
   OpIdx,
@@ -79,6 +80,7 @@ export type {
   AsmProperty,
   TestModeId,
   DebugCommandId,
+  FactoryTestType,
 } from './devices/verisense/constants.js';
 export {
   buildHeader,
