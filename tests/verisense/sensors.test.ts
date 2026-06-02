@@ -131,6 +131,42 @@ describe('SensorADC', () => {
     const mVGsrPlus = gsrPlus.parsePayload(buf)[0].batt?.mV ?? 0;
     expect(mVGsrPlus).toBeGreaterThan(mVBase);
   });
+
+  it('applies SR62 streaming battery multiplier of 2.0', () => {
+    const sensor = new SensorADC();
+    sensor.gsrEnabled = false;
+    sensor.battEnabled = true;
+    sensor.setHardwareRevision(62, 0, 0);
+
+    const buf = new Uint8Array([0xff, 0x0f]);
+    const out = sensor.parsePayload(buf)[0].batt;
+    const expected = sensor.calibrateAdcToVolts(0x0fff) * 1000.0 * 2.0;
+    expect(out?.mV ?? 0).toBeCloseTo(expected, 6);
+  });
+
+  it('applies SR68.9 streaming battery multiplier of 2.469', () => {
+    const sensor = new SensorADC();
+    sensor.gsrEnabled = false;
+    sensor.battEnabled = true;
+    sensor.setHardwareRevision(68, 9, 0);
+
+    const buf = new Uint8Array([0xff, 0x0f]);
+    const out = sensor.parsePayload(buf)[0].batt;
+    const expected = sensor.calibrateAdcToVolts(0x0fff) * 1000.0 * 2.469;
+    expect(out?.mV ?? 0).toBeCloseTo(expected, 6);
+  });
+
+  it('falls back to hardware identifier scaling when revision is unknown', () => {
+    const sensor = new SensorADC();
+    sensor.gsrEnabled = false;
+    sensor.battEnabled = true;
+    sensor.setHardwareIdentifier('VERISENSE_GSR_PLUS');
+
+    const buf = new Uint8Array([0xff, 0x0f]);
+    const out = sensor.parsePayload(buf)[0].batt;
+    const expected = sensor.calibrateAdcToVolts(0x0fff) * 1000.0 * 2.0;
+    expect(out?.mV ?? 0).toBeCloseTo(expected, 6);
+  });
 });
 
 // ---------------------------------------------------------------------------

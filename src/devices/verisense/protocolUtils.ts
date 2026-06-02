@@ -124,6 +124,12 @@ export interface ProductionConfig {
   firmware: string;
   asmid: string;
   configHeader: number;
+  revHwMajor?: number;
+  revHwMinor?: number;
+  revHwInternal?: number;
+  revFwMajor?: number;
+  revFwMinor?: number;
+  revFwInternal?: number;
 }
 
 export interface ProductionConfigBuildOptions {
@@ -821,5 +827,11 @@ export function parseProductionConfigPayload(response: Uint8Array): ProductionCo
     firmware: `${revFwMajor}.${revFwMinor}.${revFwInternal}`,
     asmid: asmid.toUpperCase(),
     configHeader,
+    revHwMajor,
+    revHwMinor,
+    revHwInternal,
+    revFwMajor,
+    revFwMinor,
+    revFwInternal,
   };
 }

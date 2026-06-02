@@ -1095,6 +1095,17 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     this.productionConfig = prod;
     const parsed = parseProductionConfigPayload(prod);
+
+    if (typeof parsed.revHwMajor === 'number' && typeof parsed.revHwMinor === 'number') {
+      const hwIdentifier = parsed.revHwMajor === 62 ? 'VERISENSE_GSR_PLUS' : 'VERISENSE_PULSE_PLUS';
+      this.adc.setHardwareIdentifier(hwIdentifier);
+      this.adc.setHardwareRevision(
+        parsed.revHwMajor,
+        parsed.revHwMinor,
+        typeof parsed.revHwInternal === 'number' ? parsed.revHwInternal : 0,
+      );
+    }
+
     this.emit('productionConfig', parsed);
     return parsed;
   }

@@ -2,6 +2,7 @@ import { SensorBase } from './SensorBase.js';
 import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
 import { normalizeOperationalConfig } from '../protocol.js';
+import { getVerisenseStreamingBatteryVoltageMultiplier } from '../hardwareModels.js';
 
 export interface ADCGSRSample {
   raw: number;
@@ -54,6 +55,9 @@ export class SensorADC extends SensorBase {
   /** GSR range 0-3 (fixed) or 4 (auto-range). */
   gsrRangeSetting = 4;
   hardwareIdentifier: HardwareIdentifier = 'VERISENSE_PULSE_PLUS';
+  hwRevisionMajor: number | null = null;
+  hwRevisionMinor: number | null = null;
+  hwRevisionInternal: number | null = null;
 
   // Decoded from opConfig for debug/display
   gsrRateSettingRaw = 0;
@@ -68,8 +72,25 @@ export class SensorADC extends SensorBase {
   setHardwareIdentifier(idStr: HardwareIdentifier): void {
     this.hardwareIdentifier = idStr;
   }
+
+  setHardwareRevision(revHwMajor: number, revHwMinor: number, revHwInternal = 0): void {
+    this.hwRevisionMajor = Number.isFinite(revHwMajor) ? Math.trunc(revHwMajor) : null;
+    this.hwRevisionMinor = Number.isFinite(revHwMinor) ? Math.trunc(revHwMinor) : null;
+    this.hwRevisionInternal = Number.isFinite(revHwInternal) ? Math.trunc(revHwInternal) : null;
+  }
+
   setGsrRangeSetting(v: number): void {
     this.gsrRangeSetting = v;
+  }
+
+  private getBatteryVoltageMultiplier(): number {
+    if (this.hwRevisionMajor != null && this.hwRevisionMinor != null) {
+      return getVerisenseStreamingBatteryVoltageMultiplier(this.hwRevisionMajor, this.hwRevisionMinor);
+    }
+
+    // Backward-compatible fallback when production config revision is unavailable.
+    if (this.hardwareIdentifier === 'VERISENSE_GSR_PLUS') return 2.0;
+    return 1.0;
   }
 
   setEnabled(
@@ -209,9 +230,7 @@ export class SensorADC extends SensorBase {
         const chargerStatusBits = (raw16 >> 13) & 0x03;
 
         let mv = this.calibrateAdcToVolts(adc12) * 1000.0;
-        if (this.hardwareIdentifier === 'VERISENSE_GSR_PLUS') {
-          mv *= 1.988;
-        }
+        mv *= this.getBatteryVoltageMultiplier();
 
         const chargerStatusMap: Record<number, string> = {
           0: 'Power-Down/Suspended',

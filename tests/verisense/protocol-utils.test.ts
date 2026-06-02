@@ -3,6 +3,9 @@ import {
   asmRtcBytesToUnixSeconds,
   asmRtcMinutesBytesToUnixSeconds,
   buildProductionConfigPayload,
+  formatVerisenseHardwareRevision,
+  getVerisenseHardwareFriendlyName,
+  getVerisenseStreamingBatteryVoltageMultiplier,
   parseEventLogPayload,
   parsePayloadCrcErrorBankIndexes,
   parseProductionConfigPayloadFull,
@@ -12,6 +15,33 @@ import {
   parseStatusPayload,
   unixSecondsToAsmRtcBytes,
 } from '../../src/devices/verisense/protocol.js';
+
+describe('Hardware model helpers', () => {
+  it('returns friendly model names by HW major', () => {
+    expect(getVerisenseHardwareFriendlyName(61)).toBe('IMU');
+    expect(getVerisenseHardwareFriendlyName(62)).toBe('GSR+');
+    expect(getVerisenseHardwareFriendlyName(64)).toBe('SDK');
+    expect(getVerisenseHardwareFriendlyName(68)).toBe('Pulse+');
+    expect(getVerisenseHardwareFriendlyName(99)).toBeNull();
+  });
+
+  it('formats SR revision strings with friendly names', () => {
+    expect(formatVerisenseHardwareRevision(61, 5, 0, { includeFriendlyName: true })).toBe(
+      'SR61.5.0 (IMU)',
+    );
+    expect(formatVerisenseHardwareRevision(99, 1, 0, { includeFriendlyName: true })).toBe(
+      'SR99.1.0',
+    );
+  });
+
+  it('returns streaming battery voltage multipliers by model thresholds', () => {
+    expect(getVerisenseStreamingBatteryVoltageMultiplier(62, 0)).toBe(2.0);
+    expect(getVerisenseStreamingBatteryVoltageMultiplier(61, 5)).toBe(2.469);
+    expect(getVerisenseStreamingBatteryVoltageMultiplier(68, 8)).toBe(1.0);
+    expect(getVerisenseStreamingBatteryVoltageMultiplier(68, 9)).toBe(2.469);
+    expect(getVerisenseStreamingBatteryVoltageMultiplier(69, 0)).toBe(2.469);
+  });
+});
 
 describe('Verisense RTC helpers', () => {
   it('round-trips unix seconds through the 7-byte RTC format', () => {

@@ -106,6 +106,10 @@ export {
   parseProductionConfigPayload,
   parseProductionConfigPayloadFull,
   parseStatusPayload,
+  VERISENSE_HW_MAJOR_FRIENDLY_NAMES,
+  getVerisenseHardwareFriendlyName,
+  formatVerisenseHardwareRevision,
+  getVerisenseStreamingBatteryVoltageMultiplier,
 } from './devices/verisense/protocol.js';
 export type {
   ProductionConfig,
