@@ -125,6 +125,9 @@ export {
   parseHexByteString,
   formatPendingEventProperties,
   formatVerisenseUnixAndHuman,
+  inferVerisenseChargerChipFamily,
+  describeVerisenseChargerStatus,
+  formatVerisenseChargerStatus,
   formatStatusPayloadForLog,
   formatSchedulerPayloadForLog,
 } from './devices/verisense/protocol.js';
@@ -151,6 +154,7 @@ export type {
   PendingEventPropertyLabel,
   VerisenseUnixAndHumanTimestamp,
   VerisenseStatusPayloadForLog,
+  VerisenseChargerChipFamily,
   VerisenseSchedulerDebugPayloadForLog,
 } from './devices/verisense/protocol.js';
 

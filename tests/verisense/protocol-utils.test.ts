@@ -13,6 +13,7 @@ import {
   parseRecordBufferDetailsPayload,
   parseSchedulerDebugPayload,
   parseStatusPayload,
+  formatVerisenseChargerStatus,
   unixSecondsToAsmRtcBytes,
 } from '../../src/devices/verisense/protocol.js';
 
@@ -132,6 +133,10 @@ describe('Status payload parser', () => {
     // memory capacity
     payload.set([0x00, 0x20, 0x00, 0x00], 60); // 8192 KB
 
+    // charger status byte (bit0 present + bits1..3 status)
+    // present=1, status=0b100 (trickle charging)
+    payload[64] = 0x09;
+
     const parsed = parseStatusPayload(payload, 'status1');
 
     expect(parsed.uniqueIdentifier).toBe('26011401EF29');
@@ -144,6 +149,25 @@ describe('Status payload parser', () => {
     expect(parsed.statusFlags?.recordingPaused).toBe(false);
     expect(parsed.statusFlags?.flashIsFull).toBe(true);
     expect(parsed.batteryFallCounter).toBe(2);
+    expect(parsed.chargerPresent).toBe(true);
+    expect(parsed.chargerStatusCode).toBe(4);
+    expect(parsed.chargerStatusName).toBe('CHARGER_STATUS_TRICKLE_CHARGING');
+  });
+
+  it('formats charger status text for UI summaries', () => {
+    const text = formatVerisenseChargerStatus(
+      {
+        chargerPresent: true,
+        chargerStatusCode: 2,
+        chargerStatusName: 'CHARGER_STATUS_CHARGING_COMPLETE',
+      },
+      {
+        revHwMajor: 68,
+        revHwMinor: 9,
+        revHwInternal: 0,
+      },
+    );
+    expect(text).toBe('XC6803: Charge completed');
   });
 });
 

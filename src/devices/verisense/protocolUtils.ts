@@ -246,6 +246,20 @@ export interface VerisenseStatusPayload {
   memoryBadBanksKb: number | null;
   statusFlags: VerisenseStatusFlags | null;
   batteryFallCounter: number | null;
+  /** Byte 64 bit0 (charger chip present). Null for legacy payloads (<65 bytes). */
+  chargerPresent: boolean | null;
+  /** Byte 64 bits1..3 (BatteryChargerStatus_t). Null for legacy payloads (<65 bytes). */
+  chargerStatusCode: number | null;
+  /** Decoded charger status enum label from chargerStatusCode. */
+  chargerStatusName:
+    | 'CHARGER_STATUS_BAD_BATTERY'
+    | 'CHARGER_STATUS_CHARGING'
+    | 'CHARGER_STATUS_CHARGING_COMPLETE'
+    | 'CHARGER_STATUS_POWER_DOWN'
+    | 'CHARGER_STATUS_TRICKLE_CHARGING'
+    | 'CHARGER_STATUS_NOT_READ'
+    | 'CHARGER_STATUS_UNKNOWN'
+    | null;
 }
 
 export interface VerisenseUnixAndHumanTimestamp {
@@ -257,6 +271,115 @@ export interface VerisenseStatusPayloadForLog extends VerisenseStatusPayload {
   statusTimestamp: VerisenseUnixAndHumanTimestamp;
   lastOkTransfer: VerisenseUnixAndHumanTimestamp;
   lastFailTransfer: VerisenseUnixAndHumanTimestamp;
+}
+
+export type VerisenseChargerChipFamily = 'LM3658D' | 'LTC4123' | 'XC6803' | 'UNKNOWN';
+
+/** Infer charger chip family from hardware revision fields in production config. */
+export function inferVerisenseChargerChipFamily(
+  revHwMajor: number,
+  revHwMinor: number,
+  revHwInternal: number,
+): VerisenseChargerChipFamily {
+  const major = Number(revHwMajor);
+  const minor = Number(revHwMinor);
+  const internal = Number(revHwInternal);
+
+  if ((major === 68 && minor === 7 && internal === 1) || (major === 68 && minor === 8)) {
+    return 'LTC4123';
+  }
+  if (major === 62) {
+    return 'LM3658D';
+  }
+  if ((major === 68 && minor >= 9) || (major === 61 && minor >= 5)) {
+    return 'XC6803';
+  }
+  return 'UNKNOWN';
+}
+
+/** Return chip-specific charger status text for a parsed 3-bit status code. */
+export function describeVerisenseChargerStatus(
+  chipFamily: VerisenseChargerChipFamily,
+  statusCode: number,
+): string {
+  if (statusCode === 7) {
+    return 'Not read yet';
+  }
+
+  if (chipFamily === 'LTC4123') {
+    if (statusCode === 0) {
+      return 'Zinc-air/reverse polarity/temp out-of-range/UVCL at start of charge cycle';
+    }
+    if (statusCode === 1) {
+      return 'Powered on/charging';
+    }
+    if (statusCode === 2) {
+      return 'Charge completed';
+    }
+    if (statusCode === 3) {
+      return 'No power/not charging';
+    }
+  }
+
+  if (chipFamily === 'LM3658D') {
+    if (statusCode === 0 || statusCode === 3) {
+      return 'Power-down, charging suspended or interrupted';
+    }
+    if (statusCode === 1) {
+      return 'Pre-qualification, CC/CV charging, or top-off mode';
+    }
+    if (statusCode === 2) {
+      return 'Charge completed';
+    }
+  }
+
+  if (chipFamily === 'XC6803') {
+    if (statusCode === 0) {
+      return 'Fault (overvoltage, overcurrent, shorted battery, etc.)';
+    }
+    if (statusCode === 1) {
+      return 'Pre-qualification, CC/CV charging, or top-off mode';
+    }
+    if (statusCode === 2) {
+      return 'Charge completed';
+    }
+    if (statusCode === 3) {
+      return 'Power-down, charging suspended or interrupted';
+    }
+    if (statusCode === 4) {
+      return 'Trickle charging';
+    }
+  }
+
+  return 'Unknown';
+}
+
+/** Format charger summary text for UIs, e.g. "XC6803: Charge completed". */
+export function formatVerisenseChargerStatus(
+  status: Pick<
+    VerisenseStatusPayload,
+    'chargerPresent' | 'chargerStatusCode' | 'chargerStatusName'
+  >,
+  hw?: {
+    revHwMajor?: number;
+    revHwMinor?: number;
+    revHwInternal?: number;
+  },
+): string {
+  if (status.chargerPresent == null || status.chargerStatusCode == null || !status.chargerStatusName) {
+    return '-';
+  }
+  if (!status.chargerPresent) {
+    return 'Not present';
+  }
+
+  const chipFamily = inferVerisenseChargerChipFamily(
+    hw?.revHwMajor ?? Number.NaN,
+    hw?.revHwMinor ?? Number.NaN,
+    hw?.revHwInternal ?? Number.NaN,
+  );
+  const text = describeVerisenseChargerStatus(chipFamily, Number(status.chargerStatusCode));
+  return chipFamily === 'UNKNOWN' ? text : `${chipFamily}: ${text}`;
 }
 
 export interface VerisenseSchedulerDebugPayload {
@@ -754,6 +877,29 @@ export function parseStatusPayload(
     };
   }
 
+  let chargerPresent: boolean | null = null;
+  let chargerStatusCode: number | null = null;
+  let chargerStatusName: VerisenseStatusPayload['chargerStatusName'] = null;
+  if (hasExtendedCapacity) {
+    const chargerStatusByte = response[64] ?? 0;
+    chargerPresent = (chargerStatusByte & 0x01) !== 0;
+    chargerStatusCode = (chargerStatusByte >> 1) & 0x07;
+    chargerStatusName =
+      chargerStatusCode === 0
+        ? 'CHARGER_STATUS_BAD_BATTERY'
+        : chargerStatusCode === 1
+          ? 'CHARGER_STATUS_CHARGING'
+          : chargerStatusCode === 2
+            ? 'CHARGER_STATUS_CHARGING_COMPLETE'
+            : chargerStatusCode === 3
+              ? 'CHARGER_STATUS_POWER_DOWN'
+              : chargerStatusCode === 4
+                ? 'CHARGER_STATUS_TRICKLE_CHARGING'
+                : chargerStatusCode === 7
+                  ? 'CHARGER_STATUS_NOT_READ'
+                  : 'CHARGER_STATUS_UNKNOWN';
+  }
+
   return {
     uniqueIdentifier,
     sourceStatusProperty,
@@ -770,6 +916,9 @@ export function parseStatusPayload(
     memoryBadBanksKb,
     statusFlags,
     batteryFallCounter,
+    chargerPresent,
+    chargerStatusCode,
+    chargerStatusName,
   };
 }
 
