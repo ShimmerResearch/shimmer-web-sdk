@@ -96,6 +96,8 @@ export const DEBUG_COMMAND_ID = Object.freeze({
   SYSTEM_RESET: 0x13,
   IC_POWER_CONSUMPTION_TEST: 0x14,
   DELETE_ALL_BONDS: 0x15,
+  BLE_LINK_PARAMS_READ: 0x16,
+  BLE_LINK_OPTIMIZE: 0x17,
 } as const);
 
 export type DebugCommandId = (typeof DEBUG_COMMAND_ID)[keyof typeof DEBUG_COMMAND_ID];

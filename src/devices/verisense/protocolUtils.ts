@@ -309,6 +309,17 @@ export interface VerisenseSchedulerDebugPayloadForLog extends VerisenseScheduler
   };
 }
 
+export interface VerisenseBleLinkDebugPayload {
+  attMtu: number;
+  maxDataLength: number;
+  connectionIntervalUnits: number;
+  connectionIntervalMs: number;
+  txPhy: number;
+  rxPhy: number;
+  optimizationResult: number;
+  isConnected: boolean;
+}
+
 export interface VerisenseEventLogEntry {
   index: number;
   eventId: number;
@@ -847,6 +858,25 @@ export function parseSchedulerDebugPayload(payload: Uint8Array): VerisenseSchedu
   }
 
   return out;
+}
+
+/** Parse debug payload from BLE link read/optimize commands. */
+export function parseBleLinkDebugPayload(payload: Uint8Array): VerisenseBleLinkDebugPayload {
+  if (payload.length < 10) {
+    throw new Error('parseBleLinkDebugPayload: payload is too short');
+  }
+
+  const connectionIntervalUnits = u16le_at(payload, 4);
+  return {
+    attMtu: u16le_at(payload, 0),
+    maxDataLength: u16le_at(payload, 2),
+    connectionIntervalUnits,
+    connectionIntervalMs: connectionIntervalUnits * 1.25,
+    txPhy: payload[6] ?? 0,
+    rxPhy: payload[7] ?? 0,
+    optimizationResult: payload[8] ?? 0,
+    isConnected: (payload[9] ?? 0) !== 0,
+  };
 }
 
 /** Parse debug payload listing bank indexes with bad CRC (2-byte LE entries). */

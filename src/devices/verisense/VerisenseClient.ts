@@ -32,10 +32,12 @@ import {
   parsePayloadCrcErrorBankIndexes,
   parseRecordBufferDetailsPayload,
   parseSchedulerDebugPayload,
+  parseBleLinkDebugPayload,
   normalizeOperationalConfig,
   parseProductionConfigPayload,
   VERISENSE_OP_CONFIG_BYTE_SIZE,
   type ProductionConfig,
+  type VerisenseBleLinkDebugPayload,
   type VerisenseEventLogEntry,
   type VerisenseRecordBufferDetails,
   type VerisenseSchedulerDebugPayload,
@@ -104,6 +106,11 @@ export type {
 export class VerisenseBleDevice extends BaseShimmerClient {
   private static readonly MAX_FRAME_PAYLOAD_LEN = 40000;
   private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
+  private static readonly BLE_LINK_MIN_FW = Object.freeze({
+    major: 1,
+    minor: 4,
+    internal: 23,
+  });
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
   static readonly NUS_TX = NUS_TX;
@@ -1091,6 +1098,81 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   async deleteAllBonds(): Promise<void> {
     await this.sendDebugCommand(DEBUG_COMMAND_ID.DELETE_ALL_BONDS);
+  }
+
+  private _compareFwVersion(
+    a: { major: number; minor: number; internal: number },
+    b: { major: number; minor: number; internal: number },
+  ): number {
+    if (a.major !== b.major) return a.major - b.major;
+    if (a.minor !== b.minor) return a.minor - b.minor;
+    return a.internal - b.internal;
+  }
+
+  private _formatFwVersion(v: { major: number; minor: number; internal: number }): string {
+    return `${v.major}.${v.minor}.${v.internal}`;
+  }
+
+  private async _assertBleLinkDebugSupported(): Promise<void> {
+    let parsed: ProductionConfig | null = null;
+
+    if (this.productionConfig?.length) {
+      if (this._isErasedBlob(this.productionConfig)) {
+        throw new Error(
+          'BLE link debug commands require firmware >= 1.4.23, but production config is erased.',
+        );
+      }
+      parsed = parseProductionConfigPayload(this.productionConfig);
+    } else {
+      parsed = await this.readProductionConfigFromDevice();
+      if (this._isErasedBlob(this.productionConfig)) {
+        throw new Error(
+          'BLE link debug commands require firmware >= 1.4.23, but production config is erased.',
+        );
+      }
+    }
+
+    const current = {
+      major: Number(parsed.revFwMajor),
+      minor: Number(parsed.revFwMinor),
+      internal: Number(parsed.revFwInternal),
+    };
+    if (
+      !Number.isFinite(current.major) ||
+      !Number.isFinite(current.minor) ||
+      !Number.isFinite(current.internal)
+    ) {
+      throw new Error(
+        'BLE link debug commands require firmware >= 1.4.23, but firmware version is unavailable.',
+      );
+    }
+
+    const min = VerisenseBleDevice.BLE_LINK_MIN_FW;
+    if (this._compareFwVersion(current, min) < 0) {
+      throw new Error(
+        `BLE link debug commands require firmware >= ${this._formatFwVersion(min)} (current ${this._formatFwVersion(current)}).`,
+      );
+    }
+  }
+
+  async readBleLinkParams(): Promise<{ payload: Uint8Array }> {
+    await this._assertBleLinkDebugSupported();
+    return this.readDebugCommand(DEBUG_COMMAND_ID.BLE_LINK_PARAMS_READ);
+  }
+
+  async readBleLinkParamsParsed(): Promise<VerisenseBleLinkDebugPayload> {
+    const { payload } = await this.readBleLinkParams();
+    return parseBleLinkDebugPayload(payload);
+  }
+
+  async optimizeBleLink(): Promise<{ payload: Uint8Array }> {
+    await this._assertBleLinkDebugSupported();
+    return this.readDebugCommand(DEBUG_COMMAND_ID.BLE_LINK_OPTIMIZE);
+  }
+
+  async optimizeBleLinkParsed(): Promise<VerisenseBleLinkDebugPayload> {
+    const { payload } = await this.optimizeBleLink();
+    return parseBleLinkDebugPayload(payload);
   }
 
   async setStreamingMode(enabled: boolean): Promise<void> {
