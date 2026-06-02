@@ -34,6 +34,7 @@ import {
   parseSchedulerDebugPayload,
   normalizeOperationalConfig,
   parseProductionConfigPayload,
+  VERISENSE_OP_CONFIG_BYTE_SIZE,
   type ProductionConfig,
   type VerisenseEventLogEntry,
   type VerisenseRecordBufferDetails,
@@ -196,6 +197,39 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     return this.sensors[4];
   }
 
+  private _setOperationalConfigErasedFallback(lengthHint?: number): Uint8Array {
+    const fallbackLen =
+      lengthHint ?? this.operationalConfig?.length ?? VERISENSE_OP_CONFIG_BYTE_SIZE;
+    const op = new Uint8Array(fallbackLen);
+    op.fill(0xff);
+    this.operationalConfig = op;
+    this.emit('opConfigErased', { raw: new Uint8Array(op) });
+    this.emit('opConfig', { op: new Uint8Array(op), erased: true });
+    return op;
+  }
+
+  private async _bootstrapConfigsAfterConnect(): Promise<void> {
+    await this.readProductionConfigFromDevice();
+    try {
+      await this.readOpConfigFromDevice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const invalidOp = /Invalid operational config returned from device/i.test(msg);
+      const productionErased = this._isUninitializedBlob(this.productionConfig);
+
+      if (invalidOp && productionErased) {
+        console.warn(
+          '[opcfg] invalid operational config during bootstrap; treating as erased because production config is uninitialized',
+          { payloadLengthHint: this.operationalConfig?.length ?? VERISENSE_OP_CONFIG_BYTE_SIZE },
+        );
+        this._setOperationalConfigErasedFallback();
+        return;
+      }
+
+      throw e;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // BLE connect / disconnect
   // ---------------------------------------------------------------------------
@@ -255,8 +289,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this._emitStatus(`Connected: ${this.device.name ?? 'Verisense'}`);
     this.emit('connected', { name: this.device.name, id: this.device.id });
 
-    await this.readProductionConfigFromDevice();
-    await this.readOpConfigFromDevice();
+    await this._bootstrapConfigsAfterConnect();
 
     return true;
   }
@@ -320,8 +353,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     this._emitStatus('Connected via USB Serial');
     this.emit('connected', { kind: 'serial' });
-    await this.readProductionConfigFromDevice();
-    await this.readOpConfigFromDevice();
+    await this._bootstrapConfigsAfterConnect();
     return true;
   }
 
@@ -1088,15 +1120,41 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     throw new Error('Operational config not cached. Call readOpConfigFromDevice() first.');
   }
 
+  private _isUniformBlob(
+    payload: Uint8Array | null | undefined,
+    expectedByte: number,
+  ): boolean {
+    if (!payload?.length) return false;
+    const expected = expectedByte & 0xff;
+    for (let i = 0; i < payload.length; i++) {
+      if (payload[i] !== expected) return false;
+    }
+    return true;
+  }
+
+  private _isErasedBlob(payload: Uint8Array | null | undefined): boolean {
+    return this._isUniformBlob(payload, 0xff);
+  }
+
+  private _isZeroBlob(payload: Uint8Array | null | undefined): boolean {
+    return this._isUniformBlob(payload, 0x00);
+  }
+
+  private _isUninitializedBlob(payload: Uint8Array | null | undefined): boolean {
+    return this._isErasedBlob(payload) || this._isZeroBlob(payload);
+  }
+
   async readProductionConfigFromDevice(): Promise<ProductionConfig> {
     const rsp = await this.readProductionConfig();
     const prod = normalizeOperationalConfig(rsp?.payload);
     if (!prod?.length) throw new Error('Invalid production config returned from device');
 
+    const erased = this._isErasedBlob(prod);
+
     this.productionConfig = prod;
     const parsed = parseProductionConfigPayload(prod);
 
-    if (typeof parsed.revHwMajor === 'number' && typeof parsed.revHwMinor === 'number') {
+    if (!erased && typeof parsed.revHwMajor === 'number' && typeof parsed.revHwMinor === 'number') {
       const hwIdentifier = parsed.revHwMajor === 62 ? 'VERISENSE_GSR_PLUS' : 'VERISENSE_PULSE_PLUS';
       this.adc.setHardwareIdentifier(hwIdentifier);
       this.adc.setHardwareRevision(
@@ -1106,28 +1164,50 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       );
     }
 
+    if (erased) {
+      this.emit('productionConfigErased', { raw: new Uint8Array(prod) });
+    }
+
     this.emit('productionConfig', parsed);
     return parsed;
   }
 
   async readOpConfigFromDevice(): Promise<Uint8Array> {
     const rsp = await this.readOperationalConfig();
-    const op = normalizeOperationalConfig(rsp?.payload);
-    if (!op?.length || op[0] !== 0x5a)
+    let op = normalizeOperationalConfig(rsp?.payload);
+
+    // Some firmware erase flows can return an empty payload for operational config.
+    // Treat this as erased (all 0xFF) instead of invalid.
+    if (!op?.length) {
+      return this._setOperationalConfigErasedFallback();
+    }
+
+    if (this._isZeroBlob(op)) {
+      console.warn('[opcfg] operational config payload is all 0x00; treating as erased');
+      return this._setOperationalConfigErasedFallback(op.length);
+    }
+
+    const erased = this._isErasedBlob(op);
+    if (!erased && op[0] !== 0x5a) {
       throw new Error('Invalid operational config returned from device');
+    }
 
     this.operationalConfig = op;
 
-    try {
-      this.accel1.applyOperationalConfig(op);
-      this.gyroAccel2.applyOperationalConfig(op);
-      this.adc.applyOperationalConfig(op);
-      this.ppg.applyOperationalConfig(op);
-    } catch (e) {
-      console.warn('[opcfg] apply after read failed:', e);
+    if (!erased) {
+      try {
+        this.accel1.applyOperationalConfig(op);
+        this.gyroAccel2.applyOperationalConfig(op);
+        this.adc.applyOperationalConfig(op);
+        this.ppg.applyOperationalConfig(op);
+      } catch (e) {
+        console.warn('[opcfg] apply after read failed:', e);
+      }
+    } else {
+      this.emit('opConfigErased', { raw: new Uint8Array(op) });
     }
 
-    this.emit('opConfig', { op });
+    this.emit('opConfig', { op, erased });
     return new Uint8Array(op);
   }
 

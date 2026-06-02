@@ -1,6 +1,57 @@
+import { ASM_PROPERTY } from './constants.js';
+
 /** Read a 16-bit unsigned integer, little-endian. */
 export function u16le(b0: number, b1: number): number {
   return (b1 << 8) | b0;
+}
+
+/** Format a single byte as an uppercase `0xNN` string. */
+export function formatByteAsHex(v: number): string {
+  return `0x${(v & 0xff).toString(16).toUpperCase().padStart(2, '0')}`;
+}
+
+/** Format bytes as `[0xAA, 0xBB, ...]`. */
+export function formatByteArrayAsHex(bytes: ArrayLike<number> | ArrayBuffer | null | undefined): string {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes ?? []);
+  return `[${Array.from(u8, (b) => formatByteAsHex(Number(b))).join(', ')}]`;
+}
+
+/** Parse text containing hex bytes like `0x5A, 00 12` into a Uint8Array. */
+export function parseHexByteString(text: string): Uint8Array {
+  const matches = String(text ?? '').match(/[0-9a-fA-F]{2}/g) ?? [];
+  if (!matches.length) {
+    throw new Error('No hex bytes found. Example: 0x5A, 0x00, 0x12');
+  }
+  return new Uint8Array(matches.map((h) => Number.parseInt(h, 16)));
+}
+
+export interface PendingEventPropertyLabel {
+  value: number;
+  hex: string;
+  property: string;
+}
+
+const ASM_PROPERTY_BY_VALUE = new Map(
+  Object.entries(ASM_PROPERTY).map(([name, value]) => [Number(value), name]),
+);
+
+/** Label pending-event property values with both enum name and hex representation. */
+export function formatPendingEventProperties(
+  pendingProps: ArrayLike<number> | null | undefined,
+): PendingEventPropertyLabel[] {
+  const list = Array.isArray(pendingProps)
+    ? pendingProps
+    : pendingProps == null
+      ? []
+      : Array.from(pendingProps);
+  return list.map((prop) => {
+    const value = Number(prop) & 0xff;
+    return {
+      value,
+      hex: formatByteAsHex(value),
+      property: ASM_PROPERTY_BY_VALUE.get(value) ?? 'UNKNOWN_PROPERTY',
+    };
+  });
 }
 
 /** Read a signed 16-bit integer at byte offset `off`, little-endian. */
@@ -195,6 +246,17 @@ export interface VerisenseStatusPayload {
   batteryFallCounter: number | null;
 }
 
+export interface VerisenseUnixAndHumanTimestamp {
+  unix: number;
+  human: string;
+}
+
+export interface VerisenseStatusPayloadForLog extends VerisenseStatusPayload {
+  statusTimestamp: VerisenseUnixAndHumanTimestamp;
+  lastOkTransfer: VerisenseUnixAndHumanTimestamp;
+  lastFailTransfer: VerisenseUnixAndHumanTimestamp;
+}
+
 export interface VerisenseSchedulerDebugPayload {
   currentTimeUnixSeconds: number;
   bleControlCounter: 'data-transfer' | 'status1' | 'rtc-sync' | 'status2' | 'never' | 'unknown';
@@ -227,12 +289,108 @@ export interface VerisenseSchedulerDebugPayload {
   sensorInactivityUnixSeconds?: number;
 }
 
+export interface VerisenseSchedulerDebugPayloadForLog extends VerisenseSchedulerDebugPayload {
+  currentTime: VerisenseUnixAndHumanTimestamp;
+  pendingDataTransfer: VerisenseUnixAndHumanTimestamp;
+  pendingStatus1: VerisenseUnixAndHumanTimestamp;
+  pendingRtcSync: VerisenseUnixAndHumanTimestamp;
+  pendingRetry: VerisenseUnixAndHumanTimestamp;
+  pendingStatus2?: VerisenseUnixAndHumanTimestamp;
+  ppgMeasurement?: VerisenseUnixAndHumanTimestamp;
+  stepCounterReset?: VerisenseUnixAndHumanTimestamp;
+  sensorInactivity?: VerisenseUnixAndHumanTimestamp;
+  adaptiveScheduler?: VerisenseSchedulerDebugPayload['adaptiveScheduler'] & {
+    nextTime: VerisenseUnixAndHumanTimestamp;
+  };
+  ltfRetry?: VerisenseSchedulerDebugPayload['ltfRetry'] & {
+    nextTime: VerisenseUnixAndHumanTimestamp;
+  };
+}
+
 export interface VerisenseEventLogEntry {
   index: number;
   eventId: number;
   eventName: string;
   timestampUnixSeconds: number | null;
   batteryMilliVolts: number | null;
+}
+
+/** Format unix seconds as raw + human-readable local datetime for logging. */
+export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixAndHumanTimestamp {
+  const unix = Number(unixSeconds);
+  if (!Number.isFinite(unix)) {
+    return { unix, human: 'invalid' };
+  }
+  if (unix <= 0) {
+    return { unix, human: '1970-01-01 00:00:00 (epoch)' };
+  }
+  if (unix > 4102444800) {
+    return { unix, human: 'not-valid' };
+  }
+  const d = new Date(unix * 1000);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const HH = String(d.getHours()).padStart(2, '0');
+  const MM = String(d.getMinutes()).padStart(2, '0');
+  const SS = String(d.getSeconds()).padStart(2, '0');
+  return {
+    unix,
+    human: `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`,
+  };
+}
+
+/** Convert parsed status payload into an object with human-readable timestamps for logs. */
+export function formatStatusPayloadForLog(status: VerisenseStatusPayload): VerisenseStatusPayloadForLog {
+  return {
+    ...status,
+    statusTimestamp: formatVerisenseUnixAndHuman(status.statusTimestampSeconds),
+    lastOkTransfer: formatVerisenseUnixAndHuman(status.lastOkTransferSeconds),
+    lastFailTransfer: formatVerisenseUnixAndHuman(status.lastFailTransferSeconds),
+  };
+}
+
+/** Convert parsed scheduler payload into an object with human-readable timestamps for logs. */
+export function formatSchedulerPayloadForLog(
+  parsed: VerisenseSchedulerDebugPayload,
+): VerisenseSchedulerDebugPayloadForLog {
+  const out: VerisenseSchedulerDebugPayloadForLog = {
+    ...parsed,
+    adaptiveScheduler: undefined,
+    ltfRetry: undefined,
+    currentTime: formatVerisenseUnixAndHuman(parsed.currentTimeUnixSeconds),
+    pendingDataTransfer: formatVerisenseUnixAndHuman(parsed.pendingDataTransferUnixSeconds),
+    pendingStatus1: formatVerisenseUnixAndHuman(parsed.pendingStatus1UnixSeconds),
+    pendingRtcSync: formatVerisenseUnixAndHuman(parsed.pendingRtcSyncUnixSeconds),
+    pendingRetry: formatVerisenseUnixAndHuman(parsed.pendingRetryUnixSeconds),
+  };
+
+  if (typeof parsed.pendingStatus2UnixSeconds === 'number') {
+    out.pendingStatus2 = formatVerisenseUnixAndHuman(parsed.pendingStatus2UnixSeconds);
+  }
+  if (typeof parsed.ppgMeasurementUnixSeconds === 'number') {
+    out.ppgMeasurement = formatVerisenseUnixAndHuman(parsed.ppgMeasurementUnixSeconds);
+  }
+  if (typeof parsed.stepCounterResetUnixSeconds === 'number') {
+    out.stepCounterReset = formatVerisenseUnixAndHuman(parsed.stepCounterResetUnixSeconds);
+  }
+  if (typeof parsed.sensorInactivityUnixSeconds === 'number') {
+    out.sensorInactivity = formatVerisenseUnixAndHuman(parsed.sensorInactivityUnixSeconds);
+  }
+  if (parsed.adaptiveScheduler) {
+    out.adaptiveScheduler = {
+      ...parsed.adaptiveScheduler,
+      nextTime: formatVerisenseUnixAndHuman(parsed.adaptiveScheduler.nextUnixSeconds),
+    };
+  }
+  if (parsed.ltfRetry) {
+    out.ltfRetry = {
+      ...parsed.ltfRetry,
+      nextTime: formatVerisenseUnixAndHuman(parsed.ltfRetry.nextUnixSeconds),
+    };
+  }
+
+  return out;
 }
 
 export interface VerisenseRecordBufferDetails {
