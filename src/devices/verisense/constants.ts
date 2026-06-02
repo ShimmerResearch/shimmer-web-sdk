@@ -11,6 +11,9 @@ export const NUS_TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 /** NUS RX characteristic UUID (host subscribes to notifications from this). */
 export const NUS_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
+/** Nordic Secure DFU service UUID (buttonless DFU). */
+export const NORDIC_DFU_SERVICE = '0000fe59-0000-1000-8000-00805f9b34fb';
+
 // ---------------------------------------------------------------------------
 // Verisense protocol command/property constants
 // ---------------------------------------------------------------------------
