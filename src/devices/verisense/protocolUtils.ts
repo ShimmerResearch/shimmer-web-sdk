@@ -366,7 +366,11 @@ export function formatVerisenseChargerStatus(
     revHwInternal?: number;
   },
 ): string {
-  if (status.chargerPresent == null || status.chargerStatusCode == null || !status.chargerStatusName) {
+  if (
+    status.chargerPresent == null ||
+    status.chargerStatusCode == null ||
+    !status.chargerStatusName
+  ) {
     return '-';
   }
   if (!status.chargerPresent) {
