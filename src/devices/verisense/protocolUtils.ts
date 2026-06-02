@@ -11,7 +11,9 @@ export function formatByteAsHex(v: number): string {
 }
 
 /** Format bytes as `[0xAA, 0xBB, ...]`. */
-export function formatByteArrayAsHex(bytes: ArrayLike<number> | ArrayBuffer | null | undefined): string {
+export function formatByteArrayAsHex(
+  bytes: ArrayLike<number> | ArrayBuffer | null | undefined,
+): string {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes ?? []);
   return `[${Array.from(u8, (b) => formatByteAsHex(Number(b))).join(', ')}]`;
 }
@@ -341,7 +343,9 @@ export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixA
 }
 
 /** Convert parsed status payload into an object with human-readable timestamps for logs. */
-export function formatStatusPayloadForLog(status: VerisenseStatusPayload): VerisenseStatusPayloadForLog {
+export function formatStatusPayloadForLog(
+  status: VerisenseStatusPayload,
+): VerisenseStatusPayloadForLog {
   return {
     ...status,
     statusTimestamp: formatVerisenseUnixAndHuman(status.statusTimestampSeconds),

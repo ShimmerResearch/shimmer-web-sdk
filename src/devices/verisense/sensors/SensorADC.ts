@@ -85,7 +85,10 @@ export class SensorADC extends SensorBase {
 
   private getBatteryVoltageMultiplier(): number {
     if (this.hwRevisionMajor != null && this.hwRevisionMinor != null) {
-      return getVerisenseStreamingBatteryVoltageMultiplier(this.hwRevisionMajor, this.hwRevisionMinor);
+      return getVerisenseStreamingBatteryVoltageMultiplier(
+        this.hwRevisionMajor,
+        this.hwRevisionMinor,
+      );
     }
 
     // Backward-compatible fallback when production config revision is unavailable.

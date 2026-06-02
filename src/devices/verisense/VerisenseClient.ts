@@ -1120,10 +1120,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     throw new Error('Operational config not cached. Call readOpConfigFromDevice() first.');
   }
 
-  private _isUniformBlob(
-    payload: Uint8Array | null | undefined,
-    expectedByte: number,
-  ): boolean {
+  private _isUniformBlob(payload: Uint8Array | null | undefined, expectedByte: number): boolean {
     if (!payload?.length) return false;
     const expected = expectedByte & 0xff;
     for (let i = 0; i < payload.length; i++) {

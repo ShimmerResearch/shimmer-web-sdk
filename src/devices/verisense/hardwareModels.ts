@@ -1,14 +1,17 @@
 export type VerisenseHardwareFriendlyName = 'IMU' | 'GSR+' | 'SDK' | 'Pulse+';
 
-export const VERISENSE_HW_MAJOR_FRIENDLY_NAMES: Readonly<Record<number, VerisenseHardwareFriendlyName>> =
-  {
-    61: 'IMU',
-    62: 'GSR+',
-    64: 'SDK',
-    68: 'Pulse+',
-  };
+export const VERISENSE_HW_MAJOR_FRIENDLY_NAMES: Readonly<
+  Record<number, VerisenseHardwareFriendlyName>
+> = {
+  61: 'IMU',
+  62: 'GSR+',
+  64: 'SDK',
+  68: 'Pulse+',
+};
 
-export function getVerisenseHardwareFriendlyName(revHwMajor: number): VerisenseHardwareFriendlyName | null {
+export function getVerisenseHardwareFriendlyName(
+  revHwMajor: number,
+): VerisenseHardwareFriendlyName | null {
   return VERISENSE_HW_MAJOR_FRIENDLY_NAMES[revHwMajor] ?? null;
 }
 
@@ -37,7 +40,11 @@ export function getVerisenseStreamingBatteryVoltageMultiplier(
   if (revHwMajor === 62) return 2.0;
 
   // SR61.5 and >= SR68.9
-  if ((revHwMajor === 61 && revHwMinor === 5) || revHwMajor > 68 || (revHwMajor === 68 && revHwMinor >= 9)) {
+  if (
+    (revHwMajor === 61 && revHwMinor === 5) ||
+    revHwMajor > 68 ||
+    (revHwMajor === 68 && revHwMinor >= 9)
+  ) {
     return 2.469;
   }
 
