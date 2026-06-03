@@ -155,7 +155,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _pending: PendingCommandRequest | null = null;
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
-  private _testReportMode = false;  // Flag to capture raw streaming bytes for test reports
+  private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
 
   readonly stripStreamCrc: boolean;
   readonly verifyStreamCrc: boolean;
