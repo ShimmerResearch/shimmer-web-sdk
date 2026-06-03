@@ -50,6 +50,7 @@ export {
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
   VerisenseClientOptions,
+  RunHardwareTestReportOptions,
   TransportKind,
   DeviceMode,
   SensorMap,

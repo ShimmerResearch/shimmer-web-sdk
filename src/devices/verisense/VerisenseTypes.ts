@@ -43,6 +43,16 @@ export interface TransferLoggedDataResult {
   blob?: Blob;
 }
 
+export interface RunHardwareTestReportOptions {
+  timeoutMs?: number;
+  marker?: string;
+  endMarker?: string;
+  completionIdleMs?: number;
+  factoryTestType?: number;
+  signal?: AbortSignal | null;
+  onChunk?: ((chunk: string, aggregate: string) => void) | null;
+}
+
 export interface VerisenseClientOptions {
   hardwareIdentifier?: string;
   stripStreamCrc?: boolean;

@@ -57,6 +57,7 @@ import {
 import type {
   DeviceMode,
   PendingCommandRequest,
+  RunHardwareTestReportOptions,
   SensorMap,
   StreamPacket,
   SyncSession,
@@ -68,6 +69,7 @@ import type {
 } from './VerisenseTypes.js';
 export type {
   DeviceMode,
+  RunHardwareTestReportOptions,
   SensorMap,
   StreamPacket,
   TransferLoggedDataOptions,
@@ -153,6 +155,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _pending: PendingCommandRequest | null = null;
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
+  private _testReportMode = false;  // Flag to capture raw streaming bytes for test reports
 
   readonly stripStreamCrc: boolean;
   readonly verifyStreamCrc: boolean;
@@ -882,6 +885,164 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.runTestMode(payload);
   }
 
+  async runHardwareTestReport(
+    hwMajor: number,
+    hwMinor = 0,
+    hwInternal = 0,
+    opts: RunHardwareTestReportOptions = {},
+  ): Promise<string> {
+    const timeoutMs = Math.max(1000, Math.trunc(opts.timeoutMs ?? 120000));
+    const completionIdleMs = Math.max(100, Math.trunc(opts.completionIdleMs ?? 1200));
+    const marker = String(opts.marker ?? '').trim();
+    const endMarker = String(
+      opts.endMarker ??
+        (marker.includes('TEST START') ? marker.replace('TEST START', 'TEST END') : ''),
+    ).trim();
+    const factoryTestType = Math.max(0, Math.min(0xff, Math.trunc(opts.factoryTestType ?? 0)));
+    const abortSignal = opts.signal ?? null;
+    const onChunk = typeof opts.onChunk === 'function' ? opts.onChunk : null;
+
+    const TEST_REPORT_MODE_ID = 0xfe;
+    const payload = new Uint8Array([
+      TEST_REPORT_MODE_ID,
+      hwMajor & 0xff,
+      hwMinor & 0xff,
+      hwInternal & 0xff,
+      (hwInternal >> 8) & 0xff,
+      factoryTestType & 0xff,
+    ]);
+
+    return new Promise<string>((resolve, reject) => {
+      let done = false;
+      let aggregate = '';
+      let decoder: TextDecoder;
+      try {
+        decoder = new TextDecoder('latin1');
+      } catch {
+        decoder = new TextDecoder();
+      }
+      let sawMarker = marker.length === 0;
+      const effectiveIdleMs = Math.max(completionIdleMs, 10000);
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let off: (() => void) | null = null;
+      let onAbort: (() => void) | null = null;
+
+      const sanitizeChunk = (text: string): string => {
+        // Drop control bytes that occasionally appear in factory stream noise
+        // while preserving CR/LF/TAB for report formatting.
+        return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+      };
+
+      const cleanup = () => {
+        this._testReportMode = false;
+        if (off) {
+          try {
+            off();
+          } catch {
+            /* ignore */
+          }
+          off = null;
+        }
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        if (abortSignal && onAbort) {
+          try {
+            abortSignal.removeEventListener('abort', onAbort);
+          } catch {
+            /* ignore */
+          }
+          onAbort = null;
+        }
+      };
+
+      const finish = (err?: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (err) {
+          reject(err);
+          return;
+        }
+        const tail = decoder.decode();
+        if (tail) {
+          aggregate += tail;
+        }
+        resolve(aggregate);
+      };
+
+      const scheduleIdleFinish = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (!sawMarker) return;
+          finish();
+        }, effectiveIdleMs);
+      };
+
+      off = this.on<Uint8Array>('testReportChunk', (rawChunk) => {
+        if (done || !rawChunk?.length) return;
+
+        const chunk = sanitizeChunk(decoder.decode(rawChunk, { stream: true }));
+        if (!chunk.length) return;
+
+        aggregate += chunk;
+        if (!sawMarker && marker.length > 0 && aggregate.includes(marker)) {
+          sawMarker = true;
+        }
+
+        const sawEndMarker =
+          (endMarker.length > 0 && aggregate.includes(endMarker)) || /TEST END/.test(aggregate);
+
+        if (sawEndMarker) {
+          finish();
+          return;
+        }
+
+        if (onChunk) {
+          try {
+            onChunk(chunk, aggregate);
+          } catch {
+            /* ignore callback errors */
+          }
+        }
+
+        if (sawMarker) {
+          scheduleIdleFinish();
+        }
+      });
+
+      timeoutTimer = setTimeout(() => {
+        finish(
+          new Error(
+            `runHardwareTestReport timeout after ${timeoutMs} ms while waiting for report data`,
+          ),
+        );
+      }, timeoutMs);
+
+      if (abortSignal) {
+        if (abortSignal.aborted) {
+          finish(new Error('runHardwareTestReport aborted'));
+          return;
+        }
+        onAbort = () => finish(new Error('runHardwareTestReport aborted'));
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      // Enable test report mode before sending command
+      this._testReportMode = true;
+      void this.runTestMode(payload).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        finish(new Error(`runHardwareTestReport failed to start test mode: ${msg}`));
+      });
+    });
+  }
+
   private _buildDebugPayload(
     debugId: DebugCommandId,
     args: Uint8Array | number[] = [],
@@ -1473,6 +1634,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   private _feedStreamBytes(chunk: Uint8Array): void {
     if (this._mode === 'logged' && this._sync) this._sync.lastRxAt = Date.now();
+
+    // Test report data is streamed as raw text bytes after the initial ACK.
+    // Once the command pending state is cleared, bypass frame parsing entirely.
+    if (this._testReportMode && !this._pending) {
+      if (chunk?.length) this.emit('testReportChunk', chunk);
+      return;
+    }
 
     this._appendStreamBuf(chunk);
 
