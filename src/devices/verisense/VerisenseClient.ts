@@ -1461,7 +1461,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       } catch (error) {
         if (this._isAbortError(error)) return finish('aborted');
         const msg = error instanceof Error ? error.message : String(error);
-        if (/require firmware >=|unavailable on this firmware|firmware version is unavailable/i.test(msg)) {
+        if (
+          /require firmware >=|unavailable on this firmware|firmware version is unavailable/i.test(
+            msg,
+          )
+        ) {
           return finish('unsupported');
         }
         throw error;
@@ -1528,8 +1532,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       const elapsedMs = Math.max(0, nowMillis() - startedAt);
       const stableReady = stableCount >= stableReadCount && elapsedMs >= minSettleTimeMs;
-      const settleReady =
-        settleMode === 'stability' ? stableReady : stableReady && optimizedEnough;
+      const settleReady = settleMode === 'stability' ? stableReady : stableReady && optimizedEnough;
 
       if (settleReady) {
         return finish('stabilized');
