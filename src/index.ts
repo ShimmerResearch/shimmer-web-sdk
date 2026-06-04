@@ -49,6 +49,10 @@ export {
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
+  BleLinkAutoOptimizeSample,
+  BleLinkAutoOptimizeOptions,
+  BleLinkAutoOptimizeResult,
+  BleLinkAutoOptimizeStopReason,
   VerisenseClientOptions,
   RunHardwareTestReportOptions,
   TransportKind,

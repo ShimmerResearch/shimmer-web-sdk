@@ -1,4 +1,5 @@
 import type { AsmCommand, AsmProperty } from './constants.js';
+import type { VerisenseBleLinkDebugPayload } from './protocol.js';
 import type { SensorADC } from './sensors/SensorADC.js';
 import type { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import type { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
@@ -93,4 +94,43 @@ export interface SyncSession {
   writable: FileSystemWritableFileStream | null;
   chunks: Uint8Array[];
   onProgress: ((info: LoggedTransferProgressInfo) => void) | null;
+}
+
+export type BleLinkAutoOptimizeStopReason =
+  | 'stabilized'
+  | 'timeout'
+  | 'aborted'
+  | 'unsupported'
+  | 'not-ble';
+
+export interface BleLinkAutoOptimizeOptions {
+  pollIntervalMs?: number;
+  stableReadCount?: number;
+  maxDurationMs?: number;
+  settleMode?: 'target-and-stability' | 'stability';
+  minSettleTimeMs?: number;
+  forceOptimizeAttempts?: number;
+  targetConnectionIntervalUnits?: number;
+  targetPhy?: number;
+  minDataLength?: number;
+  signal?: AbortSignal | null;
+  onSample?: ((sample: BleLinkAutoOptimizeSample) => void) | null;
+}
+
+export interface BleLinkAutoOptimizeSample {
+  source: 'read' | 'optimize';
+  iteration: number;
+  stableCount: number;
+  parsed: VerisenseBleLinkDebugPayload;
+  signature: string;
+  optimizedEnough: boolean;
+}
+
+export interface BleLinkAutoOptimizeResult {
+  reason: BleLinkAutoOptimizeStopReason;
+  iterations: number;
+  optimizeAttempts: number;
+  stableCount: number;
+  lastParsed: VerisenseBleLinkDebugPayload | null;
+  durationMs: number;
 }

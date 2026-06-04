@@ -55,6 +55,10 @@ import {
   validatePendingResponse,
 } from './requestValidation.js';
 import type {
+  BleLinkAutoOptimizeSample,
+  BleLinkAutoOptimizeOptions,
+  BleLinkAutoOptimizeResult,
+  BleLinkAutoOptimizeStopReason,
   DeviceMode,
   PendingCommandRequest,
   RunHardwareTestReportOptions,
@@ -68,6 +72,10 @@ import type {
   VerisenseCommandResponse,
 } from './VerisenseTypes.js';
 export type {
+  BleLinkAutoOptimizeSample,
+  BleLinkAutoOptimizeOptions,
+  BleLinkAutoOptimizeResult,
+  BleLinkAutoOptimizeStopReason,
   DeviceMode,
   RunHardwareTestReportOptions,
   SensorMap,
@@ -1334,6 +1342,208 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   async optimizeBleLinkParsed(): Promise<VerisenseBleLinkDebugPayload> {
     const { payload } = await this.optimizeBleLink();
     return parseBleLinkDebugPayload(payload);
+  }
+
+  private _bleLinkSignature(parsed: VerisenseBleLinkDebugPayload): string {
+    return [
+      parsed.attMtu,
+      parsed.maxDataLength,
+      parsed.connectionIntervalUnits,
+      parsed.txPhy,
+      parsed.rxPhy,
+      parsed.isConnected ? 1 : 0,
+    ].join('|');
+  }
+
+  private _bleLinkOptimizedEnough(
+    parsed: VerisenseBleLinkDebugPayload,
+    {
+      targetConnectionIntervalUnits,
+      targetPhy,
+      minDataLength,
+    }: {
+      targetConnectionIntervalUnits: number;
+      targetPhy: number;
+      minDataLength: number;
+    },
+  ): boolean {
+    const intervalOk = parsed.connectionIntervalUnits <= targetConnectionIntervalUnits;
+    const phyOk = parsed.txPhy === targetPhy && parsed.rxPhy === targetPhy;
+    const mtuBoundDataLength = Math.max(20, (parsed.attMtu || 23) - 3);
+    const requiredDataLength = Math.min(minDataLength, mtuBoundDataLength);
+    const dataLenOk = parsed.maxDataLength >= requiredDataLength;
+    return intervalOk && phyOk && dataLenOk;
+  }
+
+  private _isAbortError(error: unknown): boolean {
+    if ((error as { name?: string } | null)?.name === 'AbortError') return true;
+    const msg = error instanceof Error ? error.message : String(error);
+    return /abort/i.test(msg);
+  }
+
+  private _waitWithAbort(ms: number, signal?: AbortSignal | null): Promise<void> {
+    if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+    if (signal?.aborted) {
+      const err = new Error('Operation aborted');
+      err.name = 'AbortError';
+      return Promise.reject(err);
+    }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        const err = new Error('Operation aborted');
+        err.name = 'AbortError';
+        reject(err);
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  async autoOptimizeBleLink(
+    opts: BleLinkAutoOptimizeOptions = {},
+  ): Promise<BleLinkAutoOptimizeResult> {
+    const startedAt = nowMillis();
+    const pollIntervalMs = Math.max(100, Math.trunc(opts.pollIntervalMs ?? 700));
+    const stableReadCount = Math.max(1, Math.trunc(opts.stableReadCount ?? 3));
+    const maxDurationMs = Math.max(pollIntervalMs, Math.trunc(opts.maxDurationMs ?? 20000));
+    const settleMode = opts.settleMode === 'stability' ? 'stability' : 'target-and-stability';
+    const minSettleTimeMs = Math.max(
+      0,
+      Math.trunc(opts.minSettleTimeMs ?? (settleMode === 'stability' ? pollIntervalMs * 2 : 0)),
+    );
+    const forceOptimizeAttempts = Math.max(
+      0,
+      Math.trunc(opts.forceOptimizeAttempts ?? (settleMode === 'stability' ? 2 : 0)),
+    );
+    const targetConnectionIntervalUnits = Math.max(
+      6,
+      Math.trunc(opts.targetConnectionIntervalUnits ?? 6),
+    );
+    const targetPhy = Math.max(1, Math.min(4, Math.trunc(opts.targetPhy ?? 2)));
+    const minDataLength = Math.max(20, Math.min(251, Math.trunc(opts.minDataLength ?? 251)));
+    const signal = opts.signal ?? null;
+
+    let iterations = 0;
+    let optimizeAttempts = 0;
+    let stableCount = 0;
+    let lastSignature = '';
+    let lastParsed: VerisenseBleLinkDebugPayload | null = null;
+
+    const finish = (reason: BleLinkAutoOptimizeResult['reason']): BleLinkAutoOptimizeResult => ({
+      reason,
+      iterations,
+      optimizeAttempts,
+      stableCount,
+      lastParsed,
+      durationMs: Math.max(0, nowMillis() - startedAt),
+    });
+
+    if (this._transportKind !== 'ble') return finish('not-ble');
+    if (signal?.aborted) return finish('aborted');
+
+    while (nowMillis() - startedAt < maxDurationMs) {
+      if (signal?.aborted) return finish('aborted');
+      if (this._transportKind !== 'ble') return finish('not-ble');
+
+      let parsed: VerisenseBleLinkDebugPayload;
+      try {
+        parsed = await this.readBleLinkParamsParsed();
+      } catch (error) {
+        if (this._isAbortError(error)) return finish('aborted');
+        const msg = error instanceof Error ? error.message : String(error);
+        if (/require firmware >=|unavailable on this firmware|firmware version is unavailable/i.test(msg)) {
+          return finish('unsupported');
+        }
+        throw error;
+      }
+
+      iterations += 1;
+      lastParsed = parsed;
+
+      let signature = this._bleLinkSignature(parsed);
+      stableCount = signature === lastSignature ? stableCount + 1 : 1;
+      lastSignature = signature;
+
+      let optimizedEnough = this._bleLinkOptimizedEnough(parsed, {
+        targetConnectionIntervalUnits,
+        targetPhy,
+        minDataLength,
+      });
+
+      if (typeof opts.onSample === 'function') {
+        opts.onSample({
+          source: 'read',
+          iteration: iterations,
+          stableCount,
+          parsed,
+          signature,
+          optimizedEnough,
+        });
+      }
+
+      const shouldOptimize =
+        settleMode === 'stability' ? optimizeAttempts < forceOptimizeAttempts : !optimizedEnough;
+
+      if (shouldOptimize) {
+        try {
+          parsed = await this.optimizeBleLinkParsed();
+        } catch (error) {
+          if (this._isAbortError(error)) return finish('aborted');
+          throw error;
+        }
+
+        optimizeAttempts += 1;
+        lastParsed = parsed;
+        signature = this._bleLinkSignature(parsed);
+        stableCount = signature === lastSignature ? stableCount + 1 : 1;
+        lastSignature = signature;
+
+        optimizedEnough = this._bleLinkOptimizedEnough(parsed, {
+          targetConnectionIntervalUnits,
+          targetPhy,
+          minDataLength,
+        });
+
+        if (typeof opts.onSample === 'function') {
+          opts.onSample({
+            source: 'optimize',
+            iteration: iterations,
+            stableCount,
+            parsed,
+            signature,
+            optimizedEnough,
+          });
+        }
+      }
+
+      const elapsedMs = Math.max(0, nowMillis() - startedAt);
+      const stableReady = stableCount >= stableReadCount && elapsedMs >= minSettleTimeMs;
+      const settleReady =
+        settleMode === 'stability' ? stableReady : stableReady && optimizedEnough;
+
+      if (settleReady) {
+        return finish('stabilized');
+      }
+
+      try {
+        await this._waitWithAbort(pollIntervalMs, signal);
+      } catch (error) {
+        if (this._isAbortError(error)) return finish('aborted');
+        throw error;
+      }
+    }
+
+    return finish('timeout');
   }
 
   async setStreamingMode(enabled: boolean): Promise<void> {
