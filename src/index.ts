@@ -127,6 +127,10 @@ export {
   VERISENSE_HW_MAJOR_FRIENDLY_NAMES,
   getVerisenseHardwareFriendlyName,
   formatVerisenseHardwareRevision,
+  isVerisenseSecondGenerationHardware,
+  getVerisenseHardwareCapabilities,
+  getVerisenseHardwareRevision,
+  supportsVerisenseMagnetometer,
   getVerisenseStreamingBatteryVoltageMultiplier,
   formatByteAsHex,
   formatByteArrayAsHex,
@@ -164,6 +168,9 @@ export type {
   VerisenseStatusPayloadForLog,
   VerisenseChargerChipFamily,
   VerisenseSchedulerDebugPayloadForLog,
+  VerisenseHardwareCapabilities,
+  VerisenseHardwareRevision,
+  VerisenseHardwareRevisionSource,
 } from './devices/verisense/protocol.js';
 
 // Verisense sensors
