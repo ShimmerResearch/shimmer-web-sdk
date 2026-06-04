@@ -53,6 +53,8 @@ export type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  VerisenseConnectWithRetryOptions,
+  VerisenseConnectRetryInfo,
   VerisenseClientOptions,
   RunHardwareTestReportOptions,
   TransportKind,

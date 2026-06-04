@@ -60,6 +60,8 @@ import type {
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
   DeviceMode,
+  VerisenseConnectRetryInfo,
+  VerisenseConnectWithRetryOptions,
   PendingCommandRequest,
   RunHardwareTestReportOptions,
   SensorMap,
@@ -77,6 +79,8 @@ export type {
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
   DeviceMode,
+  VerisenseConnectRetryInfo,
+  VerisenseConnectWithRetryOptions,
   RunHardwareTestReportOptions,
   SensorMap,
   StreamPacket,
@@ -156,6 +160,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _serialReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private _serialReadLoopTask: Promise<void> | null = null;
   private _onGattDisconnected: (() => void) | null = null;
+  private _suppressDisconnectedEvent = false;
 
   // Protocol state
   private _mode: DeviceMode = 'idle';
@@ -164,6 +169,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
+  private _bootstrapRequestTimeoutOverrideMs: number | null = null;
 
   readonly stripStreamCrc: boolean;
   readonly verifyStreamCrc: boolean;
@@ -287,6 +293,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this._onGattDisconnected = () => {
       this._mode = 'idle';
       this._transportKind = null;
+      if (this._suppressDisconnectedEvent) return;
       this.emit('disconnected', { kind: 'ble' });
     };
     this.device.addEventListener('gattserverdisconnected', this._onGattDisconnected);
@@ -310,6 +317,166 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this._bootstrapConfigsAfterConnect();
 
     return true;
+  }
+
+  private async _cleanupFailedBleConnectAttempt(retrySettleMs: number): Promise<void> {
+    this._suppressDisconnectedEvent = true;
+    try {
+      if (this._onGattDisconnected && this.device) {
+        this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
+      }
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      if (this.device?.gatt?.connected) {
+        this.device.gatt.disconnect();
+      }
+    } catch {
+      /* ignore */
+    }
+
+    this.tx = null;
+    this.rx = null;
+    this.service = null;
+    this.server = null;
+    this._pending = null;
+    this._mode = 'idle';
+    this._transportKind = null;
+
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, retrySettleMs)));
+    this._suppressDisconnectedEvent = false;
+  }
+
+  private async _retryBootstrapInPlaceWithBudget(
+    totalBudgetMs: number,
+    perAttemptTimeoutMs: number,
+  ): Promise<boolean> {
+    const budgetMs = Math.max(1000, Math.trunc(totalBudgetMs));
+    const attemptTimeoutBaseMs = Math.max(1000, Math.trunc(perAttemptTimeoutMs));
+    const deadline = Date.now() + budgetMs;
+
+    while (Date.now() < deadline) {
+      const remainingMs = Math.max(1000, deadline - Date.now());
+      this._bootstrapRequestTimeoutOverrideMs = Math.min(attemptTimeoutBaseMs, remainingMs);
+
+      try {
+        this._pending = null;
+        this._resetAssembler();
+        await this._bootstrapConfigsAfterConnect();
+        return true;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const retryable =
+          /Unexpected response property/i.test(msg) ||
+          /A request is already pending/i.test(msg) ||
+          /request timeout/i.test(msg);
+
+        if (!retryable || Date.now() + 100 >= deadline) {
+          throw e;
+        }
+
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    return false;
+  }
+
+  async connectWithRetry(opts: VerisenseConnectWithRetryOptions = {}): Promise<boolean> {
+    const {
+      bootstrapTimeoutMs = 3000,
+      pairingBootstrapTimeoutMs = 45000,
+      maxRetries = 2,
+      retrySettleMs = 250,
+      retryOnUnexpectedProperty = true,
+      onRetry = null,
+      ...connectOpts
+    } = opts;
+
+    const clampedDefaultTimeoutMs = Math.max(1000, Math.trunc(bootstrapTimeoutMs));
+    const clampedPairingTimeoutMs = Math.max(
+      clampedDefaultTimeoutMs,
+      Math.trunc(pairingBootstrapTimeoutMs),
+    );
+    const clampedMaxRetries = Math.max(0, Math.trunc(maxRetries));
+
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= clampedMaxRetries; attempt += 1) {
+      const attemptTimeoutMs = clampedDefaultTimeoutMs;
+
+      this._bootstrapRequestTimeoutOverrideMs = attemptTimeoutMs;
+
+      try {
+        return await this.connect(connectOpts);
+      } catch (e) {
+        lastError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        const isRequestTimeout = /request timeout/i.test(msg);
+        const isGattDisconnected = /gatt server is disconnected/i.test(msg);
+        const isUnexpectedResponseProperty =
+          retryOnUnexpectedProperty && /Unexpected response property/i.test(msg);
+
+        const shouldRetry =
+          (isRequestTimeout || isGattDisconnected || isUnexpectedResponseProperty) &&
+          attempt < clampedMaxRetries;
+
+        if (!shouldRetry) {
+          await this._cleanupFailedBleConnectAttempt(retrySettleMs);
+          throw e;
+        }
+
+        // If pairing/passkey entry is still in progress, a request timeout can occur
+        // while the BLE link itself remains up. In that case, retry bootstrap in-place
+        // first to avoid forcing a disconnect that interrupts Windows bonding UX.
+        if (isRequestTimeout && this.device?.gatt?.connected && this.tx && this.rx) {
+          onRetry?.({
+            attempt,
+            maxRetries: clampedMaxRetries,
+            bootstrapTimeoutMs: attemptTimeoutMs,
+            nextBootstrapTimeoutMs: clampedPairingTimeoutMs,
+            reason: 'request-timeout',
+            error: msg,
+          });
+
+          try {
+            await this._retryBootstrapInPlaceWithBudget(
+              clampedPairingTimeoutMs,
+              clampedDefaultTimeoutMs,
+            );
+            return true;
+          } catch (bootstrapRetryError) {
+            lastError = bootstrapRetryError;
+          }
+        }
+
+        let reason: VerisenseConnectRetryInfo['reason'];
+        if (isRequestTimeout) {
+          reason = 'request-timeout';
+        } else if (isGattDisconnected) {
+          reason = 'gatt-disconnected';
+        } else {
+          reason = 'unexpected-response-property';
+        }
+
+        onRetry?.({
+          attempt,
+          maxRetries: clampedMaxRetries,
+          bootstrapTimeoutMs: attemptTimeoutMs,
+          nextBootstrapTimeoutMs: clampedPairingTimeoutMs,
+          reason,
+          error: msg,
+        });
+
+        await this._cleanupFailedBleConnectAttempt(retrySettleMs);
+      } finally {
+        this._bootstrapRequestTimeoutOverrideMs = null;
+      }
+    }
+
+    throw (lastError instanceof Error ? lastError : new Error('BLE connect failed'));
   }
 
   // --- Web Serial (USB COM port) connect ---
@@ -782,7 +949,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     timeoutMs = 3000,
   ): Promise<{ payload: Uint8Array }> {
     const { command, property } = parseHeader(opcode & 0xff);
-    const rsp = await this._requestByCommand(command, property, payloadBytes, timeoutMs);
+    const effectiveTimeoutMs =
+      this._bootstrapRequestTimeoutOverrideMs != null && timeoutMs === 3000
+        ? this._bootstrapRequestTimeoutOverrideMs
+        : timeoutMs;
+    const rsp = await this._requestByCommand(command, property, payloadBytes, effectiveTimeoutMs);
     return { payload: rsp.payload };
   }
 

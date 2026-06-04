@@ -61,6 +61,32 @@ export interface VerisenseClientOptions {
   debug?: boolean;
 }
 
+export type VerisenseConnectRetryReason =
+  | 'request-timeout'
+  | 'gatt-disconnected'
+  | 'unexpected-response-property';
+
+export interface VerisenseConnectWithRetryOptions {
+  device?: BluetoothDevice | null;
+  filters?: BluetoothLEScanFilter[];
+  optionalServices?: BluetoothServiceUUID[];
+  bootstrapTimeoutMs?: number;
+  pairingBootstrapTimeoutMs?: number;
+  maxRetries?: number;
+  retrySettleMs?: number;
+  retryOnUnexpectedProperty?: boolean;
+  onRetry?: ((info: VerisenseConnectRetryInfo) => void) | null;
+}
+
+export interface VerisenseConnectRetryInfo {
+  attempt: number;
+  maxRetries: number;
+  bootstrapTimeoutMs: number;
+  nextBootstrapTimeoutMs?: number;
+  reason: VerisenseConnectRetryReason;
+  error: string;
+}
+
 export interface VerisenseCommandResponse {
   header: number;
   command: AsmCommand;
