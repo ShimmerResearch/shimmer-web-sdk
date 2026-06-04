@@ -476,7 +476,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }
     }
 
-    throw (lastError instanceof Error ? lastError : new Error('BLE connect failed'));
+    throw lastError instanceof Error ? lastError : new Error('BLE connect failed');
   }
 
   // --- Web Serial (USB COM port) connect ---
