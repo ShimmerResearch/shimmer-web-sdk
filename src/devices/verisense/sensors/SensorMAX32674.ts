@@ -42,7 +42,9 @@ export class SensorMAX32674 extends SensorBase {
     if (!sensorPayloadBytes?.length) return [];
 
     const count = sensorPayloadBytes[0] ?? 0;
-    const maxByLength = Math.floor((sensorPayloadBytes.length - 1) / SensorMAX32674.BYTES_PER_SAMPLE);
+    const maxByLength = Math.floor(
+      (sensorPayloadBytes.length - 1) / SensorMAX32674.BYTES_PER_SAMPLE,
+    );
     const n = Math.min(count, maxByLength);
 
     const out: MAX32674Sample[] = [];
