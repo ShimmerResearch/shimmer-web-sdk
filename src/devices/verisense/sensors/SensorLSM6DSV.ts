@@ -241,7 +241,7 @@ export class SensorLSM6DSV extends SensorBase {
 
     // Effective per-stream rate so each stream spans exactly blockPeriodSec.
     const rateFor = (total: number): number =>
-      blockPeriodSec > 0 && total > 0 ? total / blockPeriodSec : this.samplingRateHz ?? 1;
+      blockPeriodSec > 0 && total > 0 ? total / blockPeriodSec : (this.samplingRateHz ?? 1);
     const accelRate = rateFor(accelTotal);
     const gyroRate = rateFor(gyroTotal);
     const magRate = rateFor(magTotal);
