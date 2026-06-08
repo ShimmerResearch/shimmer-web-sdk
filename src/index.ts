@@ -185,5 +185,7 @@ export { SensorLIS2DW12 } from './devices/verisense/sensors/SensorLIS2DW12.js';
 export type { LIS2DW12Sample } from './devices/verisense/sensors/SensorLIS2DW12.js';
 export { SensorLSM6DS3 } from './devices/verisense/sensors/SensorLSM6DS3.js';
 export type { LSM6DS3Sample } from './devices/verisense/sensors/SensorLSM6DS3.js';
+export { SensorLSM6DSV } from './devices/verisense/sensors/SensorLSM6DSV.js';
+export type { LSM6DSVSample } from './devices/verisense/sensors/SensorLSM6DSV.js';
 export { SensorPPG } from './devices/verisense/sensors/SensorPPG.js';
 export type { PPGSample, PPGChannelSample } from './devices/verisense/sensors/SensorPPG.js';

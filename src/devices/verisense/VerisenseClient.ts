@@ -47,7 +47,9 @@ import { SensorBase } from './sensors/SensorBase.js';
 import { SensorADC } from './sensors/SensorADC.js';
 import { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
+import { SensorLSM6DSV } from './sensors/SensorLSM6DSV.js';
 import { SensorPPG } from './sensors/SensorPPG.js';
+import { isVerisenseSecondGenerationHardware } from './hardwareModels.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
 import {
   defaultAcceptedCommands,
@@ -170,6 +172,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _sync: SyncSession | null = null;
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
   private _bootstrapRequestTimeoutOverrideMs: number | null = null;
+  private _isSecondGenerationHw = false;
 
   readonly stripStreamCrc: boolean;
   readonly verifyStreamCrc: boolean;
@@ -198,6 +201,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       2: new SensorLIS2DW12(),
       3: new SensorLSM6DS3(),
       4: new SensorPPG(),
+      6: new SensorLSM6DSV(),
     };
 
     this.sensors[1].setHardwareIdentifier(this.hardwareIdentifier);
@@ -214,8 +218,14 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   get accel1(): SensorLIS2DW12 {
     return this.sensors[2];
   }
-  get gyroAccel2(): SensorLSM6DS3 {
+  get gyroAccel2(): SensorLSM6DS3 | SensorLSM6DSV {
+    return this._isSecondGenerationHw ? this.sensors[6] : this.sensors[3];
+  }
+  get gyroAccel2Lsm6ds3(): SensorLSM6DS3 {
     return this.sensors[3];
+  }
+  get gyroAccel2Lsm6dsv(): SensorLSM6DSV {
+    return this.sensors[6];
   }
   get ppg(): SensorPPG {
     return this.sensors[4];
@@ -1786,6 +1796,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         parsed.revHwMinor,
         typeof parsed.revHwInternal === 'number' ? parsed.revHwInternal : 0,
       );
+      this._isSecondGenerationHw = isVerisenseSecondGenerationHardware(
+        parsed.revHwMajor,
+        parsed.revHwMinor,
+      );
     }
 
     if (erased) {
@@ -1821,7 +1835,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!erased) {
       try {
         this.accel1.applyOperationalConfig(op);
-        this.gyroAccel2.applyOperationalConfig(op);
+        this.sensors[3].applyOperationalConfig(op);
+        this.sensors[6].applyOperationalConfig(op);
         this.adc.applyOperationalConfig(op);
         this.ppg.applyOperationalConfig(op);
       } catch (e) {
@@ -1850,6 +1865,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const k = String(name ?? '').toLowerCase();
     if (!k) return null;
     if (k.includes('lis2dw12') || k.includes('accel1') || k === '2') return this.accel1;
+    if (k.includes('lsm6dsv') || k === '6') return this.sensors[6];
     if (k.includes('lsm6') || k.includes('gyro') || k.includes('accel2') || k === '3')
       return this.gyroAccel2;
     if (k.includes('vbatt') || k.includes('batt') || k.includes('battery') || k.includes('adc'))

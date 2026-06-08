@@ -3,6 +3,7 @@ import type { VerisenseBleLinkDebugPayload } from './protocol.js';
 import type { SensorADC } from './sensors/SensorADC.js';
 import type { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import type { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
+import type { SensorLSM6DSV } from './sensors/SensorLSM6DSV.js';
 import type { SensorPPG } from './sensors/SensorPPG.js';
 
 export type TransportKind = 'ble' | 'serial' | null;
@@ -13,6 +14,7 @@ export interface SensorMap {
   2: SensorLIS2DW12;
   3: SensorLSM6DS3;
   4: SensorPPG;
+  6: SensorLSM6DSV;
 }
 
 export interface StreamPacket {

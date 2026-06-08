@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SensorADC } from '../../src/devices/verisense/sensors/SensorADC.js';
 import { SensorLIS2DW12 } from '../../src/devices/verisense/sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from '../../src/devices/verisense/sensors/SensorLSM6DS3.js';
+import { SensorLSM6DSV } from '../../src/devices/verisense/sensors/SensorLSM6DSV.js';
 import { SensorPPG } from '../../src/devices/verisense/sensors/SensorPPG.js';
 import { SensorBase } from '../../src/devices/verisense/sensors/SensorBase.js';
 
@@ -209,6 +210,38 @@ describe('SensorLSM6DS3', () => {
     expect(out).toHaveLength(1);
     expect(out[0].accel).toBeNull();
     expect(out[0].gyro).not.toBeNull();
+  });
+});
+
+describe('SensorLSM6DSV', () => {
+  it('parses tagged accel/gyro/mag entries from variable-length payload', () => {
+    const sensor = new SensorLSM6DSV();
+
+    const buf = new Uint8Array([
+      3,
+      0x10, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
+      0x08, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00,
+      0x70, 0x07, 0x00, 0x08, 0x00, 0x09, 0x00,
+    ]);
+
+    const out = sensor.parsePayload(buf);
+    expect(out).toHaveLength(3);
+    expect(out[0].accel).not.toBeNull();
+    expect(out[1].gyro).not.toBeNull();
+    expect(out[2].mag).not.toBeNull();
+  });
+
+  it('applies ODR/range fields from bytes 18..20', () => {
+    const sensor = new SensorLSM6DSV();
+    const op = new Uint8Array(72);
+    op[1] = 0b01100000;
+    op[4] = 0b00000100;
+    op[18] = 0x21;
+    op[19] = 0x13;
+    op[20] = 0x02;
+
+    sensor.applyOperationalConfig(op);
+    expect(sensor.samplingRateHz).toBeGreaterThanOrEqual(30);
   });
 });
 
