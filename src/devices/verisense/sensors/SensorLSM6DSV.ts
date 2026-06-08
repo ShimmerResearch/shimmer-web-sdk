@@ -22,6 +22,12 @@ export class SensorLSM6DSV extends SensorBase {
   private accelFsG = 2;
   private gyroFsDps = 2000;
 
+  // Per-stream ODRs (the FIFO interleaves accel/gyro/mag, so each stream is
+  // timestamped on its own rate — see computeSampleTimestamps).
+  private accelHz = 15;
+  private gyroHz = 15;
+  private magHz = 10;
+
   constructor() {
     super();
     this.samplingRateHz = 15;
@@ -186,10 +192,88 @@ export class SensorLSM6DSV extends SensorBase {
     this.accelFsG = this.decodeAccelFsG(fsXl);
     this.gyroFsDps = this.decodeGyroFsDps(fsG);
 
-    const accelHz = this.accEnabled ? this.decodeOdrHz(odrXl) : 0;
-    const gyroHz = this.gyroEnabled ? this.decodeOdrHz(odrG) : 0;
-    const magHz = this.magEnabled ? this.decodeMagOdrHz(odrMag) : 0;
+    this.accelHz = this.accEnabled ? this.decodeOdrHz(odrXl) : 0;
+    this.gyroHz = this.gyroEnabled ? this.decodeOdrHz(odrG) : 0;
+    this.magHz = this.magEnabled ? this.decodeMagOdrHz(odrMag) : 0;
 
-    this.samplingRateHz = Math.max(accelHz, gyroHz, magHz, 1);
+    this.samplingRateHz = Math.max(this.accelHz, this.gyroHz, this.magHz, 1);
+  }
+
+  /**
+   * Timestamp each stream (accel / gyro / mag) so all three cover the same block
+   * time window. The tagged FIFO interleaves the streams, so the generic
+   * global-index spacing spreads each stream by (#interleaved-streams)x too far
+   * back and makes consecutive blocks overlap on the time axis.
+   *
+   * Each stream's effective rate is derived from *this block*: the block's
+   * covered duration is taken from a directly-sampled reference stream (accel,
+   * else gyro) at its known ODR, and every stream is then spread evenly over
+   * that same duration by its own sample count. This is important for the mag
+   * (LIS2MDL), which is read via the LSM6DSV sensor hub — its entries land in
+   * the FIFO at the hub batch rate, NOT the LIS2MDL ODR, so a fixed mag ODR
+   * would mis-spread it (the zig-zag). Deriving the rate from the block keeps it
+   * aligned regardless of the hub rate.
+   */
+  override computeSampleTimestamps(
+    decodedSamples: unknown[],
+    block: {
+      tsLastSampleMillis: number;
+      systemTsLastSampleMillis: number;
+      systemOffsetFirstTime?: number | null;
+    },
+  ): Array<{ tsMillis: number; systemTsMillis: number; systemTsPlotMillis: number }> {
+    const samples = decodedSamples as LSM6DSVSample[];
+
+    let accelTotal = 0;
+    let gyroTotal = 0;
+    let magTotal = 0;
+    for (const s of samples) {
+      if (s.accel) accelTotal++;
+      else if (s.gyro) gyroTotal++;
+      else if (s.mag) magTotal++;
+    }
+
+    // Block duration (s) from a directly-sampled reference stream at a known ODR.
+    let blockPeriodSec = 0;
+    if (accelTotal > 0 && this.accelHz > 0) blockPeriodSec = accelTotal / this.accelHz;
+    else if (gyroTotal > 0 && this.gyroHz > 0) blockPeriodSec = gyroTotal / this.gyroHz;
+    else if (magTotal > 0 && this.magHz > 0) blockPeriodSec = magTotal / this.magHz;
+
+    // Effective per-stream rate so each stream spans exactly blockPeriodSec.
+    const rateFor = (total: number): number =>
+      blockPeriodSec > 0 && total > 0 ? total / blockPeriodSec : this.samplingRateHz ?? 1;
+    const accelRate = rateFor(accelTotal);
+    const gyroRate = rateFor(gyroTotal);
+    const magRate = rateFor(magTotal);
+
+    let ai = 0;
+    let gi = 0;
+    let mi = 0;
+    return samples.map((s) => {
+      let numSamples = samples.length;
+      let i = 0;
+      let rate = this.samplingRateHz;
+      if (s.accel) {
+        numSamples = accelTotal;
+        i = ai++;
+        rate = accelRate;
+      } else if (s.gyro) {
+        numSamples = gyroTotal;
+        i = gi++;
+        rate = gyroRate;
+      } else if (s.mag) {
+        numSamples = magTotal;
+        i = mi++;
+        rate = magRate;
+      }
+      return this.extrapolateSampleTimes({
+        numSamples,
+        i,
+        samplingRateHz: rate,
+        tsLastSampleMillis: block.tsLastSampleMillis,
+        systemTsLastSampleMillis: block.systemTsLastSampleMillis,
+        systemOffsetFirstTime: block.systemOffsetFirstTime,
+      });
+    });
   }
 }

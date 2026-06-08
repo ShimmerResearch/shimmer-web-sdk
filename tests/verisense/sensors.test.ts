@@ -241,6 +241,64 @@ describe('SensorLSM6DSV', () => {
     sensor.applyOperationalConfig(op);
     expect(sensor.samplingRateHz).toBeGreaterThanOrEqual(30);
   });
+
+  it('timestamps interleaved accel/gyro streams on their own rate, not the global index', () => {
+    const sensor = new SensorLSM6DSV();
+    const op = new Uint8Array(72);
+    op[1] = 0b01100000; // accel2En + gyroEn
+    op[18] = 0x05; // odrXl = 60 Hz
+    op[19] = 0x05; // odrG = 60 Hz
+    sensor.applyOperationalConfig(op);
+
+    // Interleaved decoded burst A,G,A,G,A,G (3 accel + 3 gyro).
+    const a = () => ({ tag: 2, cnt: 0, accel: { cal: [0, 0, 0] }, gyro: null, mag: null });
+    const g = () => ({ tag: 1, cnt: 0, accel: null, gyro: { cal: [0, 0, 0] }, mag: null });
+    const decoded = [a(), g(), a(), g(), a(), g()] as unknown[];
+
+    const ts = sensor.computeSampleTimestamps(decoded, {
+      tsLastSampleMillis: 1000,
+      systemTsLastSampleMillis: 1000,
+      systemOffsetFirstTime: 0,
+    });
+
+    const dtMs = 1000 / 60; // 60 Hz spacing
+    // Accel entries (decoded idx 0,2,4) are spaced at the accel rate, not 2x it.
+    expect(ts[2].tsMillis - ts[0].tsMillis).toBeCloseTo(dtMs, 1);
+    expect(ts[4].tsMillis - ts[2].tsMillis).toBeCloseTo(dtMs, 1);
+    // Gyro entries (idx 1,3,5) likewise.
+    expect(ts[3].tsMillis - ts[1].tsMillis).toBeCloseTo(dtMs, 1);
+    // Each stream's last sample anchors at the block's last-sample time.
+    expect(ts[4].tsMillis).toBeCloseTo(1000, 6);
+    expect(ts[5].tsMillis).toBeCloseTo(1000, 6);
+  });
+
+  it('spreads sensor-hub mag over the same block window as accel (block-derived rate)', () => {
+    const sensor = new SensorLSM6DSV();
+    const op = new Uint8Array(72);
+    op[1] = 0b01000000; // accel2En
+    op[4] = 0b00000100; // magEn (GEN_CFG_3 bit 2)
+    op[18] = 0x05; // odrXl = 60 Hz
+    op[20] = 0x00; // mag nominal ODR = 10 Hz (intentionally != the FIFO/hub rate)
+    sensor.applyOperationalConfig(op);
+
+    // 6 accel + 2 mag interleaved (mag is much sparser in the FIFO).
+    const a = () => ({ tag: 2, cnt: 0, accel: { cal: [0, 0, 0] }, gyro: null, mag: null });
+    const m = () => ({ tag: 14, cnt: 0, accel: null, gyro: null, mag: { cal: [0, 0, 0] } });
+    const decoded = [a(), a(), a(), m(), a(), a(), a(), m()] as unknown[];
+
+    const ts = sensor.computeSampleTimestamps(decoded, {
+      tsLastSampleMillis: 1000,
+      systemTsLastSampleMillis: 1000,
+      systemOffsetFirstTime: 0,
+    });
+
+    // Block window from accel = 6 / 60 Hz = 0.1 s; 2 mag samples -> 20 Hz, 50 ms
+    // apart. NOT the nominal 10 Hz (100 ms) -> the rate is derived from the block.
+    expect(ts[7].tsMillis - ts[3].tsMillis).toBeCloseTo(1000 / 20, 1);
+    // Mag and accel both anchor their last sample at the block end.
+    expect(ts[7].tsMillis).toBeCloseTo(1000, 6);
+    expect(ts[6].tsMillis).toBeCloseTo(1000, 6);
+  });
 });
 
 // ---------------------------------------------------------------------------

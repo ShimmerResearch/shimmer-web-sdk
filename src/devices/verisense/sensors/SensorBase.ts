@@ -108,6 +108,40 @@ export abstract class SensorBase {
     return { tsMillis, systemTsMillis, systemTsPlotMillis };
   }
 
+  /**
+   * Compute per-sample timestamps for a whole decoded burst.
+   *
+   * The base implementation treats every decoded sample as one evenly-spaced
+   * time step at `samplingRateHz` (correct when each decoded sample is a single
+   * combined time step). Sensors whose decoded array *interleaves* multiple
+   * streams at different cadences (e.g. the LSM6DSV tagged FIFO, which mixes
+   * accel / gyro / mag entries) override this to timestamp each stream on its
+   * own rate — otherwise the shared rate spreads each stream's samples too far
+   * back and consecutive blocks overlap on the time axis.
+   */
+  computeSampleTimestamps(
+    decodedSamples: unknown[],
+    block: {
+      tsLastSampleMillis: number;
+      systemTsLastSampleMillis: number;
+      systemOffsetFirstTime?: number | null;
+    },
+  ): Array<{ tsMillis: number; systemTsMillis: number; systemTsPlotMillis: number }> {
+    const num = decodedSamples.length;
+    const out = new Array(num);
+    for (let i = 0; i < num; i++) {
+      out[i] = this.extrapolateSampleTimes({
+        numSamples: num,
+        i,
+        samplingRateHz: this.samplingRateHz,
+        tsLastSampleMillis: block.tsLastSampleMillis,
+        systemTsLastSampleMillis: block.systemTsLastSampleMillis,
+        systemOffsetFirstTime: block.systemOffsetFirstTime,
+      });
+    }
+    return out;
+  }
+
   /** Parse a raw sensor payload byte array into decoded samples. */
   abstract parsePayload(sensorPayloadBytes: Uint8Array): unknown[];
 

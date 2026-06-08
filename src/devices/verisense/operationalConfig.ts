@@ -1265,15 +1265,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   // -------------------------------------------------------------------------
   // v9 second-generation sensor settings (light / skin-temp / algo-hub / LED)
   // -------------------------------------------------------------------------
-  {
-    key: 'OP_CONFIG_VERSION',
-    label: 'Op-Config Version',
-    desc: 'Operational config layout version (0 = legacy, 9 = v9 second-gen sensors)',
-    kind: 'u8',
-    index: OP_IDX.OP_CONFIG_VERSION,
-    min: 0,
-    max: 255,
-  },
+  // OP_CONFIG_VERSION (byte 9) is an internal layout marker, not a user setting.
+  // It is auto-stamped on serialize (see VERISENSE_OP_CONFIG_VERSION_V9 /
+  // createBlankVerisenseOperationalConfig), so it is intentionally NOT an
+  // editable field here.
   // AMBIENT_LIGHT_EN / SKIN_TEMP_EN / ALGO_HUB_EN are sensor enables and are
   // rendered as checkboxes (see VERISENSE_SENSOR_ENABLE_FIELDS), not here.
   {
@@ -1691,7 +1686,6 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'BATT_TYPE',
         'MAG_EN',
         'LED_MODE',
-        'OP_CONFIG_VERSION',
       ],
     },
     {

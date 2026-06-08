@@ -2172,17 +2172,15 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     let samplesWithTime = decodedSamples;
     if (sensor && Array.isArray(decodedSamples) && decodedSamples.length > 0 && tsInfo) {
-      const num = decodedSamples.length;
+      // Per-stream-aware (sensors with interleaved FIFO streams override this).
+      const tsArray = sensor.computeSampleTimestamps(decodedSamples, {
+        tsLastSampleMillis: tsInfo.shimmerMillis,
+        systemTsLastSampleMillis,
+        systemOffsetFirstTime: tsInfo.systemOffsetFirstTime,
+      });
       samplesWithTime = decodedSamples.map((s, i) => ({
         ...(s as object),
-        timestamps: sensor.extrapolateSampleTimes({
-          numSamples: num,
-          i,
-          samplingRateHz: sensor.samplingRateHz,
-          tsLastSampleMillis: tsInfo!.shimmerMillis,
-          systemTsLastSampleMillis,
-          systemOffsetFirstTime: tsInfo!.systemOffsetFirstTime,
-        }),
+        timestamps: tsArray[i],
       }));
     }
 
