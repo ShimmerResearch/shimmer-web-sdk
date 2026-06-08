@@ -175,6 +175,26 @@ export const OP_IDX = Object.freeze({
   PPG_DAC3_CROSSTALK: 69,
   PPG_DAC4_CROSSTALK: 70,
   PROX_AGC_MODE: 71,
+
+  // v9 second-generation sensor settings (only present when op[OP_CONFIG_VERSION] >= 9)
+  OP_CONFIG_VERSION: 9,
+  LIGHT_GAIN_INDEX: 72,
+  LIGHT_EXPOSURE_INDEX: 73,
+  LIGHT_CONFIG: 74,
+  LIGHT_SAMPLE_RATE_INDEX: 75,
+  SKIN_TEMP_CONFIG: 76,
+  SKIN_TEMP_SAMPLE_RATE_INDEX: 77,
+  ALGO_OP_MODE: 78,
+  ALGO_REPORT_MODE_RATE: 79,
+  ALGO_CONTROL: 80,
+  ALGO_INITIAL_HR: 81,
+  LED_AUTO_BRIGHTNESS_CFG: 82,
+  LED_MAX_BRIGHTNESS: 83,
+  LED_LUX_THRESHOLD: 84,
 } as const);
+
+/** Operational config layout version stored at OP_IDX.OP_CONFIG_VERSION (byte 9).
+ * 0 = legacy 72-byte layout; 9 = v9 layout with second-generation sensor settings. */
+export const OP_CONFIG_VERSION_V9 = 9;
 
 export type OpIdx = keyof typeof OP_IDX;

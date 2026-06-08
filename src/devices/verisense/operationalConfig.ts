@@ -1,4 +1,4 @@
-import { OP_IDX } from './constants.js';
+import { OP_IDX, OP_CONFIG_VERSION_V9 } from './constants.js';
 
 export type VerisenseOperationalFieldKind =
   | 'bit'
@@ -1261,9 +1261,278 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
       [2, 'AGC On / Hybrid Prox'],
     ],
   },
+
+  // -------------------------------------------------------------------------
+  // v9 second-generation sensor settings (light / skin-temp / algo-hub / LED)
+  // -------------------------------------------------------------------------
+  {
+    key: 'OP_CONFIG_VERSION',
+    label: 'Op-Config Version',
+    desc: 'Operational config layout version (0 = legacy, 9 = v9 second-gen sensors)',
+    kind: 'u8',
+    index: OP_IDX.OP_CONFIG_VERSION,
+    min: 0,
+    max: 255,
+  },
+  // AMBIENT_LIGHT_EN / SKIN_TEMP_EN / ALGO_HUB_EN are sensor enables and are
+  // rendered as checkboxes (see VERISENSE_SENSOR_ENABLE_FIELDS), not here.
+  {
+    key: 'PPG_VIA_HUB',
+    label: 'PPG via Algo Hub',
+    desc: 'MAX86176 PPG routed through the MAX32674 hub (vs directly attached)',
+    kind: 'bit',
+    index: OP_IDX.GEN_CFG_3,
+    shift: 6,
+    width: 1,
+    options: [
+      [0, 'Direct'],
+      [1, 'Via Hub'],
+    ],
+  },
+  {
+    key: 'LIGHT_GAIN_INDEX',
+    label: 'Light Gain',
+    desc: 'VD6283 gain index (0=1.0x .. 7=66.67x)',
+    kind: 'u8',
+    index: OP_IDX.LIGHT_GAIN_INDEX,
+    min: 0,
+    max: 7,
+  },
+  {
+    key: 'LIGHT_EXPOSURE_INDEX',
+    label: 'Light Exposure',
+    desc: 'VD6283 exposure time index (0=default)',
+    kind: 'u8',
+    index: OP_IDX.LIGHT_EXPOSURE_INDEX,
+    min: 0,
+    max: 7,
+  },
+  {
+    key: 'LIGHT_CONTINUOUS_MODE',
+    label: 'Light Continuous Mode',
+    desc: '0 = single-shot, 1 = continuous',
+    kind: 'bit',
+    index: OP_IDX.LIGHT_CONFIG,
+    shift: 0,
+    width: 1,
+    options: [
+      [0, 'Single-shot'],
+      [1, 'Continuous'],
+    ],
+  },
+  {
+    key: 'LIGHT_DARK_ENABLE',
+    label: 'Light Dark Channel',
+    desc: 'Expose the dark/background channel',
+    kind: 'bit',
+    index: OP_IDX.LIGHT_CONFIG,
+    shift: 1,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled'],
+    ],
+  },
+  {
+    key: 'LIGHT_FLICKER_EN',
+    label: 'Light Flicker Detect',
+    desc: 'RESERVED: VD6283 flicker detection (host PDM path pending nRF SDK v17 — not yet active)',
+    kind: 'bit',
+    index: OP_IDX.LIGHT_CONFIG,
+    shift: 2,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled (reserved)'],
+    ],
+  },
+  {
+    key: 'LIGHT_SAMPLE_RATE_INDEX',
+    label: 'Light Sample Rate',
+    desc: 'Ambient-light polling rate',
+    kind: 'u8',
+    index: OP_IDX.LIGHT_SAMPLE_RATE_INDEX,
+    min: 0,
+    max: 6,
+    options: [
+      [0, 'Off'],
+      [1, '0.5 Hz'],
+      [2, '1 Hz'],
+      [3, '2 Hz'],
+      [4, '5 Hz'],
+      [5, '10 Hz'],
+      [6, '20 Hz'],
+    ],
+  },
+  {
+    key: 'SKIN_TEMP_MEAS_TYPE',
+    label: 'Skin Temp Mode',
+    desc: 'MLX90632 measurement type',
+    kind: 'bit',
+    index: OP_IDX.SKIN_TEMP_CONFIG,
+    shift: 0,
+    width: 1,
+    options: [
+      [0, 'Medical'],
+      [1, 'Extended'],
+    ],
+  },
+  {
+    key: 'SKIN_TEMP_REFRESH_RATE',
+    label: 'Skin Temp Refresh Rate',
+    desc: 'MLX90632 refresh-rate code (0=0.5Hz .. 7=64Hz)',
+    kind: 'bit',
+    index: OP_IDX.SKIN_TEMP_CONFIG,
+    shift: 1,
+    width: 3,
+  },
+  {
+    key: 'SKIN_TEMP_POWER_MODE',
+    label: 'Skin Temp Power Mode',
+    desc: 'MLX90632 power mode (halt/sleep-step/step/continuous)',
+    kind: 'bit',
+    index: OP_IDX.SKIN_TEMP_CONFIG,
+    shift: 4,
+    width: 2,
+  },
+  {
+    key: 'SKIN_TEMP_SAMPLE_RATE_INDEX',
+    label: 'Skin Temp Sample Rate',
+    desc: 'Skin-temperature polling rate',
+    kind: 'u8',
+    index: OP_IDX.SKIN_TEMP_SAMPLE_RATE_INDEX,
+    min: 0,
+    max: 6,
+    options: [
+      [0, 'Off'],
+      [1, '0.5 Hz'],
+      [2, '1 Hz'],
+      [3, '2 Hz'],
+      [4, '5 Hz'],
+      [5, '10 Hz'],
+      [6, '20 Hz'],
+    ],
+  },
+  {
+    key: 'ALGO_OP_MODE',
+    label: 'Algo Operation Mode',
+    desc: 'MAX32674 sensor-hub operation mode',
+    kind: 'u8',
+    index: OP_IDX.ALGO_OP_MODE,
+    min: 0,
+    max: 5,
+    options: [
+      [0, 'Raw'],
+      [1, 'WHRM (HR)'],
+      [3, 'IRN'],
+      [4, 'HRV'],
+      [5, 'RR'],
+    ],
+  },
+  {
+    key: 'ALGO_REPORT_MODE',
+    label: 'Algo Report Mode',
+    desc: 'Sensor-hub report mode',
+    kind: 'bit',
+    index: OP_IDX.ALGO_REPORT_MODE_RATE,
+    shift: 0,
+    width: 2,
+    options: [
+      [1, 'Basic'],
+      [2, 'Extended'],
+    ],
+  },
+  {
+    key: 'ALGO_REPORT_PERIOD',
+    label: 'Algo Report Period',
+    desc: 'Sensor-hub report period code',
+    kind: 'bit',
+    index: OP_IDX.ALGO_REPORT_MODE_RATE,
+    shift: 2,
+    width: 6,
+  },
+  {
+    key: 'ALGO_AFE_ENABLE',
+    label: 'Algo AFE Enable',
+    desc: 'Let the hub drive the AFE',
+    kind: 'bit',
+    index: OP_IDX.ALGO_CONTROL,
+    shift: 0,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled'],
+    ],
+  },
+  {
+    key: 'ALGO_SCD_ENABLE',
+    label: 'Algo Skin Contact Detect',
+    desc: 'Enable skin-contact detection',
+    kind: 'bit',
+    index: OP_IDX.ALGO_CONTROL,
+    shift: 1,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled'],
+    ],
+  },
+  {
+    key: 'ALGO_AUTO_PD_ENABLE',
+    label: 'Algo Auto PD Current',
+    desc: 'Enable automatic photodiode current control',
+    kind: 'bit',
+    index: OP_IDX.ALGO_CONTROL,
+    shift: 2,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled'],
+    ],
+  },
+  {
+    key: 'ALGO_INITIAL_HR',
+    label: 'Algo Initial HR',
+    desc: 'Optional WHRM initial heart-rate seed (bpm, 0 = none)',
+    kind: 'u8',
+    index: OP_IDX.ALGO_INITIAL_HR,
+    min: 0,
+    max: 255,
+  },
+  {
+    key: 'LED_AUTO_BRIGHTNESS_ENABLE',
+    label: 'LED Auto-Brightness',
+    desc: 'Drive RGB LED brightness from ambient light',
+    kind: 'bit',
+    index: OP_IDX.LED_AUTO_BRIGHTNESS_CFG,
+    shift: 0,
+    width: 1,
+    options: [
+      [0, 'Disabled'],
+      [1, 'Enabled'],
+    ],
+  },
+  {
+    key: 'LED_MAX_BRIGHTNESS',
+    label: 'LED Max Brightness',
+    desc: 'Ceiling for auto-brightness mode (0-255)',
+    kind: 'u8',
+    index: OP_IDX.LED_MAX_BRIGHTNESS,
+    min: 0,
+    max: 255,
+  },
+  {
+    key: 'LED_LUX_THRESHOLD',
+    label: 'LED Lux Threshold',
+    desc: 'Below this ambient level the LED stays at max brightness',
+    kind: 'u16',
+    index: OP_IDX.LED_LUX_THRESHOLD,
+    min: 0,
+    max: 65535,
+  },
 ];
 
-export const VERISENSE_OP_CONFIG_BYTE_SIZE = 72;
+export const VERISENSE_OP_CONFIG_BYTE_SIZE = 86;
 export type VerisenseOperationalField = VerisenseOperationalFieldDefinition;
 
 export function createBlankVerisenseOperationalConfig(
@@ -1271,6 +1540,10 @@ export function createBlankVerisenseOperationalConfig(
 ): Uint8Array {
   const blank = new Uint8Array(byteSize);
   blank[0] = 0x5a;
+  // Stamp the layout version so v9-sized configs are recognised as second-gen.
+  if (byteSize >= VERISENSE_OP_CONFIG_BYTE_SIZE) {
+    blank[OP_IDX.OP_CONFIG_VERSION] = OP_CONFIG_VERSION_V9;
+  }
   return blank;
 }
 
@@ -1385,6 +1658,11 @@ export const VERISENSE_SENSOR_ENABLE_FIELDS: readonly VerisenseOperationalSensor
   { key: 'PPG_BLUE_EN', index: OP_IDX.GEN_CFG_1, shift: 2 },
   { key: 'VPROG_EN', index: OP_IDX.GEN_CFG_2, shift: 2 },
   { key: 'VBATT_EN', index: OP_IDX.GEN_CFG_2, shift: 1 },
+  // v9 second-generation sensors (PPG_VIA_HUB is a routing mode, not a sensor
+  // enable, so it stays in the field schema as a setting rather than here).
+  { key: 'AMBIENT_LIGHT_EN', index: OP_IDX.GEN_CFG_3, shift: 3 },
+  { key: 'SKIN_TEMP_EN', index: OP_IDX.GEN_CFG_3, shift: 4 },
+  { key: 'ALGO_HUB_EN', index: OP_IDX.GEN_CFG_3, shift: 5 },
 ];
 
 export interface VerisenseOperationalFieldGroupDefinition {
@@ -1413,6 +1691,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'BATT_TYPE',
         'MAG_EN',
         'LED_MODE',
+        'OP_CONFIG_VERSION',
       ],
     },
     {
@@ -1528,6 +1807,51 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'XTALK_DAC4',
         'PROX_AGC_MODE',
       ],
+    },
+    {
+      id: 'light',
+      title: 'Ambient Light (VD6283)',
+      openByDefault: false,
+      keys: [
+        'LIGHT_GAIN_INDEX',
+        'LIGHT_EXPOSURE_INDEX',
+        'LIGHT_CONTINUOUS_MODE',
+        'LIGHT_DARK_ENABLE',
+        'LIGHT_FLICKER_EN',
+        'LIGHT_SAMPLE_RATE_INDEX',
+      ],
+    },
+    {
+      id: 'skin_temp',
+      title: 'Skin Temperature (MLX90632)',
+      openByDefault: false,
+      keys: [
+        'SKIN_TEMP_MEAS_TYPE',
+        'SKIN_TEMP_REFRESH_RATE',
+        'SKIN_TEMP_POWER_MODE',
+        'SKIN_TEMP_SAMPLE_RATE_INDEX',
+      ],
+    },
+    {
+      id: 'algo',
+      title: 'Algorithm Hub (MAX32674)',
+      openByDefault: false,
+      keys: [
+        'PPG_VIA_HUB',
+        'ALGO_OP_MODE',
+        'ALGO_REPORT_MODE',
+        'ALGO_REPORT_PERIOD',
+        'ALGO_AFE_ENABLE',
+        'ALGO_SCD_ENABLE',
+        'ALGO_AUTO_PD_ENABLE',
+        'ALGO_INITIAL_HR',
+      ],
+    },
+    {
+      id: 'led',
+      title: 'LED Auto-Brightness',
+      openByDefault: false,
+      keys: ['LED_AUTO_BRIGHTNESS_ENABLE', 'LED_MAX_BRIGHTNESS', 'LED_LUX_THRESHOLD'],
     },
   ];
 

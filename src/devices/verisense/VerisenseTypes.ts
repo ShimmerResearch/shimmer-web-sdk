@@ -5,6 +5,9 @@ import type { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import type { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
 import type { SensorLSM6DSV } from './sensors/SensorLSM6DSV.js';
 import type { SensorPPG } from './sensors/SensorPPG.js';
+import type { SensorVD6283 } from './sensors/SensorVD6283.js';
+import type { SensorMAX32674 } from './sensors/SensorMAX32674.js';
+import type { SensorMLX90632 } from './sensors/SensorMLX90632.js';
 
 export type TransportKind = 'ble' | 'serial' | null;
 export type DeviceMode = 'idle' | 'streaming' | 'command' | 'logged';
@@ -15,6 +18,9 @@ export interface SensorMap {
   3: SensorLSM6DS3;
   4: SensorPPG;
   6: SensorLSM6DSV;
+  7: SensorVD6283;
+  8: SensorMAX32674;
+  9: SensorMLX90632;
 }
 
 export interface StreamPacket {

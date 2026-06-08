@@ -49,6 +49,9 @@ import { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
 import { SensorLSM6DS3 } from './sensors/SensorLSM6DS3.js';
 import { SensorLSM6DSV } from './sensors/SensorLSM6DSV.js';
 import { SensorPPG } from './sensors/SensorPPG.js';
+import { SensorVD6283 } from './sensors/SensorVD6283.js';
+import { SensorMAX32674 } from './sensors/SensorMAX32674.js';
+import { SensorMLX90632 } from './sensors/SensorMLX90632.js';
 import { isVerisenseSecondGenerationHardware } from './hardwareModels.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
 import {
@@ -202,6 +205,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       3: new SensorLSM6DS3(),
       4: new SensorPPG(),
       6: new SensorLSM6DSV(),
+      7: new SensorVD6283(),
+      8: new SensorMAX32674(),
+      9: new SensorMLX90632(),
     };
 
     this.sensors[1].setHardwareIdentifier(this.hardwareIdentifier);
@@ -1839,6 +1845,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         this.sensors[6].applyOperationalConfig(op);
         this.adc.applyOperationalConfig(op);
         this.ppg.applyOperationalConfig(op);
+        this.sensors[7].applyOperationalConfig(op);
+        this.sensors[8].applyOperationalConfig(op);
+        this.sensors[9].applyOperationalConfig(op);
       } catch (e) {
         console.warn('[opcfg] apply after read failed:', e);
       }
