@@ -1466,13 +1466,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       id: 'lsm6dsv',
       title: 'LSM6DSV / LIS2MDL',
       openByDefault: false,
-      keys: [
-        'LSM6DSV_ODR_XL',
-        'LSM6DSV_FS_XL',
-        'LSM6DSV_ODR_G',
-        'LSM6DSV_FS_G',
-        'LIS2MDL_ODR',
-      ],
+      keys: ['LSM6DSV_ODR_XL', 'LSM6DSV_FS_XL', 'LSM6DSV_ODR_G', 'LSM6DSV_FS_G', 'LIS2MDL_ODR'],
     },
     {
       id: 'scheduler_ble',
