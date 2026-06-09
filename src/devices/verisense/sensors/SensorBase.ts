@@ -1,3 +1,5 @@
+import type { StreamContribution } from '../../../core/StreamStats.js';
+
 /**
  * Abstract base class for all Verisense sensor decoders.
  *
@@ -140,6 +142,38 @@ export abstract class SensorBase {
       });
     }
     return out;
+  }
+
+  /**
+   * Turn a decoded + timestamped burst into one or more stream contributions
+   * for live throughput / packet-loss tracking. The default treats the sensor
+   * as a single stream; sensors whose decoded array interleaves several
+   * sub-streams at different cadences (e.g. the LSM6DSV tagged FIFO) override
+   * this to report one contribution per sub-stream so loss is tracked
+   * independently.
+   */
+  getStreamContributions(
+    samplesWithTime: Array<{ timestamps?: { tsMillis: number } }>,
+    sensorId: number,
+  ): StreamContribution[] {
+    let first: number | null = null;
+    let last: number | null = null;
+    for (const s of samplesWithTime) {
+      const t = s?.timestamps?.tsMillis;
+      if (typeof t !== 'number') continue;
+      if (first == null || t < first) first = t;
+      if (last == null || t > last) last = t;
+    }
+    return [
+      {
+        key: String(sensorId),
+        label: `Sensor ${sensorId}`,
+        samplingRateHz: this.samplingRateHz,
+        sampleCount: samplesWithTime.length,
+        firstSampleMillis: first,
+        lastSampleMillis: last,
+      },
+    ];
   }
 
   /** Parse a raw sensor payload byte array into decoded samples. */

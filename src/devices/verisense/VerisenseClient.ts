@@ -54,6 +54,7 @@ import { SensorMAX32674 } from './sensors/SensorMAX32674.js';
 import { SensorMLX90632 } from './sensors/SensorMLX90632.js';
 import { isVerisenseSecondGenerationHardware } from './hardwareModels.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
+import { StreamStatsTracker, type StreamStatsSnapshot } from '../../core/StreamStats.js';
 import {
   defaultAcceptedCommands,
   toCommandResponse,
@@ -117,6 +118,7 @@ export type {
  * - `"disconnected"` — `{ kind: TransportKind }`
  * - `"streaming"` — `{ on: boolean }`
  * - `"streamPacket"` / `"data"` — `StreamPacket`
+ * - `"streamStats"` — `StreamStatsSnapshot` (throttled ~3 Hz live throughput/loss)
  * - `"streamCrcFail"` — `{ claimed: number; body: Uint8Array }`
  * - `"opConfig"` — `{ op: Uint8Array }`
  * - `"productionConfig"` — `ProductionConfig`
@@ -176,6 +178,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
   private _bootstrapRequestTimeoutOverrideMs: number | null = null;
   private _isSecondGenerationHw = false;
+
+  // Live stream statistics (throughput / packet-loss). Reset on stream start.
+  private readonly _streamStats = new StreamStatsTracker();
+  private _lastStreamStatsEmitMillis = 0;
 
   readonly stripStreamCrc: boolean;
   readonly verifyStreamCrc: boolean;
@@ -745,6 +751,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   override async startStreaming(): Promise<void> {
+    // Clear live throughput / packet-loss stats for the new streaming session.
+    this._streamStats.reset();
+    this._lastStreamStatsEmitMillis = 0;
     await this.setStreamingMode(true);
     this._mode = 'streaming';
     this.emit('streaming', { on: true });
@@ -2157,6 +2166,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       if (this.verifyStreamCrc && crcOk === false) {
         this.emit('streamCrcFail', { claimed, body: dataNoCrc });
+        // body[0] is the sensor id (already stripped of the CRC trailer here).
+        this._streamStats.recordCrcFail(dataNoCrc.length > 0 ? dataNoCrc[0] : undefined);
       }
     }
 
@@ -2195,7 +2206,36 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       crcOk,
     };
 
+    // Live throughput / packet-loss accounting. Loss is derived from gaps in the
+    // monotonic device clock (tsMillis) via getStreamContributions; throughput
+    // uses the full BLE frame size and host receive time.
+    const contributions =
+      sensor && Array.isArray(samplesWithTime) && samplesWithTime.length
+        ? sensor.getStreamContributions(
+            samplesWithTime as Array<{ timestamps?: { tsMillis: number } }>,
+            sensorId,
+          )
+        : [];
+    this._streamStats.recordPacket({
+      sensorId,
+      byteLength: payload.length,
+      crcOk,
+      recvMillis: systemTsLastSampleMillis,
+      contributions,
+    });
+
     this.emit('streamPacket', packet);
     this.emit('data', packet);
+
+    // Throttled stats push (~3 Hz) so the UI can subscribe instead of polling.
+    if (systemTsLastSampleMillis - this._lastStreamStatsEmitMillis >= 333) {
+      this._lastStreamStatsEmitMillis = systemTsLastSampleMillis;
+      this.emit('streamStats', this._streamStats.snapshot(systemTsLastSampleMillis));
+    }
+  }
+
+  /** Snapshot of live stream statistics (throughput / packet-loss). */
+  getStreamStats(): StreamStatsSnapshot {
+    return this._streamStats.snapshot(nowMillis());
   }
 }

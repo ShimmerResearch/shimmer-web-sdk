@@ -217,9 +217,10 @@ describe('SensorLSM6DSV', () => {
   it('parses tagged accel/gyro/mag entries from variable-length payload', () => {
     const sensor = new SensorLSM6DSV();
 
+    // 16-bit little-endian entry count (3) followed by three 7-byte entries.
     const buf = new Uint8Array([
-      3, 0x10, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x08, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x70,
-      0x07, 0x00, 0x08, 0x00, 0x09, 0x00,
+      3, 0x00, 0x10, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x08, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00,
+      0x70, 0x07, 0x00, 0x08, 0x00, 0x09, 0x00,
     ]);
 
     const out = sensor.parsePayload(buf);
@@ -229,17 +230,22 @@ describe('SensorLSM6DSV', () => {
     expect(out[2].mag).not.toBeNull();
   });
 
-  it('applies ODR/range fields from bytes 18..20', () => {
+  it('applies ODR/range fields from bytes 18..20 (mag reports its configured output rate)', () => {
     const sensor = new SensorLSM6DSV();
     const op = new Uint8Array(72);
-    op[1] = 0b01100000;
-    op[4] = 0b00000100;
-    op[18] = 0x21;
-    op[19] = 0x13;
-    op[20] = 0x02;
+    op[1] = 0b01100000; // accel2En + gyroEn
+    op[4] = 0b00000100; // magEn
+    op[18] = 0x24; // odrXl = 4 (30 Hz), fsXl = 2
+    op[19] = 0x13; // odrG = 3 (15 Hz), fsG = 1
+    op[20] = 0x02; // mag output code 2 -> 60 Hz
 
     sensor.applyOperationalConfig(op);
-    expect(sensor.samplingRateHz).toBeGreaterThanOrEqual(30);
+    expect(sensor.accelHz).toBe(30);
+    expect(sensor.gyroHz).toBe(15);
+    // Mag reports its configured output rate (not capped at the accel/gyro hub
+    // trigger); a slower trigger surfaces as mag packet loss instead.
+    expect(sensor.magHz).toBe(60);
+    expect(sensor.samplingRateHz).toBe(60);
   });
 
   it('timestamps interleaved accel/gyro streams on their own rate, not the global index', () => {

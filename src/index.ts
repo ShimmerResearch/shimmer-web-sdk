@@ -23,6 +23,13 @@ export type {
   FieldKind,
   InertialCalibration,
 } from './core/types.js';
+export { StreamStatsTracker } from './core/StreamStats.js';
+export type {
+  StreamContribution,
+  StreamLossStats,
+  SensorStreamStats,
+  StreamStatsSnapshot,
+} from './core/StreamStats.js';
 
 // Shimmer3R
 export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';

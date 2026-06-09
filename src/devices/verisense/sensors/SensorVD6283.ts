@@ -18,7 +18,9 @@ export interface VD6283Sample {
   cct: number;
 }
 
-/** Slow-sensor sample-rate index -> Hz (matches firmware slowSensorRateMs). */
+/** Slow-sensor sample-rate index -> Hz (matches firmware slowSensorRateMs). This
+ * is the configured (target) rate the firmware polls at; the sensor's exposure
+ * may prevent reaching it, which surfaces as packet loss against this rate. */
 const SLOW_SENSOR_RATE_HZ = [0, 0.5, 1, 2, 5, 10, 20];
 
 /** Op-config index -> exposure µs (matches firmware vd6283_exposureIndexToUs). */
@@ -108,6 +110,8 @@ export class SensorVD6283 extends SensorBase {
   override applyOperationalConfig(op: Uint8Array): void {
     this.enabled = (op[OP_IDX.GEN_CFG_3] & (1 << 3)) !== 0;
     const rateIdx = op[OP_IDX.LIGHT_SAMPLE_RATE_INDEX] ?? 0;
+    // Report the configured rate; loss is measured against it so a long exposure
+    // (or any firmware/hardware shortfall) that prevents reaching it shows up.
     this.samplingRateHz = SLOW_SENSOR_RATE_HZ[rateIdx] || 1;
 
     const expoIdx = op[OP_IDX.LIGHT_EXPOSURE_INDEX] ?? 0;

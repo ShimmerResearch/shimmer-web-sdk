@@ -1,6 +1,7 @@
 import { SensorBase } from './SensorBase.js';
 import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
+import type { StreamContribution } from '../../../core/StreamStats.js';
 
 export interface LSM6DSVSample {
   tag: number;
@@ -22,11 +23,17 @@ export class SensorLSM6DSV extends SensorBase {
   private accelFsG = 2;
   private gyroFsDps = 2000;
 
-  // Per-stream ODRs (the FIFO interleaves accel/gyro/mag, so each stream is
-  // timestamped on its own rate — see computeSampleTimestamps).
-  private accelHz = 15;
-  private gyroHz = 15;
-  private magHz = 10;
+  // Configured per-stream rates (the FIFO interleaves accel/gyro/mag, so each
+  // stream is timestamped on its own rate — see computeSampleTimestamps). Public
+  // so the per-sub-stream loss tracking (getStreamContributions) can read each.
+  // accelHz/gyroHz are the configured LSM6DSV ODRs; magHz is the configured
+  // magnetometer output (sensor-hub) rate. The firmware FIFO-batches accel/gyro
+  // at their ODR, so they deliver at the configured rate; the mag is still
+  // bounded by the accel/gyro hub trigger, so a mag rate above the accel/gyro
+  // ODR delivers slower — which shows up as packet loss.
+  accelHz = 15;
+  gyroHz = 15;
+  magHz = 15;
 
   constructor() {
     super();
@@ -100,19 +107,21 @@ export class SensorLSM6DSV extends SensorBase {
     }
   }
 
-  private decodeMagOdrHz(code: number): number {
-    // LIS2MDL ODR datasheet register values.
+  private decodeMagOutputRateHz(code: number): number {
+    // Magnetometer output (sensor-hub) rate code from op-config byte 20 bits 1:0.
+    // This is the rate mag samples reach the host; the firmware derives the
+    // underlying LIS2MDL ODR (20/50/100/100 Hz) to keep a fresh sample available.
     switch (code) {
       case 0:
-        return 10;
+        return 15;
       case 1:
-        return 20;
+        return 30;
       case 2:
-        return 50;
+        return 60;
       case 3:
-        return 100;
+        return 120;
       default:
-        return 10;
+        return 15;
     }
   }
 
@@ -135,12 +144,14 @@ export class SensorLSM6DSV extends SensorBase {
   override parsePayload(sensorPayloadBytes: Uint8Array): LSM6DSVSample[] {
     if (!sensorPayloadBytes?.length) return [];
 
-    const entryCount = sensorPayloadBytes[0] ?? 0;
-    const maxEntriesByLength = Math.floor((sensorPayloadBytes.length - 1) / 7);
+    // Entry count is a 16-bit little-endian value (a full FIFO drain can return
+    // more than 255 samples), followed by `count` x 7-byte tagged entries.
+    const entryCount = ((sensorPayloadBytes[0] ?? 0) | ((sensorPayloadBytes[1] ?? 0) << 8)) >>> 0;
+    const maxEntriesByLength = Math.floor((sensorPayloadBytes.length - 2) / 7);
     const n = Math.min(entryCount, maxEntriesByLength);
 
     const out: LSM6DSVSample[] = [];
-    let offset = 1;
+    let offset = 2;
 
     for (let i = 0; i < n; i++) {
       const tagCnt = sensorPayloadBytes[offset];
@@ -194,7 +205,10 @@ export class SensorLSM6DSV extends SensorBase {
 
     this.accelHz = this.accEnabled ? this.decodeOdrHz(odrXl) : 0;
     this.gyroHz = this.gyroEnabled ? this.decodeOdrHz(odrG) : 0;
-    this.magHz = this.magEnabled ? this.decodeMagOdrHz(odrMag) : 0;
+    // Configured mag output rate (NOT capped at the accel/gyro trigger). Loss is
+    // measured against this, so when the accel/gyro that trigger the sensor hub
+    // are too slow to deliver it, the shortfall surfaces as mag loss.
+    this.magHz = this.magEnabled ? this.decodeMagOutputRateHz(odrMag) : 0;
 
     this.samplingRateHz = Math.max(this.accelHz, this.gyroHz, this.magHz, 1);
   }
@@ -275,5 +289,66 @@ export class SensorLSM6DSV extends SensorBase {
         systemOffsetFirstTime: block.systemOffsetFirstTime,
       });
     });
+  }
+
+  /**
+   * Report up to three independent sub-streams (accel / gyro / mag) so loss is
+   * tracked per stream. Each sub-stream's expected rate is its configured rate
+   * (ODR for accel/gyro, output rate for mag); loss is measured against that, so
+   * the mag's hub-trigger bound — or any rate the firmware/link can't keep up
+   * with — surfaces as loss when a configured rate exceeds what's delivered.
+   */
+  override getStreamContributions(
+    samplesWithTime: Array<{ timestamps?: { tsMillis: number } }>,
+    sensorId: number,
+  ): StreamContribution[] {
+    const samples = samplesWithTime as Array<LSM6DSVSample & { timestamps?: { tsMillis: number } }>;
+
+    const subs: Array<{
+      key: string;
+      label: string;
+      rate: number;
+      has: (s: LSM6DSVSample) => boolean;
+    }> = [
+      {
+        key: `${sensorId}:accel`,
+        label: 'Accel',
+        rate: this.accelHz,
+        has: (s) => !!s.accel,
+      },
+      {
+        key: `${sensorId}:gyro`,
+        label: 'Gyro',
+        rate: this.gyroHz,
+        has: (s) => !!s.gyro,
+      },
+      // Mag enters the FIFO at its configured sensor-hub output rate (`magHz`).
+      { key: `${sensorId}:mag`, label: 'Mag', rate: this.magHz, has: (s) => !!s.mag },
+    ];
+
+    const out: StreamContribution[] = [];
+    for (const sub of subs) {
+      let count = 0;
+      let first: number | null = null;
+      let last: number | null = null;
+      for (const s of samples) {
+        if (!sub.has(s)) continue;
+        count++;
+        const t = s?.timestamps?.tsMillis;
+        if (typeof t !== 'number') continue;
+        if (first == null || t < first) first = t;
+        if (last == null || t > last) last = t;
+      }
+      if (count === 0) continue; // disabled or no samples in this burst
+      out.push({
+        key: sub.key,
+        label: sub.label,
+        samplingRateHz: sub.rate > 0 ? sub.rate : null,
+        sampleCount: count,
+        firstSampleMillis: first,
+        lastSampleMillis: last,
+      });
+    }
+    return out;
   }
 }

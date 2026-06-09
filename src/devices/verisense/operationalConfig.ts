@@ -769,17 +769,17 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'LIS2MDL_ODR',
-    label: 'LIS2MDL ODR',
-    desc: 'Magnetometer ODR (LIS2MDL ODR datasheet register value, byte 20 bits 1:0)',
+    label: 'Mag Output Rate',
+    desc: 'Magnetometer output (sensor-hub) rate. Firmware derives the LIS2MDL ODR to keep a fresh sample available (byte 20 bits 1:0). Bounded by the accel/gyro ODR (the sensor-hub trigger).',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_2,
     shift: 0,
     width: 2,
     options: [
-      [0, '10 Hz'],
-      [1, '20 Hz'],
-      [2, '50 Hz'],
-      [3, '100 Hz'],
+      [0, '15 Hz (LIS2MDL 20 Hz)'],
+      [1, '30 Hz (LIS2MDL 50 Hz)'],
+      [2, '60 Hz (LIS2MDL 100 Hz)'],
+      [3, '120 Hz (LIS2MDL 100 Hz)'],
     ],
   },
 
@@ -1335,11 +1335,11 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LIGHT_SAMPLE_RATE_INDEX',
     label: 'Light Sample Rate',
-    desc: 'Ambient-light polling rate',
+    desc: 'Ambient-light polling rate (max ~10 Hz — the VD6283 continuous-mode period is bounded by the fixed 100 ms inter-measurement time, so 20 Hz is never reachable). A long exposure lowers the achievable rate further.',
     kind: 'u8',
     index: OP_IDX.LIGHT_SAMPLE_RATE_INDEX,
     min: 0,
-    max: 6,
+    max: 5,
     options: [
       [0, 'Off'],
       [1, '0.5 Hz'],
@@ -1347,7 +1347,6 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
       [3, '2 Hz'],
       [4, '5 Hz'],
       [5, '10 Hz'],
-      [6, '20 Hz'],
     ],
   },
   {
@@ -1364,39 +1363,28 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     ],
   },
   {
-    key: 'SKIN_TEMP_REFRESH_RATE',
-    label: 'Skin Temp Refresh Rate',
-    desc: 'MLX90632 refresh-rate code (0=0.5Hz .. 7=64Hz)',
+    // Single skin-temp rate setting. Stored as the MLX90632 refresh-rate code
+    // (byte 76 bits 3:1); the firmware sets the chip refresh AND derives the read
+    // poll from it. Shown as the *medical* output rate (= refresh ÷ 2; extended
+    // mode is ÷ 3). The legacy poll field (byte 77) and power-mode bits (byte 76
+    // bits 5:4) are now unused (free to repurpose) — continuous mode is required
+    // and set automatically.
+    key: 'SKIN_TEMP_SAMPLE_RATE',
+    label: 'Skin Temp Sample Rate',
+    desc: 'MLX90632 sample rate (medical output = chip refresh ÷2; extended ÷3). Drives both the chip refresh and the read poll. Byte 76 bits 3:1.',
     kind: 'bit',
     index: OP_IDX.SKIN_TEMP_CONFIG,
     shift: 1,
     width: 3,
-  },
-  {
-    key: 'SKIN_TEMP_POWER_MODE',
-    label: 'Skin Temp Power Mode',
-    desc: 'MLX90632 power mode (halt/sleep-step/step/continuous)',
-    kind: 'bit',
-    index: OP_IDX.SKIN_TEMP_CONFIG,
-    shift: 4,
-    width: 2,
-  },
-  {
-    key: 'SKIN_TEMP_SAMPLE_RATE_INDEX',
-    label: 'Skin Temp Sample Rate',
-    desc: 'Skin-temperature polling rate',
-    kind: 'u8',
-    index: OP_IDX.SKIN_TEMP_SAMPLE_RATE_INDEX,
-    min: 0,
-    max: 6,
     options: [
-      [0, 'Off'],
+      [0, '0.25 Hz'],
       [1, '0.5 Hz'],
       [2, '1 Hz'],
       [3, '2 Hz'],
-      [4, '5 Hz'],
-      [5, '10 Hz'],
-      [6, '20 Hz'],
+      [4, '4 Hz'],
+      [5, '8 Hz'],
+      [6, '16 Hz'],
+      [7, '32 Hz'],
     ],
   },
   {
@@ -1810,12 +1798,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       id: 'skin_temp',
       title: 'Skin Temperature (MLX90632)',
       openByDefault: false,
-      keys: [
-        'SKIN_TEMP_MEAS_TYPE',
-        'SKIN_TEMP_REFRESH_RATE',
-        'SKIN_TEMP_POWER_MODE',
-        'SKIN_TEMP_SAMPLE_RATE_INDEX',
-      ],
+      keys: ['SKIN_TEMP_MEAS_TYPE', 'SKIN_TEMP_SAMPLE_RATE'],
     },
     {
       id: 'algo',

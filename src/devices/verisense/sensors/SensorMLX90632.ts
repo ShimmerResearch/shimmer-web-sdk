@@ -9,8 +9,10 @@ export interface MLX90632Sample {
   ambient: { raw: number; cal: number; units: string };
 }
 
-/** Slow-sensor sample-rate index -> Hz (matches firmware slowSensorRateMs). */
-const SLOW_SENSOR_RATE_HZ = [0, 0.5, 1, 2, 5, 10, 20];
+/** MLX90632 refresh-rate code (op-config byte 76 bits 3:1) -> refresh Hz. The
+ * single skin-temp rate setting is stored as this code; the output (sample) rate
+ * is refresh / sub-measurements (medical = 2, extended = 3). */
+const MLX_REFRESH_HZ = [0.5, 1, 2, 4, 8, 16, 32, 64];
 
 /**
  * Decoder for the MLX90632 skin temperature sensor (Verisense sensor id = 9).
@@ -46,7 +48,13 @@ export class SensorMLX90632 extends SensorBase {
 
   override applyOperationalConfig(op: Uint8Array): void {
     this.enabled = (op[OP_IDX.GEN_CFG_3] & (1 << 4)) !== 0;
-    const rateIdx = op[OP_IDX.SKIN_TEMP_SAMPLE_RATE_INDEX] ?? 0;
-    this.samplingRateHz = SLOW_SENSOR_RATE_HZ[rateIdx] || 1;
+    // Single skin-temp rate: stored as the MLX90632 refresh-rate code (byte 76
+    // bits 3:1). The output (sample) rate the firmware delivers is the refresh
+    // rate divided by the sub-measurement count (medical = 2, extended = 3).
+    const cfg = op[OP_IDX.SKIN_TEMP_CONFIG] ?? 0;
+    const isExtended = (cfg & 0x01) !== 0;
+    const refreshCode = (cfg >> 1) & 0x07;
+    const refreshHz = MLX_REFRESH_HZ[refreshCode] ?? 16;
+    this.samplingRateHz = refreshHz / (isExtended ? 3 : 2);
   }
 }
