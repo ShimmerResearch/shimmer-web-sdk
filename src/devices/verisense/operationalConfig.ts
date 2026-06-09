@@ -1271,19 +1271,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   // editable field here.
   // AMBIENT_LIGHT_EN / SKIN_TEMP_EN / ALGO_HUB_EN are sensor enables and are
   // rendered as checkboxes (see VERISENSE_SENSOR_ENABLE_FIELDS), not here.
-  {
-    key: 'PPG_VIA_HUB',
-    label: 'PPG via Algo Hub',
-    desc: 'MAX86176 PPG routed through the MAX32674 hub (vs directly attached)',
-    kind: 'bit',
-    index: OP_IDX.GEN_CFG_3,
-    shift: 6,
-    width: 1,
-    options: [
-      [0, 'Direct'],
-      [1, 'Via Hub'],
-    ],
-  },
+  // GEN_CFG_3 bit 6 is reserved (was PPG_VIA_HUB): the MAX86176 is hardwired to
+  // the hub, so raw PPG always arrives under the PPG sensor id (4) when a PPG
+  // channel is enabled, and the algorithm output under id 8 when ALGO_HUB_EN is
+  // set - no routing bit is needed.
   {
     key: 'LIGHT_GAIN_INDEX',
     label: 'Light Gain',
@@ -1362,14 +1353,14 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'SKIN_TEMP_MEAS_TYPE',
     label: 'Skin Temp Mode',
-    desc: 'MLX90632 measurement type',
+    desc: 'MLX90632 measurement type (default Medical for skin/body temperature)',
     kind: 'bit',
     index: OP_IDX.SKIN_TEMP_CONFIG,
     shift: 0,
     width: 1,
     options: [
-      [0, 'Medical'],
-      [1, 'Extended'],
+      [0, 'Medical (25–42.5 °C, ±0.2 °C)'],
+      [1, 'Extended (wider range, lower accuracy)'],
     ],
   },
   {
@@ -1653,8 +1644,8 @@ export const VERISENSE_SENSOR_ENABLE_FIELDS: readonly VerisenseOperationalSensor
   { key: 'PPG_BLUE_EN', index: OP_IDX.GEN_CFG_1, shift: 2 },
   { key: 'VPROG_EN', index: OP_IDX.GEN_CFG_2, shift: 2 },
   { key: 'VBATT_EN', index: OP_IDX.GEN_CFG_2, shift: 1 },
-  // v9 second-generation sensors (PPG_VIA_HUB is a routing mode, not a sensor
-  // enable, so it stays in the field schema as a setting rather than here).
+  // v9 second-generation sensors. On 2nd-gen the raw PPG (id 4) is gated by the
+  // existing PPG channel enables above; ALGO_HUB_EN gates the algorithm (id 8).
   { key: 'AMBIENT_LIGHT_EN', index: OP_IDX.GEN_CFG_3, shift: 3 },
   { key: 'SKIN_TEMP_EN', index: OP_IDX.GEN_CFG_3, shift: 4 },
   { key: 'ALGO_HUB_EN', index: OP_IDX.GEN_CFG_3, shift: 5 },
@@ -1831,7 +1822,6 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       title: 'Algorithm Hub (MAX32674)',
       openByDefault: false,
       keys: [
-        'PPG_VIA_HUB',
         'ALGO_OP_MODE',
         'ALGO_REPORT_MODE',
         'ALGO_REPORT_PERIOD',

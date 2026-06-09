@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { SensorVD6283 } from '../../src/devices/verisense/sensors/SensorVD6283.js';
 import { SensorMLX90632 } from '../../src/devices/verisense/sensors/SensorMLX90632.js';
 import { SensorMAX32674 } from '../../src/devices/verisense/sensors/SensorMAX32674.js';
+import { SensorPPG } from '../../src/devices/verisense/sensors/SensorPPG.js';
 import {
   createBlankVerisenseOperationalConfig,
   VERISENSE_OP_CONFIG_BYTE_SIZE,
@@ -72,16 +73,10 @@ describe('SensorMLX90632 (skin temp, id 9)', () => {
 });
 
 describe('SensorMAX32674 (algo hub, id 8)', () => {
-  it('decodes a count-prefixed 32-byte sample', () => {
+  it('decodes a count-prefixed 14-byte algo-only sample (raw PPG now on id 4)', () => {
     const s = new SensorMAX32674();
     const bytes = Uint8Array.from([
       1, // sample count
-      ...u24(1000),
-      ...u24(2000),
-      ...u24(3000),
-      ...u24(4000),
-      ...u24(5000),
-      ...u24(6000), // led1..6
       ...u16(100),
       ...u16(0x10000 - 200),
       ...u16(300), // accel x=100, y=-200, z=300
@@ -94,11 +89,12 @@ describe('SensorMAX32674 (algo hub, id 8)', () => {
     ]);
     const out = s.parsePayload(bytes);
     expect(out).toHaveLength(1);
-    expect(out[0].ppg).toEqual([1000, 2000, 3000, 4000, 5000, 6000]);
+    expect(out[0]).not.toHaveProperty('ppg');
     expect(out[0].accel.raw).toEqual([100, -200, 300]);
     expect(out[0].hr).toBe(72);
     expect(out[0].hrConfidence).toBe(95);
     expect(out[0].spo2).toBe(98);
+    expect(out[0].spo2Confidence).toBe(90);
     expect(out[0].activityClass).toBe(2);
     expect(out[0].scdContactState).toBe(1);
   });
@@ -109,6 +105,37 @@ describe('SensorMAX32674 (algo hub, id 8)', () => {
     op[OP_IDX.GEN_CFG_3] |= 1 << 5; // ALGO_HUB_EN
     s.applyOperationalConfig(op);
     expect(s.enabled).toBe(true);
+  });
+});
+
+describe('SensorPPG hub mode (2nd-gen raw MAX86176 PPG, id 4)', () => {
+  it('decodes N x (3 x u24) green/IR/red channels with no count prefix', () => {
+    const s = new SensorPPG();
+    s.setHubMode(true);
+    const bytes = Uint8Array.from([
+      ...u24(1000),
+      ...u24(2000),
+      ...u24(3000), // sample 0: green, IR, red
+      ...u24(1001),
+      ...u24(2001),
+      ...u24(3001), // sample 1: green, IR, red
+    ]);
+    const out = s.parsePayload(bytes);
+    expect(out).toHaveLength(2);
+    expect(out[0].leds).toEqual([1000, 2000, 3000]);
+    expect(out[1].leds).toEqual([1001, 2001, 3001]);
+    // hub mode does not emit named RED/IR/GREEN/BLUE channels
+    expect(out[0]).not.toHaveProperty('RED');
+  });
+
+  it('uses the 1st-gen named-channel layout when hub mode is off', () => {
+    const s = new SensorPPG();
+    s.setHubMode(false);
+    s.setChannels({ RED: true, IR: true });
+    const out = s.parsePayload(new Uint8Array(6)); // 2 channels x 3 bytes = 1 sample
+    expect(out).toHaveLength(1);
+    expect(out[0]).toHaveProperty('RED');
+    expect(out[0].leds).toBeUndefined();
   });
 });
 
@@ -126,7 +153,8 @@ describe('v9 operational config schema', () => {
     expect(keys).toContain('AMBIENT_LIGHT_EN');
     expect(keys).toContain('SKIN_TEMP_EN');
     expect(keys).toContain('ALGO_HUB_EN');
-    // PPG_VIA_HUB is a routing-mode setting (field schema), not a sensor enable.
+    // PPG_VIA_HUB was removed entirely: on 2nd-gen the PPG is always via the hub,
+    // gated by the existing PPG channel enables (raw PPG -> id 4) + ALGO_HUB_EN.
     expect(keys).not.toContain('PPG_VIA_HUB');
   });
 

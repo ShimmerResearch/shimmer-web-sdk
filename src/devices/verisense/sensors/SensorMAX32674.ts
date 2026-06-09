@@ -1,11 +1,13 @@
 import { SensorBase } from './SensorBase.js';
-import { i16le, u24le } from '../protocol.js';
+import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
 
-/** One algorithm-hub sample: raw MAX86176 PPG + accel + WHRM algorithm output. */
+/**
+ * One algorithm-hub sample: accel + WHRM algorithm output. The raw MAX86176 PPG
+ * is no longer carried here - it streams separately under the PPG sensor id (4),
+ * see SensorPPG hub mode.
+ */
 export interface MAX32674Sample {
-  /** 6 raw PPG LED channel counts (24-bit). */
-  ppg: [number, number, number, number, number, number];
   accel: { raw: [number, number, number] };
   /** Heart rate (bpm) and confidence (0-100). */
   hr: number;
@@ -24,17 +26,18 @@ function u16le(bytes: Uint8Array, off: number): number {
 /**
  * Decoder for the MAX32674 algorithm hub (Verisense sensor id = 8).
  *
- * Data block payload = [sampleCount:1] then sampleCount x 32 bytes:
- *   ppg led1..led6 : 6 x u24 (18) | accel x,y,z : 3 x i16 (6) |
- *   hr u16 (2) | hr_conf u8 (1) | spo2 u16 (2) | spo2_conf u8 (1) |
- *   activity u8 (1) | scd_contact u8 (1)
+ * Data block payload = [sampleCount:1] then sampleCount x 14 bytes:
+ *   accel x,y,z : 3 x i16 (6) | hr u16 (2) | hr_conf u8 (1) |
+ *   spo2 u16 (2) | spo2_conf u8 (1) | activity u8 (1) | scd_contact u8 (1)
+ *
+ * Raw PPG is reported separately under the PPG sensor id (4).
  */
 export class SensorMAX32674 extends SensorBase {
-  static readonly BYTES_PER_SAMPLE = 32;
+  static readonly BYTES_PER_SAMPLE = 14;
 
   constructor() {
     super();
-    // Approximate; the hub reports at the configured PPG report rate.
+    // Approximate; the hub reports at the configured algorithm report rate.
     this.samplingRateHz = 25;
   }
 
@@ -51,27 +54,19 @@ export class SensorMAX32674 extends SensorBase {
     for (let i = 0; i < n; i++) {
       const base = 1 + i * SensorMAX32674.BYTES_PER_SAMPLE;
       out.push({
-        ppg: [
-          u24le(sensorPayloadBytes, base + 0),
-          u24le(sensorPayloadBytes, base + 3),
-          u24le(sensorPayloadBytes, base + 6),
-          u24le(sensorPayloadBytes, base + 9),
-          u24le(sensorPayloadBytes, base + 12),
-          u24le(sensorPayloadBytes, base + 15),
-        ],
         accel: {
           raw: [
-            i16le(sensorPayloadBytes, base + 18),
-            i16le(sensorPayloadBytes, base + 20),
-            i16le(sensorPayloadBytes, base + 22),
+            i16le(sensorPayloadBytes, base + 0),
+            i16le(sensorPayloadBytes, base + 2),
+            i16le(sensorPayloadBytes, base + 4),
           ],
         },
-        hr: u16le(sensorPayloadBytes, base + 24),
-        hrConfidence: sensorPayloadBytes[base + 26] ?? 0,
-        spo2: u16le(sensorPayloadBytes, base + 27),
-        spo2Confidence: sensorPayloadBytes[base + 29] ?? 0,
-        activityClass: sensorPayloadBytes[base + 30] ?? 0,
-        scdContactState: sensorPayloadBytes[base + 31] ?? 0,
+        hr: u16le(sensorPayloadBytes, base + 6),
+        hrConfidence: sensorPayloadBytes[base + 8] ?? 0,
+        spo2: u16le(sensorPayloadBytes, base + 9),
+        spo2Confidence: sensorPayloadBytes[base + 11] ?? 0,
+        activityClass: sensorPayloadBytes[base + 12] ?? 0,
+        scdContactState: sensorPayloadBytes[base + 13] ?? 0,
       });
     }
 

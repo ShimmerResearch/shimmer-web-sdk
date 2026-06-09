@@ -1806,6 +1806,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         parsed.revHwMajor,
         parsed.revHwMinor,
       );
+      // On 2nd-gen hardware the raw PPG (id 4) is the 6-channel MAX86176 block
+      // drained from the hub, not the 1st-gen named-channel layout.
+      this.ppg.setHubMode(this._isSecondGenerationHw);
     }
 
     if (erased) {
