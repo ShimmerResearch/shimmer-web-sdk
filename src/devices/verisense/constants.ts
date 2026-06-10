@@ -224,7 +224,7 @@ export const VERISENSE_STREAM_SENSOR_LABELS = Object.freeze({
   2: 'Accel 1 (LIS2DW12)',
   3: 'Accel 2 + Gyro (LSM6DS3)',
   4: 'PPG (MAX86xxx)',
-  6: 'Accel 2 + Gyro + Mag (LSM6DSV)',
+  6: 'Accel 2 + Gyro + Mag (LSM6DSV + LIS2MDL)',
   7: 'Ambient Light (VD6283)',
   8: 'Algo Hub (MAX32674 — HR + raw PPG)',
   9: 'Skin Temperature (MLX90632)',

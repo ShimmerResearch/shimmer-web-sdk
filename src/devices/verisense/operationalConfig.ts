@@ -1,4 +1,10 @@
 import { OP_IDX, OP_CONFIG_VERSION_V9 } from './constants.js';
+import {
+  getVerisenseHardwareRevision,
+  getVerisenseHardwareSensorSupport,
+  type VerisenseHardwareRevisionSource,
+  type VerisenseHardwareSensorSupport,
+} from './hardwareModels.js';
 
 export type VerisenseOperationalFieldKind =
   | 'bit'
@@ -1734,7 +1740,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
     },
     {
       id: 'lsm6dsv',
-      title: 'LSM6DSV / LIS2MDL',
+      title: 'Accel / Gyro / Mag',
       openByDefault: false,
       keys: ['LSM6DSV_ODR_XL', 'LSM6DSV_FS_XL', 'LSM6DSV_ODR_G', 'LSM6DSV_FS_G', 'LIS2MDL_ODR'],
     },
@@ -1801,7 +1807,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
     },
     {
       id: 'light',
-      title: 'Ambient Light (VD6283)',
+      title: 'Ambient Light',
       openByDefault: false,
       keys: [
         'LIGHT_GAIN_INDEX',
@@ -1813,13 +1819,13 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
     },
     {
       id: 'skin_temp',
-      title: 'Skin Temperature (MLX90632)',
+      title: 'Skin Temperature',
       openByDefault: false,
       keys: ['SKIN_TEMP_MEAS_TYPE', 'SKIN_TEMP_SAMPLE_RATE'],
     },
     {
       id: 'algo',
-      title: 'Algorithm Hub (MAX32674)',
+      title: 'Algorithm Hub',
       openByDefault: false,
       keys: [
         'ALGO_OP_MODE',
@@ -1840,6 +1846,50 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
   ];
 
 export const VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID = 'gen';
+
+/**
+ * Maps each hardware-gated operational-config group id to the sensor block that
+ * gates it (see {@link VerisenseHardwareSensorSupport}). Group ids absent from
+ * this map (e.g. `gen`, `scheduler_ble`) configure behaviour that applies to
+ * every board and are always considered supported.
+ */
+export const VERISENSE_OPERATIONAL_FIELD_GROUP_SENSOR: Readonly<
+  Record<string, keyof VerisenseHardwareSensorSupport>
+> = {
+  accel1: 'accel1',
+  gyro_accel2: 'gyroAccel2',
+  lsm6dsv: 'imuGen2',
+  adc_gsr: 'gsr',
+  ppg: 'ppg',
+  light: 'ambientLight',
+  skin_temp: 'skinTemperature',
+  algo: 'algorithmHub',
+  led: 'ledAutoBrightness',
+};
+
+/**
+ * Returns the set of operational-config group ids (from
+ * {@link VERISENSE_OPERATIONAL_FIELD_GROUPS}) whose underlying sensor is present
+ * on the given hardware revision. A group is supported when it is not gated by a
+ * sensor block, or when its gating sensor is present.
+ *
+ * Returns `null` when the hardware revision is unknown so callers can fall back
+ * to showing every group.
+ */
+export function getVerisenseSupportedOperationalFieldGroupIds(
+  source: VerisenseHardwareRevisionSource | null | undefined,
+): ReadonlySet<string> | null {
+  const hw = getVerisenseHardwareRevision(source);
+  if (!hw) return null;
+
+  const support = getVerisenseHardwareSensorSupport(hw.major, hw.minor);
+  const supported = new Set<string>();
+  for (const group of VERISENSE_OPERATIONAL_FIELD_GROUPS) {
+    const sensorKey = VERISENSE_OPERATIONAL_FIELD_GROUP_SENSOR[group.id];
+    if (!sensorKey || support[sensorKey]) supported.add(group.id);
+  }
+  return supported;
+}
 
 /** LIGHT_CONFIG bit 1 is the VD6283 dark-channel select: when set, the shared
  * visible/clear slot carries the dark (covered-photodiode) baseline instead of

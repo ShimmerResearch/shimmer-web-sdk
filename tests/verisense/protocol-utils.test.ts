@@ -5,6 +5,8 @@ import {
   buildProductionConfigPayload,
   formatVerisenseHardwareRevision,
   getVerisenseHardwareFriendlyName,
+  getVerisenseHardwareSensorSupport,
+  getVerisenseSupportedOperationalFieldGroupIds,
   getVerisenseStreamingBatteryVoltageMultiplier,
   parseEventLogPayload,
   parsePayloadCrcErrorBankIndexes,
@@ -41,6 +43,96 @@ describe('Hardware model helpers', () => {
     expect(getVerisenseStreamingBatteryVoltageMultiplier(68, 8)).toBe(1.0);
     expect(getVerisenseStreamingBatteryVoltageMultiplier(68, 9)).toBe(2.469);
     expect(getVerisenseStreamingBatteryVoltageMultiplier(69, 0)).toBe(2.469);
+  });
+
+  it('resolves sensor support per model from the IC matrix', () => {
+    // SR61.1 (1st-gen IMU): LIS2DW12 + LSM6DS3 only.
+    expect(getVerisenseHardwareSensorSupport(61, 1)).toMatchObject({
+      accel1: true,
+      gyroAccel2: true,
+      imuGen2: false,
+      gsr: false,
+      ppg: false,
+    });
+    // SR61.5 (2nd-gen IMU): LSM6DSV, GSR, ambient light, LEDs - no 1st-gen IMU, no PPG.
+    expect(getVerisenseHardwareSensorSupport(61, 5)).toMatchObject({
+      accel1: false,
+      gyroAccel2: false,
+      imuGen2: true,
+      gsr: true,
+      ppg: false,
+      ambientLight: true,
+      ledAutoBrightness: true,
+    });
+    // SR62 (GSR+): 1st-gen IMU + GSR + analog PPG.
+    expect(getVerisenseHardwareSensorSupport(62, 0)).toMatchObject({
+      accel1: true,
+      gyroAccel2: true,
+      gsr: true,
+      ppg: true,
+      imuGen2: false,
+    });
+    // SR68.8 (1st-gen Pulse+): accel1 + PPG + skin temp; no GSR, no gyro/accel2.
+    expect(getVerisenseHardwareSensorSupport(68, 8)).toMatchObject({
+      accel1: true,
+      gyroAccel2: false,
+      gsr: false,
+      ppg: true,
+      skinTemperature: true,
+      imuGen2: false,
+    });
+    // SR68.6 (1st-gen Pulse+, pre skin temp): no skin temp.
+    expect(getVerisenseHardwareSensorSupport(68, 6).skinTemperature).toBe(false);
+    // SR68.9 (2nd-gen Pulse+): full stack, except accel1 (LIS2DW12) which is
+    // routed to the algo hub and not recorded from.
+    expect(getVerisenseHardwareSensorSupport(68, 9)).toMatchObject({
+      accel1: false,
+      gyroAccel2: false,
+      imuGen2: true,
+      gsr: true,
+      ppg: true,
+      ambientLight: true,
+      skinTemperature: true,
+      algorithmHub: true,
+      ledAutoBrightness: true,
+    });
+    // Dev board / unknown major: assume everything present.
+    expect(getVerisenseHardwareSensorSupport(64, 0).algorithmHub).toBe(true);
+    expect(getVerisenseHardwareSensorSupport(99, 0).ppg).toBe(true);
+  });
+
+  it('derives supported op-config group ids from hardware revision', () => {
+    // Unknown revision -> null (caller shows all groups).
+    expect(getVerisenseSupportedOperationalFieldGroupIds(null)).toBeNull();
+    expect(
+      getVerisenseSupportedOperationalFieldGroupIds({ revHwMajor: 0, revHwMinor: 0 }),
+    ).toBeNull();
+
+    const gen2Pulse = getVerisenseSupportedOperationalFieldGroupIds({
+      revHwMajor: 68,
+      revHwMinor: 9,
+      revHwInternal: 0,
+    });
+    // Always-on groups present; 2nd-gen IMU present; both 1st-gen IMU groups
+    // excluded (accel1's LIS2DW12 is routed to the algo hub, not recorded from).
+    expect(gen2Pulse?.has('gen')).toBe(true);
+    expect(gen2Pulse?.has('scheduler_ble')).toBe(true);
+    expect(gen2Pulse?.has('lsm6dsv')).toBe(true);
+    expect(gen2Pulse?.has('algo')).toBe(true);
+    expect(gen2Pulse?.has('accel1')).toBe(false);
+    expect(gen2Pulse?.has('gyro_accel2')).toBe(false);
+
+    const gen1Imu = getVerisenseSupportedOperationalFieldGroupIds({
+      revHwMajor: 61,
+      revHwMinor: 1,
+      revHwInternal: 0,
+    });
+    // 1st-gen IMU groups present; 2nd-gen + sensor groups excluded.
+    expect(gen1Imu?.has('accel1')).toBe(true);
+    expect(gen1Imu?.has('gyro_accel2')).toBe(true);
+    expect(gen1Imu?.has('lsm6dsv')).toBe(false);
+    expect(gen1Imu?.has('ppg')).toBe(false);
+    expect(gen1Imu?.has('light')).toBe(false);
   });
 });
 
