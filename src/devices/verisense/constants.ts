@@ -198,3 +198,25 @@ export const OP_IDX = Object.freeze({
 export const OP_CONFIG_VERSION_V9 = 9;
 
 export type OpIdx = keyof typeof OP_IDX;
+
+/** Minimum firmware version that supports the BLE-link debug commands
+ * (read/optimize connection parameters). */
+export const BLE_LINK_MIN_FW = Object.freeze({
+  major: 1,
+  minor: 4,
+  internal: 23,
+});
+
+/** Human-readable labels for Verisense stream-packet sensor IDs. Each ID maps to
+ * the device part(s) that produce that stream (some streams interleave several
+ * physical sensors, e.g. id 6 = LSM6DSV accel + gyro + mag). */
+export const VERISENSE_STREAM_SENSOR_LABELS = Object.freeze({
+  1: 'ADC (GSR / Battery)',
+  2: 'Accel 1 (LIS2DW12)',
+  3: 'Accel 2 + Gyro (LSM6DS3)',
+  4: 'PPG (MAX86xxx)',
+  6: 'Accel 2 + Gyro + Mag (LSM6DSV)',
+  7: 'Ambient Light (VD6283)',
+  8: 'Algo Hub (MAX32674 — HR + raw PPG)',
+  9: 'Skin Temperature (MLX90632)',
+} as const);

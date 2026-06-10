@@ -1840,3 +1840,11 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
   ];
 
 export const VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID = 'gen';
+
+/** LIGHT_CONFIG bit 1 is the VD6283 dark-channel select: when set, the shared
+ * visible/clear slot carries the dark (covered-photodiode) baseline instead of
+ * the visible reading. Returns false for empty/nullish config. */
+export function isVerisenseLightDarkChannelEnabled(op: Uint8Array | null | undefined): boolean {
+  if (!op?.length) return false;
+  return ((op[OP_IDX.LIGHT_CONFIG] ?? 0) & (1 << 1)) !== 0;
+}

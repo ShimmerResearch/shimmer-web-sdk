@@ -1,7 +1,9 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { isUniformByteArray } from '../../core/arrayBuffer.js';
 import {
   ASM_COMMAND,
   ASM_PROPERTY,
+  BLE_LINK_MIN_FW,
   DEBUG_COMMAND_ID,
   STREAM_MODE,
   type AsmCommand,
@@ -33,6 +35,8 @@ import {
   parseRecordBufferDetailsPayload,
   parseSchedulerDebugPayload,
   parseBleLinkDebugPayload,
+  compareVerisenseFirmwareVersion,
+  formatVerisenseFirmwareVersion,
   normalizeOperationalConfig,
   parseProductionConfigPayload,
   VERISENSE_OP_CONFIG_BYTE_SIZE,
@@ -127,11 +131,6 @@ export type {
 export class VerisenseBleDevice extends BaseShimmerClient {
   private static readonly MAX_FRAME_PAYLOAD_LEN = 40000;
   private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
-  private static readonly BLE_LINK_MIN_FW = Object.freeze({
-    major: 1,
-    minor: 4,
-    internal: 23,
-  });
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;
   static readonly NUS_TX = NUS_TX;
@@ -1465,19 +1464,6 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.sendDebugCommand(DEBUG_COMMAND_ID.DELETE_ALL_BONDS);
   }
 
-  private _compareFwVersion(
-    a: { major: number; minor: number; internal: number },
-    b: { major: number; minor: number; internal: number },
-  ): number {
-    if (a.major !== b.major) return a.major - b.major;
-    if (a.minor !== b.minor) return a.minor - b.minor;
-    return a.internal - b.internal;
-  }
-
-  private _formatFwVersion(v: { major: number; minor: number; internal: number }): string {
-    return `${v.major}.${v.minor}.${v.internal}`;
-  }
-
   private async _assertBleLinkDebugSupported(): Promise<void> {
     let parsed: ProductionConfig | null = null;
 
@@ -1512,10 +1498,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       );
     }
 
-    const min = VerisenseBleDevice.BLE_LINK_MIN_FW;
-    if (this._compareFwVersion(current, min) < 0) {
+    const min = BLE_LINK_MIN_FW;
+    if (compareVerisenseFirmwareVersion(current, min) < 0) {
       throw new Error(
-        `BLE link debug commands require firmware >= ${this._formatFwVersion(min)} (current ${this._formatFwVersion(current)}).`,
+        `BLE link debug commands require firmware >= ${formatVerisenseFirmwareVersion(min)} (current ${formatVerisenseFirmwareVersion(current)}).`,
       );
     }
   }
@@ -1772,21 +1758,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     throw new Error('Operational config not cached. Call readOpConfigFromDevice() first.');
   }
 
-  private _isUniformBlob(payload: Uint8Array | null | undefined, expectedByte: number): boolean {
-    if (!payload?.length) return false;
-    const expected = expectedByte & 0xff;
-    for (let i = 0; i < payload.length; i++) {
-      if (payload[i] !== expected) return false;
-    }
-    return true;
-  }
-
   private _isErasedBlob(payload: Uint8Array | null | undefined): boolean {
-    return this._isUniformBlob(payload, 0xff);
+    return isUniformByteArray(payload, 0xff);
   }
 
   private _isZeroBlob(payload: Uint8Array | null | undefined): boolean {
-    return this._isUniformBlob(payload, 0x00);
+    return isUniformByteArray(payload, 0x00);
   }
 
   private _isUninitializedBlob(payload: Uint8Array | null | undefined): boolean {

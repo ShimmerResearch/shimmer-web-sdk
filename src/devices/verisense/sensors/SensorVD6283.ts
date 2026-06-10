@@ -1,6 +1,7 @@
 import { SensorBase } from './SensorBase.js';
 import { u24le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
+import { isVerisenseLightDarkChannelEnabled } from '../operationalConfig.js';
 
 /** Per-channel raw ambient-light counts (24-bit) plus the derived illuminance
  * (lux) and correlated colour temperature (CCT, Kelvin). Channel order matches
@@ -138,6 +139,6 @@ export class SensorVD6283 extends SensorBase {
     this.gain8p8 = GAIN_8P8_TABLE[gainIdx] ?? GAIN_8P8_TABLE[0];
 
     // LIGHT_CONFIG bit 1 selects the dark channel on slot 1 (see VD6283Sample).
-    this.darkEnabled = ((op[OP_IDX.LIGHT_CONFIG] ?? 0) & (1 << 1)) !== 0;
+    this.darkEnabled = isVerisenseLightDarkChannelEnabled(op);
   }
 }

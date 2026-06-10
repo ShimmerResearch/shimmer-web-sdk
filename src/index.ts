@@ -16,6 +16,7 @@
 // Core
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
+export { isUniformByteArray } from './core/arrayBuffer.js';
 export type {
   IShimmerClient,
   ShimmerClientOptions,
@@ -83,6 +84,8 @@ export {
   STREAM_MODE,
   TEST_MODE_ID,
   DEBUG_COMMAND_ID,
+  BLE_LINK_MIN_FW,
+  VERISENSE_STREAM_SENSOR_LABELS,
 } from './devices/verisense/constants.js';
 export type {
   OpIdx,
@@ -149,6 +152,11 @@ export {
   formatVerisenseChargerStatus,
   formatStatusPayloadForLog,
   formatSchedulerPayloadForLog,
+  compareVerisenseFirmwareVersion,
+  formatVerisenseFirmwareVersion,
+  getVerisenseStreamSensorLabel,
+  inferVerisenseLookupBankCount,
+  isVerisenseLightDarkChannelEnabled,
 } from './devices/verisense/protocol.js';
 export type {
   ProductionConfig,
@@ -178,6 +186,7 @@ export type {
   VerisenseHardwareCapabilities,
   VerisenseHardwareRevision,
   VerisenseHardwareRevisionSource,
+  VerisenseFirmwareVersion,
 } from './devices/verisense/protocol.js';
 
 // Verisense sensors

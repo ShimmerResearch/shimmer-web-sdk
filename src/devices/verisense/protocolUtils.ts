@@ -1,4 +1,5 @@
-import { ASM_PROPERTY } from './constants.js';
+import { ASM_PROPERTY, VERISENSE_STREAM_SENSOR_LABELS } from './constants.js';
+import { isUniformByteArray } from '../../core/arrayBuffer.js';
 
 /** Read a 16-bit unsigned integer, little-endian. */
 export function u16le(b0: number, b1: number): number {
@@ -25,6 +26,49 @@ export function parseHexByteString(text: string): Uint8Array {
     throw new Error('No hex bytes found. Example: 0x5A, 0x00, 0x12');
   }
   return new Uint8Array(matches.map((h) => Number.parseInt(h, 16)));
+}
+
+/** A Verisense firmware version triple (major.minor.internal). */
+export interface VerisenseFirmwareVersion {
+  major: number;
+  minor: number;
+  internal: number;
+}
+
+/**
+ * Compare two firmware version triples. Returns a negative number if `a < b`,
+ * positive if `a > b`, and 0 if equal. Missing or non-numeric components are
+ * treated as 0.
+ */
+export function compareVerisenseFirmwareVersion(
+  a: Partial<VerisenseFirmwareVersion> | null | undefined,
+  b: Partial<VerisenseFirmwareVersion> | null | undefined,
+): number {
+  const aMaj = Number(a?.major) || 0;
+  const aMin = Number(a?.minor) || 0;
+  const aInt = Number(a?.internal) || 0;
+  const bMaj = Number(b?.major) || 0;
+  const bMin = Number(b?.minor) || 0;
+  const bInt = Number(b?.internal) || 0;
+  if (aMaj !== bMaj) return aMaj - bMaj;
+  if (aMin !== bMin) return aMin - bMin;
+  return aInt - bInt;
+}
+
+/** Format a firmware version triple as `"major.minor.internal"`, or `"unknown"`
+ * when the version is null/undefined. */
+export function formatVerisenseFirmwareVersion(
+  v: Partial<VerisenseFirmwareVersion> | null | undefined,
+): string {
+  if (!v) return 'unknown';
+  return `${Number(v.major) || 0}.${Number(v.minor) || 0}.${Number(v.internal) || 0}`;
+}
+
+/** Human-readable label for a Verisense stream-packet sensor ID, with a
+ * `"Sensor 0xNN"` hex fallback for unknown IDs. */
+export function getVerisenseStreamSensorLabel(sensorId: number): string {
+  const labels = VERISENSE_STREAM_SENSOR_LABELS as Record<number, string>;
+  return labels[sensorId] ?? `Sensor 0x${Number(sensorId).toString(16).toUpperCase()}`;
 }
 
 export interface PendingEventPropertyLabel {
@@ -1096,15 +1140,30 @@ export function parseRecordBufferDetailsPayload(
 }
 
 /**
+ * Infer the lookup-table bank count from a raw debug payload length. The payload
+ * is 3 bytes per bank, optionally prefixed with a 4-byte head/tail block.
+ * Returns 0 if the length matches neither layout.
+ */
+export function inferVerisenseLookupBankCount(payloadLen: number): number {
+  if (!Number.isFinite(payloadLen) || payloadLen <= 0) return 0;
+  if (payloadLen >= 4 && (payloadLen - 4) % 3 === 0) return Math.floor((payloadLen - 4) / 3);
+  if (payloadLen % 3 === 0) return Math.floor(payloadLen / 3);
+  return 0;
+}
+
+/**
  * Parse lookup-table debug payload entries (3 bytes per bank), with optional
- * 4-byte tail/head prefix present in older firmware debug responses.
+ * 4-byte tail/head prefix present in older firmware debug responses. When
+ * `totalBanks` is omitted it is inferred from the payload length via
+ * {@link inferVerisenseLookupBankCount}.
  */
 export function parseLookupTablePayload(
   payload: Uint8Array,
-  totalBanks: number,
+  totalBanks?: number,
 ): VerisenseLookupTablePayload {
   const bytesPerBank = 3;
-  const expectedNoHeadTail = totalBanks * bytesPerBank;
+  const banks = totalBanks ?? inferVerisenseLookupBankCount(payload.length);
+  const expectedNoHeadTail = banks * bytesPerBank;
   const expectedWithHeadTail = expectedNoHeadTail + 4;
 
   let data = payload;
@@ -1122,7 +1181,7 @@ export function parseLookupTablePayload(
   }
 
   const entries: VerisenseLookupTableEntry[] = [];
-  for (let bankIndex = 0; bankIndex < totalBanks; bankIndex++) {
+  for (let bankIndex = 0; bankIndex < banks; bankIndex++) {
     const off = bankIndex * bytesPerBank;
     const statusByte = data[off];
     const pendingEepromWrite = (statusByte & 0x80) !== 0;
@@ -1143,8 +1202,6 @@ export function parseLookupTablePayload(
  * Parse the production config response payload into a structured object.
  */
 export function parseProductionConfigPayload(response: Uint8Array): ProductionConfig {
-  const isAllFFs = (arr: Uint8Array) => arr.every((b) => b === 255);
-
   const configHeader = response[0];
   const asmid = [...response.slice(1, 7)]
     .reverse()
@@ -1162,7 +1219,7 @@ export function parseProductionConfigPayload(response: Uint8Array): ProductionCo
   let revHwInternal = 0;
   if (response.length >= 15) {
     const hwInternalArray = response.slice(13, 15);
-    if (!isAllFFs(hwInternalArray)) {
+    if (!isUniformByteArray(hwInternalArray, 0xff)) {
       revHwInternal = hwInternalArray[0] | (hwInternalArray[1] << 8);
     }
   }
