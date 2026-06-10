@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Live stream statistics: `StreamStatsTracker` (core), `VerisenseBleDevice.getStreamStats()`, a throttled `streamStats` event, and per-sub-stream `SensorBase.getStreamContributions()` for windowed throughput and sample-gap-derived packet loss.
+
+### Fixed
+
+- Achieved sample rate (`StreamLossStats.windowSampleRateHz`) is now measured over the device-clock span of the windowed samples (first sample of the oldest packet to last sample of the newest) instead of the fixed host receive-time window. This is robust both to bursty BLE delivery and to large packets — a single packet carrying hundreds of samples spanning several seconds (e.g. a high FIFO watermark) no longer over-reports the rate. A stalled stream still reads 0.
+- Live stats no longer flicker to 0 for streams that deliver less often than the stats window — e.g. a high FIFO watermark (one big read every few seconds) or a slow sensor at 1 Hz. The rate/throughput rings now always retain the last delivery, throughput/packet-rate are computed over the actual receive span (not a fixed 2 s), and a stream is only treated as stalled (→ 0) when its newest packet is older than a multiple of its own observed packet interval.
+
+### Changed
+
+- The Verisense LSM6DSV (id 6) data block now stores its entry count as a **2-byte little-endian** value (was 1 byte), so a full FIFO drain of more than 255 samples per read decodes correctly. Requires matching firmware (the firmware writes the 2-byte count and drains the full FIFO each interrupt).
+- The MLX90632 skin-temperature config is now a **single "Skin Temp Sample Rate"** field (op-config byte 76 bits 3:1), shown as the medical output rate (0.25–32 Hz; = chip refresh ÷2, extended ÷3). The firmware applies the chip refresh rate from it and derives the read poll. The separate `SKIN_TEMP_SAMPLE_RATE_INDEX` (byte 77) and `SKIN_TEMP_POWER_MODE` (byte 76 bits 5:4) fields are removed from the schema and left unused in the op-config layout (continuous mode is required and set automatically). `SensorMLX90632.samplingRateHz` now derives from the refresh rate + measurement type. Requires matching firmware.
+- The VD6283 **"Light Continuous Mode"** option is removed from the schema (op-config byte 74 bit 0 is now unused — free to repurpose): the timer-driven poll requires the chip to run continuously, so the firmware hardcodes it.
+- The VD6283 **"Light Gain"** and **"Light Exposure"** op-config fields now render as labelled dropdowns (gain `1.0x`..`66.67x`; exposure `100 ms`..`204.8 ms`) instead of raw 0–7 indices. The default (index 0) is `1.0x` gain and `100 ms` exposure, matching the VD6283 reference example. Each exposure option is annotated with the max sample rate it allows (≈ 1/exposure).
+- The VD6283 **inter-measurement time** is now coupled to the configured sample rate: the firmware sets the continuous-mode cadence to the sample period (clamped to ≥ the exposure) instead of a fixed 100 ms, so the sensor only measures as often as it is read (lower power at low rates). Because of this the **20 Hz** light rate is re-enabled (previously trimmed) — it is reachable when the exposure is ≤ 50 ms; the achievable rate is now bounded by `1/max(exposure, sample period)`. Requires matching firmware.
+- The VD6283 **"Light Dark Channel"** option (op-config byte 74 bit 1) is now honored end-to-end. Firmware applies it via `LIGHT_SENSOR_CTRL_DARK` (previously the bit was a no-op). `SensorVD6283` now surfaces the dark reading as a **distinct `DARK` channel** rather than overloading `VISIBLE`: slot 1 is visible-or-dark and the two are mutually exclusive, so each `VD6283Sample` has exactly one of `VISIBLE` / `DARK` as a number and the other `null` (lux/CCT are unaffected — they derive from RED/GREEN/BLUE). For offline parsing, the firmware packs the dark-channel bit into **bit 7 of the existing light-gain header byte** (config-header byte 30; gain index stays in bits 2:0) so the separate file parser can label slot 1 correctly without lengthening the header or changing the firmware version. Requires matching firmware.
 - Initial TypeScript SDK structure migrated from `ShimmerAPI/shimmer3r.js` and `Verisense/verisense.js`.
 - `Shimmer3RClient` — typed BLE client for the Shimmer3R platform.
 - `VerisenseBleDevice` — typed BLE + Web Serial client for the Verisense platform.
@@ -19,3 +34,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 - CRC-16/CCITT-FALSE implementation in `protocol.ts`.
 - Rollup build producing `dist/shimmer-web-sdk.esm.js`, `dist/shimmer-web-sdk.umd.js`, `dist/shimmer-web-sdk.d.ts`.
 - Vitest unit tests for calibration, protocol helpers, CRC, and sensor decoders.
+
+### Changed
+
+- Verisense magnetometer config is now a single **Mag Output Rate** setting (the LSM6DSV sensor-hub rate). Operational-config byte 20 bits 1:0 are repurposed from the raw LIS2MDL ODR to an output-rate code (`0`=15, `1`=30, `2`=60, `3`=120 Hz); the firmware derives the underlying LIS2MDL ODR. `SensorLSM6DSV.magHz` now reports this output rate, and stream-loss for the mag is measured against it. Requires matching firmware (sensor-hub rate no longer hardcoded to 15 Hz).
+- Live stream-loss is measured against each stream's **configured** sampling rate (not a derived "actual" rate), so a firmware/hardware/exposure shortfall surfaces as loss rather than being hidden. The VD6283/MLX90632 report their configured poll rate and the LSM6DSV mag reports its configured output rate (no longer capped at the accel/gyro hub-trigger rate). Op-config rate options are trimmed to physically-reachable values (e.g. the VD6283 light rate is bounded by the exposure time — see the dedicated entry above).

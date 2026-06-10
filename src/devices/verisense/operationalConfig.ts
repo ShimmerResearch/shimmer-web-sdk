@@ -1278,38 +1278,55 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LIGHT_GAIN_INDEX',
     label: 'Light Gain',
-    desc: 'VD6283 gain index (0=1.0x .. 7=66.67x)',
+    // Default index 0 = 1.0x, matching the VD6283 reference example
+    // (SetGain(..., 256), i.e. the 8.8 value 0x0100).
+    desc: 'VD6283 channel gain (default 1.0x)',
     kind: 'u8',
     index: OP_IDX.LIGHT_GAIN_INDEX,
     min: 0,
     max: 7,
+    options: [
+      [0, '1.0x'],
+      [1, '1.67x'],
+      [2, '2.5x'],
+      [3, '5.0x'],
+      [4, '10.0x'],
+      [5, '25.0x'],
+      [6, '50.0x'],
+      [7, '66.67x'],
+    ],
   },
   {
     key: 'LIGHT_EXPOSURE_INDEX',
     label: 'Light Exposure',
-    desc: 'VD6283 exposure time index (0=default)',
+    // Default index 0 = 100 ms (100000 us), matching the VD6283 reference
+    // example (SetExposureTime(..., 100000)).
+    desc: 'VD6283 exposure / integration time (default 100 ms). The chip cannot sample faster than it integrates, so the exposure caps the achievable sample rate at ~1/exposure (shown per option). Picking a higher sample rate therefore requires a shorter exposure.',
     kind: 'u8',
     index: OP_IDX.LIGHT_EXPOSURE_INDEX,
     min: 0,
     max: 7,
-  },
-  {
-    key: 'LIGHT_CONTINUOUS_MODE',
-    label: 'Light Continuous Mode',
-    desc: '0 = single-shot, 1 = continuous',
-    kind: 'bit',
-    index: OP_IDX.LIGHT_CONFIG,
-    shift: 0,
-    width: 1,
+    // Label suffix = max sample rate this exposure allows (≈ 1/exposure, capped
+    // at the 20 Hz poll ceiling).
     options: [
-      [0, 'Single-shot'],
-      [1, 'Continuous'],
+      [0, '100 ms (max 10 Hz)'],
+      [1, '1.6 ms (max 20 Hz)'],
+      [2, '6.4 ms (max 20 Hz)'],
+      [3, '12.8 ms (max 20 Hz)'],
+      [4, '25.6 ms (max 20 Hz)'],
+      [5, '51.2 ms (max ~19 Hz)'],
+      [6, '102.4 ms (max ~9.8 Hz)'],
+      [7, '204.8 ms (max ~4.9 Hz)'],
     ],
   },
+  // LIGHT_CONFIG bit 0 (continuous mode) is intentionally NOT exposed: the
+  // VD6283 must run in continuous mode for the timer-driven poll to read it, so
+  // the firmware hardcodes it. The op-config bit is left unused (free to
+  // repurpose).
   {
     key: 'LIGHT_DARK_ENABLE',
     label: 'Light Dark Channel',
-    desc: 'Expose the dark/background channel',
+    desc: 'Replace the visible/clear channel reading with the dark (covered-photodiode) baseline',
     kind: 'bit',
     index: OP_IDX.LIGHT_CONFIG,
     shift: 1,
@@ -1335,11 +1352,11 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LIGHT_SAMPLE_RATE_INDEX',
     label: 'Light Sample Rate',
-    desc: 'Ambient-light polling rate (max ~10 Hz — the VD6283 continuous-mode period is bounded by the fixed 100 ms inter-measurement time, so 20 Hz is never reachable). A long exposure lowers the achievable rate further.',
+    desc: 'Ambient-light sample rate. The firmware sets the VD6283 inter-measurement (continuous-mode) cadence to this period, so the sensor measures only as often as it is read and idles in between for lower power. The rate is limited by the exposure time (the chip cannot measure faster than it integrates): 20 Hz needs exposure ≤ 50 ms, 10 Hz needs ≤ 100 ms, etc. — see the Light Exposure options.',
     kind: 'u8',
     index: OP_IDX.LIGHT_SAMPLE_RATE_INDEX,
     min: 0,
-    max: 5,
+    max: 6,
     options: [
       [0, 'Off'],
       [1, '0.5 Hz'],
@@ -1347,6 +1364,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
       [3, '2 Hz'],
       [4, '5 Hz'],
       [5, '10 Hz'],
+      [6, '20 Hz'],
     ],
   },
   {
@@ -1426,9 +1444,9 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     width: 6,
   },
   {
-    key: 'ALGO_AFE_ENABLE',
-    label: 'Algo AFE Enable',
-    desc: 'Let the hub drive the AFE',
+    key: 'ALGO_AEC_ENABLE',
+    label: 'Algo Auto Exposure Control (AEC)',
+    desc: 'Enable the WHRM/SpO2 automatic exposure control (AEC) loop for the optical PPG AFE. Not related to ECG.',
     kind: 'bit',
     index: OP_IDX.ALGO_CONTROL,
     shift: 0,
@@ -1788,7 +1806,6 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       keys: [
         'LIGHT_GAIN_INDEX',
         'LIGHT_EXPOSURE_INDEX',
-        'LIGHT_CONTINUOUS_MODE',
         'LIGHT_DARK_ENABLE',
         'LIGHT_FLICKER_EN',
         'LIGHT_SAMPLE_RATE_INDEX',
@@ -1808,7 +1825,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'ALGO_OP_MODE',
         'ALGO_REPORT_MODE',
         'ALGO_REPORT_PERIOD',
-        'ALGO_AFE_ENABLE',
+        'ALGO_AEC_ENABLE',
         'ALGO_SCD_ENABLE',
         'ALGO_AUTO_PD_ENABLE',
         'ALGO_INITIAL_HR',

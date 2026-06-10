@@ -4,14 +4,24 @@ import { OP_IDX } from '../constants.js';
 
 /** Per-channel raw ambient-light counts (24-bit) plus the derived illuminance
  * (lux) and correlated colour temperature (CCT, Kelvin). Channel order matches
- * the firmware VD6283 AlsResults block: RED, VISIBLE, BLUE, GREEN, IR, CLEAR. */
+ * the firmware VD6283 AlsResults block: RED, VISIBLE, BLUE, GREEN, IR, CLEAR.
+ *
+ * The second slot is shared: the VD6283 routes EITHER the visible/clear reading
+ * OR the dark (covered-photodiode) baseline onto it, selected by the op-config
+ * dark-channel bit. They are mutually exclusive, so exactly one of `VISIBLE` /
+ * `DARK` is a number per sample and the other is `null`. */
 export interface VD6283Sample {
   RED: number;
-  VISIBLE: number;
+  /** Visible/clear channel count, or `null` when the dark channel is enabled
+   * (the chip then routes the dark baseline onto this slot — see `DARK`). */
+  VISIBLE: number | null;
   BLUE: number;
   GREEN: number;
   IR: number;
   CLEAR: number;
+  /** Dark/covered-photodiode baseline count, or `null` when the dark channel is
+   * disabled (the slot then carries the visible reading — see `VISIBLE`). */
+  DARK: number | null;
   /** Illuminance in lux (XYZ Y component; clamped to >= 0). */
   lux: number;
   /** Correlated colour temperature in Kelvin (0 if undefined). */
@@ -51,6 +61,9 @@ export class SensorVD6283 extends SensorBase {
 
   private exposureUs = EXPOSURE_US_TABLE[0];
   private gain8p8 = GAIN_8P8_TABLE[0];
+  /** Op-config dark-channel bit (LIGHT_CONFIG bit 1): when set the shared second
+   * slot carries the dark baseline (`DARK`) instead of the visible reading. */
+  private darkEnabled = false;
 
   constructor() {
     super();
@@ -95,13 +108,18 @@ export class SensorVD6283 extends SensorBase {
     for (let i = 0; i < n; i++) {
       const base = i * SensorVD6283.BYTES_PER_SAMPLE;
       const RED = u24le(sensorPayloadBytes, base + 0);
-      const VISIBLE = u24le(sensorPayloadBytes, base + 3);
+      // Slot 1 is visible-or-dark depending on the configured dark-channel bit.
+      const slot1 = u24le(sensorPayloadBytes, base + 3);
+      const VISIBLE = this.darkEnabled ? null : slot1;
+      const DARK = this.darkEnabled ? slot1 : null;
       const BLUE = u24le(sensorPayloadBytes, base + 6);
       const GREEN = u24le(sensorPayloadBytes, base + 9);
       const IR = u24le(sensorPayloadBytes, base + 12);
       const CLEAR = u24le(sensorPayloadBytes, base + 15);
+      // lux/CCT derive from RED/GREEN/BLUE, so the dark-channel selection (which
+      // only affects slot 1) leaves them valid in either mode.
       const { lux, cct } = this.computeLuxCct(RED, GREEN, BLUE);
-      out.push({ RED, VISIBLE, BLUE, GREEN, IR, CLEAR, lux, cct });
+      out.push({ RED, VISIBLE, BLUE, GREEN, IR, CLEAR, DARK, lux, cct });
     }
 
     return out;
@@ -118,5 +136,8 @@ export class SensorVD6283 extends SensorBase {
     const gainIdx = op[OP_IDX.LIGHT_GAIN_INDEX] ?? 0;
     this.exposureUs = EXPOSURE_US_TABLE[expoIdx] ?? EXPOSURE_US_TABLE[0];
     this.gain8p8 = GAIN_8P8_TABLE[gainIdx] ?? GAIN_8P8_TABLE[0];
+
+    // LIGHT_CONFIG bit 1 selects the dark channel on slot 1 (see VD6283Sample).
+    this.darkEnabled = ((op[OP_IDX.LIGHT_CONFIG] ?? 0) & (1 << 1)) !== 0;
   }
 }

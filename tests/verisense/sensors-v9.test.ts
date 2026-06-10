@@ -51,6 +51,44 @@ describe('SensorVD6283 (ambient light, id 7)', () => {
     expect(s.enabled).toBe(true);
     expect(s.samplingRateHz).toBe(1);
   });
+
+  it('keeps slot 1 as VISIBLE (DARK null) when the dark-channel bit is clear', () => {
+    const s = new SensorVD6283();
+    const op = createBlankVerisenseOperationalConfig();
+    op[OP_IDX.LIGHT_CONFIG] &= ~(1 << 1); // dark-channel disabled
+    s.applyOperationalConfig(op);
+    const bytes = Uint8Array.from([
+      ...u24(0x010203), // RED
+      ...u24(0x040506), // slot 1 -> VISIBLE
+      ...u24(0x070809), // BLUE
+      ...u24(0x0a0b0c), // GREEN
+      ...u24(0x0d0e0f), // IR
+      ...u24(0x101112), // CLEAR
+    ]);
+    const out = s.parsePayload(bytes);
+    expect(out[0].VISIBLE).toBe(0x040506);
+    expect(out[0].DARK).toBeNull();
+  });
+
+  it('routes slot 1 to DARK (VISIBLE null) when the dark-channel bit is set', () => {
+    const s = new SensorVD6283();
+    const op = createBlankVerisenseOperationalConfig();
+    op[OP_IDX.LIGHT_CONFIG] |= 1 << 1; // dark-channel enabled
+    s.applyOperationalConfig(op);
+    const bytes = Uint8Array.from([
+      ...u24(0x010203), // RED
+      ...u24(0x040506), // slot 1 -> DARK
+      ...u24(0x070809), // BLUE
+      ...u24(0x0a0b0c), // GREEN
+      ...u24(0x0d0e0f), // IR
+      ...u24(0x101112), // CLEAR
+    ]);
+    const out = s.parsePayload(bytes);
+    expect(out[0].DARK).toBe(0x040506);
+    expect(out[0].VISIBLE).toBeNull();
+    // lux/CCT still derive from RED/GREEN/BLUE and stay valid in dark mode.
+    expect(Number.isFinite(out[0].lux)).toBe(true);
+  });
 });
 
 describe('SensorMLX90632 (skin temp, id 9)', () => {
