@@ -100,6 +100,23 @@ describe('Production config payload helpers', () => {
     expect(parsed.advertisingNamePrefix).toBe('Verisense-');
     expect(parsed.dfuEnabled).toBe(true);
   });
+
+  it('encodes a cleared configFlags byte when DFU is disabled', () => {
+    const payload = buildProductionConfigPayload({
+      manufacturingOrderNumberHex: '26011401',
+      macIdHex: 'EF29',
+      revHwMajor: 61,
+      revHwMinor: 5,
+      revFwMajor: 0,
+      revFwMinor: 19,
+      dfuEnabled: false,
+    });
+
+    // configFlags (byte 55) must be 0x00 when disabled — NOT left as the 0xFF
+    // fill sentinel, whose bit 0 would read back as "DFU enabled" on the device.
+    expect(payload[55]).toBe(0x00);
+    expect(parseProductionConfigPayloadFull(payload).dfuEnabled).toBe(false);
+  });
 });
 
 describe('Status payload parser', () => {

@@ -13,6 +13,10 @@ import {
   NUS_SERVICE,
   NUS_TX,
   NUS_RX,
+  NORDIC_DFU_SERVICE,
+  NORDIC_DFU_BUTTONLESS_WITHOUT_BONDS,
+  NORDIC_DFU_BUTTONLESS_WITH_BONDS,
+  NORDIC_DFU_OP_ENTER_BOOTLOADER,
 } from './constants.js';
 import {
   buildHeader,
@@ -298,7 +302,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     const requestOpts: RequestDeviceOptions = {
       filters: opts.filters ?? [{ services: [NUS_SERVICE] }],
-      optionalServices: opts.optionalServices ?? [NUS_SERVICE],
+      // NORDIC_DFU_SERVICE must be granted at requestDevice() time so the
+      // buttonless DFU control point is reachable from rebootToDfuBootloader().
+      optionalServices: opts.optionalServices ?? [NUS_SERVICE, NORDIC_DFU_SERVICE],
     };
 
     this.device = opts.device ?? (await navigator.bluetooth.requestDevice(requestOpts));
@@ -1058,8 +1064,141 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.writeTime(unixSecondsToAsmRtcBytes(unixSeconds));
   }
 
-  async enterDfuMode(): Promise<void> {
+  /**
+   * Request the Verisense firmware to expose the Nordic Secure DFU service.
+   *
+   * Writes the ASM `DFU_MODE` property. The firmware treats this as a request
+   * to enable the buttonless DFU service but does NOT reboot or expose the
+   * service immediately — it enables it on the next BLE disconnect. The host
+   * must therefore disconnect and reconnect before the Nordic DFU service (and
+   * {@link rebootToDfuBootloader}) become available on the connection.
+   */
+  async enableDfuServiceOnNextDisconnect(): Promise<void> {
     await this.writeProperty(ASM_PROPERTY.DFU_MODE, []);
+  }
+
+  /**
+   * Reboot the device straight into the Nordic Secure DFU bootloader using the
+   * buttonless DFU service.
+   *
+   * Requires the Nordic DFU service to already be active on the current BLE
+   * connection — call {@link enableDfuServiceOnNextDisconnect}, then disconnect
+   * and reconnect first. Writes the "Enter Bootloader" op-code (0x01) to the
+   * buttonless DFU control-point characteristic; the device acknowledges via an
+   * indication, then disconnects and resets into the bootloader.
+   *
+   * @param options.waitForDisconnect      Resolve only once the device drops the
+   *   link (i.e. has begun rebooting). Default `true`.
+   * @param options.disconnectAfterCommand Force a local GATT disconnect if the
+   *   device has not dropped the link itself. Default `true`.
+   * @param options.timeoutMs              Max time to wait for the device to
+   *   disconnect after the command. Default `10000`.
+   */
+  async rebootToDfuBootloader(
+    options: {
+      waitForDisconnect?: boolean;
+      disconnectAfterCommand?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<void> {
+    const { waitForDisconnect = true, disconnectAfterCommand = true, timeoutMs = 10000 } = options;
+
+    if (this._transportKind !== 'ble' || !this.server || !this.device?.gatt?.connected) {
+      throw new Error('rebootToDfuBootloader: requires an active BLE connection');
+    }
+
+    let dfuService: BluetoothRemoteGATTService;
+    try {
+      dfuService = await this.server.getPrimaryService(NORDIC_DFU_SERVICE);
+    } catch {
+      throw new Error(
+        'rebootToDfuBootloader: Nordic DFU service is not present on this connection. ' +
+          'Call enableDfuServiceOnNextDisconnect(), then disconnect and reconnect first.',
+      );
+    }
+
+    // The buttonless control point lives under one of two UUIDs depending on
+    // whether the firmware shares its bonds with the bootloader.
+    let controlPoint: BluetoothRemoteGATTCharacteristic | null = null;
+    for (const uuid of [NORDIC_DFU_BUTTONLESS_WITHOUT_BONDS, NORDIC_DFU_BUTTONLESS_WITH_BONDS]) {
+      try {
+        controlPoint = await dfuService.getCharacteristic(uuid);
+        break;
+      } catch {
+        /* try the next variant */
+      }
+    }
+    if (!controlPoint) {
+      throw new Error(
+        'rebootToDfuBootloader: buttonless DFU control-point characteristic not found',
+      );
+    }
+
+    // Start watching for the disconnect before issuing the command so we never
+    // miss the event if the device reboots immediately.
+    const disconnected = waitForDisconnect ? this._waitForGattDisconnect(timeoutMs) : null;
+
+    // The buttonless control point delivers its response via indications;
+    // subscribe so the firmware sends it before resetting. Some stacks reject a
+    // duplicate subscription — the command write below still succeeds.
+    try {
+      await controlPoint.startNotifications();
+    } catch {
+      /* ignore — indication subscription is best-effort */
+    }
+
+    const cp = controlPoint as BluetoothRemoteGATTCharacteristic & {
+      writeValueWithResponse?(value: BufferSource): Promise<void>;
+    };
+    const payload = Uint8Array.from([NORDIC_DFU_OP_ENTER_BOOTLOADER]);
+    if (cp.writeValueWithResponse) {
+      await cp.writeValueWithResponse(toArrayBuffer(payload));
+    } else {
+      await cp.writeValue(toArrayBuffer(payload));
+    }
+
+    if (disconnected) {
+      const didDisconnect = await disconnected;
+      if (!didDisconnect && disconnectAfterCommand && this.device?.gatt?.connected) {
+        try {
+          this.device.gatt.disconnect();
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (disconnectAfterCommand && this.device?.gatt?.connected) {
+      try {
+        this.device.gatt.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * Resolve when the BLE link drops (`gattserverdisconnected`), or after
+   * `timeoutMs`. Resolves `true` if the device disconnected, `false` on timeout.
+   */
+  private _waitForGattDisconnect(timeoutMs: number): Promise<boolean> {
+    const device = this.device;
+    if (!device || !device.gatt?.connected) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const onDisconnect = () => finish(true);
+      const finish = (didDisconnect: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          device.removeEventListener('gattserverdisconnected', onDisconnect);
+        } catch {
+          /* ignore */
+        }
+        resolve(didDisconnect);
+      };
+      const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      device.addEventListener('gattserverdisconnected', onDisconnect);
+    });
   }
 
   async runTestMode(testPayload: Uint8Array | number[]): Promise<void> {

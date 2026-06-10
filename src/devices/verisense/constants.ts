@@ -14,6 +14,15 @@ export const NUS_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 /** Nordic Secure DFU service UUID (buttonless DFU). */
 export const NORDIC_DFU_SERVICE = '0000fe59-0000-1000-8000-00805f9b34fb';
 
+/** Nordic buttonless DFU control-point characteristic (without bond sharing). */
+export const NORDIC_DFU_BUTTONLESS_WITHOUT_BONDS = '8ec90003-f315-4f60-9fb8-838830daea50';
+
+/** Nordic buttonless DFU control-point characteristic (with bond sharing). */
+export const NORDIC_DFU_BUTTONLESS_WITH_BONDS = '8ec90004-f315-4f60-9fb8-838830daea50';
+
+/** Buttonless DFU control-point op-code that reboots the device into the bootloader. */
+export const NORDIC_DFU_OP_ENTER_BOOTLOADER = 0x01;
+
 // ---------------------------------------------------------------------------
 // Verisense protocol command/property constants
 // ---------------------------------------------------------------------------

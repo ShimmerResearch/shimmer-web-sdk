@@ -772,7 +772,11 @@ export function buildProductionConfigPayload(opts: ProductionConfigBuildOptions)
   out[13] = revHwInternal & 0xff;
   out[14] = (revHwInternal >> 8) & 0xff;
 
-  out.fill(0xff, 15, 56);
+  // 0xFF is the "unset" sentinel for the passkey/advertising-name region
+  // (bytes 15..54). The configFlags byte (55) must NOT be left as 0xFF — its
+  // bit 0 is PROD_CONFIG_FLAG_DFU_ENABLED, so 0xFF reads as "DFU enabled" and
+  // disabling DFU would silently have no effect. It is set explicitly below.
+  out.fill(0xff, 15, 55);
 
   const passkeyId = opts.passkeyId ?? '';
   if (passkeyId.length > 0) {
@@ -798,9 +802,9 @@ export function buildProductionConfigPayload(opts: ProductionConfigBuildOptions)
     out.set(new TextEncoder().encode(advPrefix), 23);
   }
 
-  if (opts.dfuEnabled ?? true) {
-    out[55] = PROD_CONFIG_FLAG_DFU_ENABLED;
-  }
+  // Always set configFlags explicitly (0x01 = DFU enabled on boot, 0x00 =
+  // disabled). Matches the firmware reference encoding in ASM_Device.py.
+  out[55] = (opts.dfuEnabled ?? true) ? PROD_CONFIG_FLAG_DFU_ENABLED : 0;
 
   return out;
 }
