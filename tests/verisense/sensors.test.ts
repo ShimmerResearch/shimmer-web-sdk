@@ -168,6 +168,64 @@ describe('SensorADC', () => {
     const expected = sensor.calibrateAdcToVolts(0x0fff) * 1000.0 * 2.0;
     expect(out?.mV ?? 0).toBeCloseTo(expected, 6);
   });
+
+  it('decodeAdcSampleRateHz maps rate codes to 32768/divisor (Off -> null)', () => {
+    expect(gsr.decodeAdcSampleRateHz(0)).toBeNull(); // Off
+    expect(gsr.decodeAdcSampleRateHz(23)).toBeCloseTo(51.2, 6); // 32768/640
+    expect(gsr.decodeAdcSampleRateHz(12)).toBeCloseTo(655.36, 6); // 32768/50
+    expect(gsr.decodeAdcSampleRateHz(40)).toBeCloseTo(1.0, 6); // 32768/32768
+    expect(gsr.decodeAdcSampleRateHz(999)).toBeNull(); // out of range
+  });
+
+  it('sets samplingRateHz from the ADC sample-rate config, not the 50 Hz default', () => {
+    expect(gsr.samplingRateHz).toBe(50); // constructor default
+
+    const op = new Uint8Array(56);
+    op[2] = 0x80; // GEN_CFG_1: GSR enabled
+    op[50] = 19; // ADC_CHANNEL_SETTINGS_0: rate code 19 -> 32768/256 = 128 Hz
+    gsr.applyOperationalConfig(op);
+
+    expect(gsr.gsrEnabled).toBe(true);
+    expect(gsr.samplingRateHz).toBe(128);
+  });
+
+  it('spaces sample timestamps at the configured rate so blocks do not overlap (zigzag regression)', () => {
+    const op = new Uint8Array(56);
+    op[2] = 0x80; // GSR enabled
+    op[50] = 19; // 128 Hz
+    gsr.applyOperationalConfig(op);
+
+    const n = 16;
+    const decoded = gsr.parsePayload(new Uint8Array(n * 2)); // n GSR-only samples
+    expect(decoded).toHaveLength(n);
+
+    const dtMs = 1000 / 128;
+    const blockDurMs = n * dtMs; // real device tick advance between consecutive blocks
+
+    // Two consecutive blocks, last-sample tick advancing by the real block duration.
+    const block1 = gsr.computeSampleTimestamps(decoded, {
+      tsLastSampleMillis: blockDurMs,
+      systemTsLastSampleMillis: blockDurMs,
+      systemOffsetFirstTime: 0,
+    });
+    const block2 = gsr.computeSampleTimestamps(decoded, {
+      tsLastSampleMillis: 2 * blockDurMs,
+      systemTsLastSampleMillis: 2 * blockDurMs,
+      systemOffsetFirstTime: 0,
+    });
+
+    // Even spacing within a block at the configured rate.
+    expect(block1[1].tsMillis - block1[0].tsMillis).toBeCloseTo(dtMs, 6);
+    // The last sample anchors at the block-end tick.
+    expect(block1[n - 1].tsMillis).toBeCloseTo(blockDurMs, 6);
+    // The whole timeline is strictly increasing across blocks: no overlap = no zigzag.
+    // (At the buggy 50 Hz default the 128 Hz block would spread ~320 ms back and
+    // overlap the previous block, sending the trace backwards in time.)
+    const timeline = [...block1, ...block2].map((t) => t.tsMillis);
+    for (let i = 1; i < timeline.length; i++) {
+      expect(timeline[i]).toBeGreaterThan(timeline[i - 1]);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -333,5 +391,27 @@ describe('SensorPPG', () => {
     const sensor = new SensorPPG();
     sensor.setAdcResolutionIndex(0);
     expect(sensor.calibrateValue(1024)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('sets samplingRateHz from PPG_SR divided by the sample-averaging factor', () => {
+    const sensor = new SensorPPG();
+    expect(sensor.samplingRateHz).toBe(50); // constructor default
+
+    const op = new Uint8Array(72);
+    op[60] = 1 << 2; // PPG_MODE_CONFIG2: PPG_SR code 1 -> 100 Hz
+    op[59] = 2 << 5; // PPG_FIFO_CONFIG: SMP_AVE code 2 -> average 4
+    sensor.applyOperationalConfig(op);
+
+    expect(sensor.samplingRateHz).toBe(25); // 100 / 4
+  });
+
+  it('uses the base PPG_SR when sample averaging is disabled', () => {
+    const sensor = new SensorPPG();
+    const op = new Uint8Array(72);
+    op[60] = 3 << 2; // PPG_SR code 3 -> 400 Hz
+    op[59] = 0; // SMP_AVE code 0 -> no averaging (factor 1)
+    sensor.applyOperationalConfig(op);
+
+    expect(sensor.samplingRateHz).toBe(400);
   });
 });

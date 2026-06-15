@@ -50,6 +50,19 @@ export class SensorADC extends SensorBase {
   private readonly SHIMMER3_REF_KOHMS = [40.2, 287.0, 1000.0, 3300.0];
   private readonly SR68_REF_KOHMS = [21.0, 150.0, 562.0, 1740.0];
 
+  /**
+   * ADC sample-rate code → divisor of the 32768 Hz clock. Mirrors the firmware
+   * `samplingRateInTicksArray` (hal_adc.c): the sampling timer fires every
+   * `divisor` ticks, producing one sample set per fire, so the streamed output
+   * rate = 32768 / divisor. Oversampling uses SAADC burst mode and therefore
+   * does NOT divide the output rate. Index 0 = "Off".
+   */
+  private static readonly ADC_RATE_DIVISORS = [
+    0, 1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64, 80, 100, 128, 160, 200, 256, 320, 400, 512,
+    640, 800, 1024, 1280, 1600, 2048, 2560, 3200, 4096, 5120, 6400, 8192, 10240, 12800, 16384, 20480,
+    25600, 32768, 40960, 51200,
+  ] as const;
+
   gsrEnabled = true;
   battEnabled = false;
   /** GSR range 0-3 (fixed) or 4 (auto-range). */
@@ -190,6 +203,16 @@ export class SensorADC extends SensorBase {
     return 1000.0 / kOhms;
   }
 
+  /**
+   * Convert the 6-bit ADC sample-rate code to the streamed output rate in Hz,
+   * or null for "Off"/unknown codes. Used for per-sample timestamp spacing.
+   */
+  decodeAdcSampleRateHz(rateCode: number): number | null {
+    const divisor = SensorADC.ADC_RATE_DIVISORS[rateCode];
+    if (!divisor) return null;
+    return SensorBase.CLOCK_FREQ / divisor;
+  }
+
   override parsePayload(sensorPayloadBytes: Uint8Array): ADCPayloadSample[] {
     const bytesPerSample = this.gsrEnabled && this.battEnabled ? 4 : 2;
     const n = Math.floor(sensorPayloadBytes.length / bytesPerSample);
@@ -273,6 +296,13 @@ export class SensorADC extends SensorBase {
     this.gsrRateSettingRaw = rateCfg;
     this.gsrRangeSettingRaw = rangeCfg;
     this.gsrOversamplingRateSettingRaw = oversamplingCfg;
+
+    // Drive per-sample timestamp spacing from the configured ADC rate. Without
+    // this, samplingRateHz stays at the constructor default (50 Hz); when the
+    // real rate differs, computeSampleTimestamps mis-spaces samples and
+    // consecutive blocks overlap on the time axis (the GSR "zigzag").
+    const rateHz = this.decodeAdcSampleRateHz(rateCfg);
+    if (rateHz) this.samplingRateHz = rateHz;
 
     if (rangeCfg >= 0 && rangeCfg <= 4) {
       this.gsrRangeSetting = rangeCfg;

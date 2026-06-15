@@ -1,5 +1,6 @@
 import { SensorBase } from './SensorBase.js';
 import { normalizeOperationalConfig, u24le } from '../protocol.js';
+import { OP_IDX } from '../constants.js';
 
 export interface PPGChannelSample {
   raw: number;
@@ -46,6 +47,11 @@ export class SensorPPG extends SensorBase {
   private readonly adcLsb = [7.8125, 15.625, 31.25, 62.5];
   private readonly adcBitShift = [2 ** 7, 2 ** 6, 2 ** 5, 2 ** 4];
   adcResolutionIndex = 0; // 0..3
+
+  /** PPG_SR code → base sampling rate in Hz (op byte PPG_MODE_CONFIG2 bits 4:2). */
+  private readonly PPG_SR_HZ = [50, 100, 200, 400, 800, 1000, 1600, 3200];
+  /** SMP_AVE code → FIFO sample-averaging factor (op byte PPG_FIFO_CONFIG bits 7:5). */
+  private readonly SMP_AVE_FACTOR = [1, 2, 4, 8, 16, 32, 32, 32];
 
   constructor() {
     super();
@@ -138,10 +144,23 @@ export class SensorPPG extends SensorBase {
     return out;
   }
 
-  override applyOperationalConfig(_op: Uint8Array): void {
-    // PPG channels are configured by the operational config but the bit
-    // mapping is hardware-specific. For now we leave channel flags as-is;
-    // callers can use setChannels() directly.
-    void normalizeOperationalConfig(_op); // no-op, satisfies lint
+  override applyOperationalConfig(op: Uint8Array): void {
+    // PPG *channel* flags have a hardware-specific bit mapping (1st-gen named
+    // channels vs MAX86176 hub), so those are still left to setChannels(). The
+    // sample rate is a well-defined field, though, and it drives per-sample
+    // timestamp spacing: without it samplingRateHz stays at the 50 Hz default
+    // and any other configured rate makes consecutive blocks overlap on the
+    // time axis (the same "zigzag" fixed for GSR/IMU).
+    const norm = normalizeOperationalConfig(op);
+    if (!norm) return;
+
+    const srCode = ((norm[OP_IDX.PPG_MODE_CONFIG2] ?? 0) >> 2) & 0x07;
+    const smpAveCode = ((norm[OP_IDX.PPG_FIFO_CONFIG] ?? 0) >> 5) & 0x07;
+    const baseHz = this.PPG_SR_HZ[srCode];
+    const aveFactor = this.SMP_AVE_FACTOR[smpAveCode] ?? 1;
+
+    // The MAX86xxx averages SMP_AVE samples into one FIFO entry, so the streamed
+    // output rate is the base PPG_SR divided by the averaging factor.
+    if (baseHz) this.samplingRateHz = baseHz / aveFactor;
   }
 }
