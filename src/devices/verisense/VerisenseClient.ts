@@ -73,6 +73,8 @@ import type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  BleThroughputTestOptions,
+  BleThroughputTestResult,
   DeviceMode,
   VerisenseConnectRetryInfo,
   VerisenseConnectWithRetryOptions,
@@ -92,6 +94,8 @@ export type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  BleThroughputTestOptions,
+  BleThroughputTestResult,
   DeviceMode,
   VerisenseConnectRetryInfo,
   VerisenseConnectWithRetryOptions,
@@ -179,6 +183,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
+  private _throughputTestMode = false; // Flag to count raw bytes during a BLE throughput test
   private _bootstrapRequestTimeoutOverrideMs: number | null = null;
   private _isSecondGenerationHw = false;
 
@@ -1564,12 +1569,161 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.sendDebugCommand(DEBUG_COMMAND_ID.ERASE_FLASH_AND_LOOKUP_TABLE, [], timeoutMs);
   }
 
-  async testDataTransferLoop(loopCount: number): Promise<void> {
-    const clamped = Math.max(0, Math.min(0xffff, Math.trunc(loopCount)));
+  /**
+   * Low-level: ask the device to saturate the BLE link with dummy data for
+   * `durationMs` milliseconds (debug command 0x0B). The device ACKs immediately
+   * and then blasts a fixed 244-byte buffer as fast as the link will accept it.
+   *
+   * This only starts the blast; it does not measure anything. Prefer
+   * {@link runBleThroughputTest}, which sends this command and measures the
+   * throughput actually received at the host.
+   *
+   * @param durationMs Blast duration in milliseconds (clamped to the protocol's 0..65535 range).
+   */
+  async testDataTransferLoop(durationMs: number): Promise<void> {
+    const clamped = Math.max(0, Math.min(0xffff, Math.trunc(durationMs)));
     await this.sendDebugCommand(DEBUG_COMMAND_ID.TEST_DATA_TRANSFER_LOOP, [
       clamped & 0xff,
       (clamped >> 8) & 0xff,
     ]);
+  }
+
+  /**
+   * Measure the maximum BLE link throughput, independent of sensor
+   * configuration. Asks the device to blast dummy data for `durationMs`
+   * (see {@link testDataTransferLoop}) and measures the goodput actually
+   * received at the host.
+   *
+   * The reported rate reflects device→host (notification) throughput and is
+   * governed by the negotiated PHY, connection interval, MTU and packets per
+   * connection interval — i.e. the real link, not any sensor's sample rate.
+   *
+   * The measurement finishes when the device falls silent for `idleMs` after
+   * the blast (or when the overall safety timeout elapses).
+   *
+   * @returns received byte/packet counts and the computed throughput.
+   */
+  async runBleThroughputTest(
+    opts: BleThroughputTestOptions = {},
+  ): Promise<BleThroughputTestResult> {
+    const durationMs = Math.max(100, Math.min(60000, Math.trunc(opts.durationMs ?? 5000)));
+    const idleMs = Math.max(100, Math.min(5000, Math.trunc(opts.idleMs ?? 600)));
+    const overallTimeoutMs = Math.max(
+      durationMs + 1000,
+      Math.trunc(opts.timeoutMs ?? durationMs + 5000),
+    );
+    const abortSignal = opts.signal ?? null;
+    const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+
+    return new Promise<BleThroughputTestResult>((resolve, reject) => {
+      let done = false;
+      let bytes = 0;
+      let packets = 0;
+      let firstByteMs = 0;
+      let lastByteMs = 0;
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let off: (() => void) | null = null;
+      let onAbort: (() => void) | null = null;
+
+      const buildResult = (): BleThroughputTestResult => {
+        const elapsedMs =
+          packets > 1 && lastByteMs > firstByteMs ? lastByteMs - firstByteMs : durationMs;
+        const bps = elapsedMs > 0 ? (bytes * 1000) / elapsedMs : 0;
+        return {
+          bytesReceived: bytes,
+          packetsReceived: packets,
+          durationRequestedMs: durationMs,
+          elapsedMs,
+          throughputBytesPerSec: bps,
+          throughputKBps: bps / 1000,
+          throughputKbps: (bps * 8) / 1000,
+        };
+      };
+
+      const cleanup = () => {
+        this._throughputTestMode = false;
+        if (off) {
+          try {
+            off();
+          } catch {
+            /* ignore */
+          }
+          off = null;
+        }
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        if (abortSignal && onAbort) {
+          try {
+            abortSignal.removeEventListener('abort', onAbort);
+          } catch {
+            /* ignore */
+          }
+          onAbort = null;
+        }
+      };
+
+      const finish = (err?: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (err) reject(err);
+        else resolve(buildResult());
+      };
+
+      const scheduleIdleFinish = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          // Only finish on idle once data has actually started arriving.
+          if (packets > 0) finish();
+        }, idleMs);
+      };
+
+      off = this.on<number>('throughputChunk', (len) => {
+        if (done || !len) return;
+        const now = nowMillis();
+        if (packets === 0) firstByteMs = now;
+        lastByteMs = now;
+        bytes += len;
+        packets++;
+        if (onProgress) {
+          try {
+            onProgress(buildResult());
+          } catch {
+            /* ignore callback errors */
+          }
+        }
+        scheduleIdleFinish();
+      });
+
+      // Safety net: the device stops after durationMs, so the idle gap should
+      // normally finish first. If it never does, finalize with what we have.
+      timeoutTimer = setTimeout(() => finish(), overallTimeoutMs);
+
+      if (abortSignal) {
+        if (abortSignal.aborted) {
+          finish(new Error('runBleThroughputTest aborted'));
+          return;
+        }
+        onAbort = () => finish(new Error('runBleThroughputTest aborted'));
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      // Enable raw-count mode before sending so no blast bytes are missed. The
+      // ACK is consumed by the normal command path (while _pending is set); the
+      // dummy blast that follows is counted by the _feedStreamBytes branch.
+      this._throughputTestMode = true;
+      void this.testDataTransferLoop(durationMs).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        finish(new Error(`runBleThroughputTest failed to start: ${msg}`));
+      });
+    });
   }
 
   async ledTest(ledIndex: number): Promise<void> {
@@ -2176,6 +2330,14 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     // Once the command pending state is cleared, bypass frame parsing entirely.
     if (this._testReportMode && !this._pending) {
       if (chunk?.length) this.emit('testReportChunk', chunk);
+      return;
+    }
+
+    // Throughput-test data is raw dummy bytes streamed after the initial ACK.
+    // The ACK itself is consumed by the normal frame path while _pending is set;
+    // everything after is counted (not parsed) until the test finishes.
+    if (this._throughputTestMode && !this._pending) {
+      if (chunk?.length) this.emit('throughputChunk', chunk.length);
       return;
     }
 

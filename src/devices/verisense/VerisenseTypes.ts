@@ -69,6 +69,39 @@ export interface VerisenseClientOptions {
   debug?: boolean;
 }
 
+export interface BleThroughputTestOptions {
+  /** How long the device should saturate the link, in milliseconds. Clamped to [100, 60000]. Default 5000. */
+  durationMs?: number;
+  /**
+   * Finish the measurement once no data has been received for this many
+   * milliseconds (the device falls silent when the blast ends). Default 600.
+   */
+  idleMs?: number;
+  /** Overall safety timeout, in milliseconds. Defaults to `durationMs + 5000`. */
+  timeoutMs?: number;
+  /** Abort the test early. */
+  signal?: AbortSignal | null;
+  /** Called on every received chunk with the running result so far. */
+  onProgress?: ((partial: BleThroughputTestResult) => void) | null;
+}
+
+export interface BleThroughputTestResult {
+  /** Total bytes received from the device during the measurement window. */
+  bytesReceived: number;
+  /** Number of BLE notification chunks received. */
+  packetsReceived: number;
+  /** Duration requested of the device, in milliseconds. */
+  durationRequestedMs: number;
+  /** Measured window from first to last received byte, in milliseconds. */
+  elapsedMs: number;
+  /** Received goodput in bytes per second. */
+  throughputBytesPerSec: number;
+  /** Received goodput in kilobytes per second (bytes/sec ÷ 1000). */
+  throughputKBps: number;
+  /** Received goodput in kilobits per second (bytes/sec × 8 ÷ 1000). */
+  throughputKbps: number;
+}
+
 export type VerisenseConnectRetryReason =
   | 'request-timeout'
   | 'gatt-disconnected'
