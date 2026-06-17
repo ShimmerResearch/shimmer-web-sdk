@@ -857,7 +857,6 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
       [0xf4, '-12 dBm'],
       [0xf0, '-16 dBm'],
       [0xec, '-20 dBm'],
-      [0xff, '-40 dBm'],
       [0xd8, '-40 dBm'],
     ],
   },

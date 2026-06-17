@@ -64,8 +64,15 @@ export interface RunHardwareTestReportOptions {
 
 export interface VerisenseClientOptions {
   hardwareIdentifier?: string;
+  /**
+   * Streaming frames carry a 2-byte CRC-16 trailer. When `true` (default) the
+   * trailer is used to lock onto frame boundaries — the parser accepts a frame
+   * only when its CRC validates, so a flaky link that drops bytes recovers
+   * cleanly instead of emitting misaligned packets — and is then stripped before
+   * decoding. Set to `false` only for legacy firmware that streams without a CRC
+   * trailer (falls back to length-only framing).
+   */
   stripStreamCrc?: boolean;
-  verifyStreamCrc?: boolean;
   debug?: boolean;
 }
 

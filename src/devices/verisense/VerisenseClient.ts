@@ -22,6 +22,7 @@ import {
   buildHeader,
   buildMessage,
   parseHeader,
+  scanStreamFrame,
   normalizeBytePayload,
   parsePendingEvents,
   type VerisenseMessage,
@@ -30,7 +31,6 @@ import {
   nowMillis,
   computeCrcLikeCSharp,
   getOriginalCrcLE,
-  crc16_ccitt_false,
   parseStatusPayload,
   asmRtcBytesToUnixSeconds,
   unixSecondsToAsmRtcBytes,
@@ -131,7 +131,6 @@ export type {
  * - `"streaming"` — `{ on: boolean }`
  * - `"streamPacket"` / `"data"` — `StreamPacket`
  * - `"streamStats"` — `StreamStatsSnapshot` (throttled ~3 Hz live throughput/loss)
- * - `"streamCrcFail"` — `{ claimed: number; body: Uint8Array }`
  * - `"opConfig"` — `{ op: Uint8Array }`
  * - `"productionConfig"` — `ProductionConfig`
  * - `"commandPayload"` — `{ payload: Uint8Array }`
@@ -192,7 +191,6 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _lastStreamStatsEmitMillis = 0;
 
   readonly stripStreamCrc: boolean;
-  readonly verifyStreamCrc: boolean;
   readonly hardwareIdentifier: string;
 
   // Sensor map
@@ -203,7 +201,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   productionConfig: Uint8Array | null = null;
 
   // Debug flags
-  debugSync = true;
+  debugSync = false;
   private _syncRxCount = 0;
   private _syncPayloadCount = 0;
 
@@ -211,7 +209,6 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     super({ debug: opts.debug ?? true });
     this.hardwareIdentifier = opts.hardwareIdentifier ?? 'VERISENSE_PULSE_PLUS';
     this.stripStreamCrc = opts.stripStreamCrc ?? true;
-    this.verifyStreamCrc = opts.verifyStreamCrc ?? false;
 
     this.sensors = {
       1: new SensorADC(),
@@ -2366,6 +2363,31 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this._appendStreamBuf(chunk);
 
     for (;;) {
+      // Streaming frames carry a CRC-16 trailer; use it to lock onto frame
+      // boundaries. A candidate is accepted only when its CRC validates, so
+      // after a weak link drops bytes we slide past the garbage and re-lock on
+      // the next genuine frame instead of emitting misaligned (wrong sensor-id)
+      // packets. Legacy firmware that streams without a CRC trailer
+      // (stripStreamCrc=false) falls through to the length-only path below.
+      if (this._mode === 'streaming' && this.stripStreamCrc) {
+        const scan = scanStreamFrame(this._rxStreamBuf);
+        if (scan.status === 'need-more') return;
+        if (scan.status === 'invalid') {
+          if (this.debugSync) {
+            console.warn('[rx] stream resync: dropping byte', {
+              dropped: this._rxStreamBuf[0],
+              bufLen: this._rxStreamBuf.length,
+            });
+          }
+          this._rxStreamBuf = this._rxStreamBuf.slice(1);
+          this._streamStats.recordResyncDrop(1);
+          continue;
+        }
+        this._rxStreamBuf = this._rxStreamBuf.slice(scan.consumed);
+        this._handleStreamingPayload(scan.payload);
+        continue;
+      }
+
       if (this._rxStreamBuf.length < 3) return;
 
       const hdr = this._rxStreamBuf[0];
@@ -2454,21 +2476,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     let crcOk: boolean | null = null;
 
     if (this.stripStreamCrc && payload.length >= 6) {
-      const claimed = (payload[payload.length - 2] | (payload[payload.length - 1] << 8)) >>> 0;
-      const dataNoCrc = payload.slice(0, payload.length - 2);
-
-      if (this.verifyStreamCrc) {
-        const calc = crc16_ccitt_false(dataNoCrc);
-        crcOk = calc === claimed;
-      }
-
-      body = dataNoCrc;
-
-      if (this.verifyStreamCrc && crcOk === false) {
-        this.emit('streamCrcFail', { claimed, body: dataNoCrc });
-        // body[0] is the sensor id (already stripped of the CRC trailer here).
-        this._streamStats.recordCrcFail(dataNoCrc.length > 0 ? dataNoCrc[0] : undefined);
-      }
+      // Reached only for frames the CRC-gated scanner already validated (see
+      // _feedStreamBytes), so the CRC is known good; just strip the 2-byte
+      // trailer before decoding.
+      body = payload.slice(0, payload.length - 2);
+      crcOk = true;
     }
 
     const sensorId = body[0];

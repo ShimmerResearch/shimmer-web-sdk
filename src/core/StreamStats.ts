@@ -68,6 +68,12 @@ export interface StreamStatsSnapshot {
   totalSamples: number;
   totalBytes: number;
   totalCrcFails: number;
+  /**
+   * Bytes discarded while re-locking onto frame boundaries after the stream lost
+   * sync (e.g. dropped bytes on a weak BLE link). 0 on a healthy stream; a rising
+   * count means data was lost on the wire but the parser is recovering cleanly.
+   */
+  resyncDroppedBytes: number;
   /** Overall windowed bytes/sec across all sensors. */
   throughputBps: number;
   /** Aggregate lostSamples / expectedSamples * 100. */
@@ -135,6 +141,7 @@ function pruneRing<T extends { t: number }>(ring: T[], cutoff: number): T[] {
 export class StreamStatsTracker {
   private readonly windowMillis: number;
   private sessionStartMillis: number | null = null;
+  private resyncDroppedBytes = 0;
   private readonly sensors = new Map<number, SensorAccum>();
   private readonly streams = new Map<string, StreamAccum>();
 
@@ -145,6 +152,7 @@ export class StreamStatsTracker {
   /** Clear all state. Call when streaming (re)starts. */
   reset(): void {
     this.sessionStartMillis = null;
+    this.resyncDroppedBytes = 0;
     this.sensors.clear();
     this.streams.clear();
   }
@@ -192,8 +200,8 @@ export class StreamStatsTracker {
     sensor.packets += 1;
     sensor.bytes += p.byteLength;
     sensor.throughputRing.push({ t: p.recvMillis, bytes: p.byteLength });
-    // CRC failures are counted via recordCrcFail() (the dedicated emit branch),
-    // not here, to avoid double-counting the same packet.
+    // CRC failures, when a device reports them, are counted via recordCrcFail()
+    // rather than here, to avoid double-counting a packet also passed in here.
 
     for (const c of p.contributions) {
       const st = this.getStream(c.key, p.sensorId, c.label);
@@ -237,6 +245,14 @@ export class StreamStatsTracker {
   recordCrcFail(sensorId?: number): void {
     const id = sensorId ?? -1;
     this.getSensor(id).crcFails += 1;
+  }
+
+  /**
+   * Record bytes discarded while re-synchronising the frame parser after the
+   * stream lost alignment (typically a flaky link dropping bytes mid-stream).
+   */
+  recordResyncDrop(byteCount = 1): void {
+    if (byteCount > 0) this.resyncDroppedBytes += byteCount;
   }
 
   private prune(nowMillis: number): void {
@@ -384,6 +400,7 @@ export class StreamStatsTracker {
       totalSamples,
       totalBytes,
       totalCrcFails,
+      resyncDroppedBytes: this.resyncDroppedBytes,
       throughputBps,
       lossPct: totalExpected > 0 ? (totalLost / totalExpected) * 100 : 0,
       perSensor,
