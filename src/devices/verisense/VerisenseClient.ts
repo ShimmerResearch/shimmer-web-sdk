@@ -1232,6 +1232,23 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.runTestMode(payload);
   }
 
+  /**
+   * Ask the device to stop/exit any running test, including an in-progress
+   * hardware test report (TEST_MODE "exit", id 0x00). The firmware acts on this
+   * from interrupt context, so it aborts the blocking report promptly instead of
+   * running it to completion against a connection no one is reading. Best-effort
+   * and safe to call when no test is running.
+   */
+  async stopTestMode(hwMajor = 0, hwMinor = 0, hwInternal = 0): Promise<void> {
+    await this.runTestMode([
+      0x00,
+      hwMajor & 0xff,
+      hwMinor & 0xff,
+      hwInternal & 0xff,
+      (hwInternal >> 8) & 0xff,
+    ]);
+  }
+
   async runHardwareTestReport(
     hwMajor: number,
     hwMinor = 0,
@@ -1314,6 +1331,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         done = true;
         cleanup();
         if (err) {
+          // Best-effort: tell the device to stop the in-progress test/report so it
+          // doesn't keep running a blocking suite against a connection no one is
+          // reading (dialog closed / aborted / timed out). The firmware acts on
+          // this from interrupt context, so the report aborts promptly.
+          void this.stopTestMode(hwMajor, hwMinor, hwInternal).catch(() => {});
           reject(err);
           return;
         }
