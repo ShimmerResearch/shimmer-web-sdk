@@ -771,9 +771,27 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   override async stopStreaming(): Promise<void> {
-    await this.setStreamingMode(false);
-    this._mode = 'idle';
-    this.emit('streaming', { on: false });
+    // Stop is best-effort. The application-level ACK for STREAM_MODE-disable rides
+    // on BLE notifications, which are unacknowledged and can be dropped under
+    // high-throughput streaming; the in-flight stream tail is also parsed by the
+    // command path (not the CRC-gated stream scanner) once we leave streaming
+    // mode, so the small ACK frame is easily lost or mis-framed. We confirm
+    // delivery of the disable command via a write-with-response, then reconcile
+    // local state regardless — a missing ACK must never leave the client wedged
+    // in 'streaming' (which locks the UI). This mirrors the best-effort stop used
+    // by Shimmer3RClient and the DEVICE_DISCONNECT path in disconnect().
+    try {
+      await this.writeBytes(
+        buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.STREAM_MODE, [STREAM_MODE.DISABLE]),
+        { withResponse: true },
+      );
+    } catch (e) {
+      this._log('stopStreaming: disable write failed; reconciling state anyway:', e);
+    } finally {
+      this._mode = 'idle';
+      this._resetAssembler();
+      this.emit('streaming', { on: false });
+    }
   }
 
   // ---------------------------------------------------------------------------
