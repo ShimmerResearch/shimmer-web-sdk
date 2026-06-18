@@ -87,7 +87,8 @@ describe('scanStreamFrame', () => {
     // len just over the ceiling — must reject immediately, not block on need-more
     const over = STREAM_FRAME_MAX_PAYLOAD + 1;
     expect(
-      scanStreamFrame(new Uint8Array([STREAM_FRAME_HEADER, over & 0xff, (over >> 8) & 0xff])).status,
+      scanStreamFrame(new Uint8Array([STREAM_FRAME_HEADER, over & 0xff, (over >> 8) & 0xff]))
+        .status,
     ).toBe('invalid');
   });
 
@@ -177,7 +178,9 @@ describe('resynchronisation (parse-loop behaviour)', () => {
     expect(first.remaining.length).toBe(head.length); // nothing consumed, awaiting more
 
     // The rest arrives; concatenation now yields the full frame.
-    const completed = drainFrames(new Uint8Array([...first.remaining, ...whole.subarray(head.length)]));
+    const completed = drainFrames(
+      new Uint8Array([...first.remaining, ...whole.subarray(head.length)]),
+    );
     expect(completed.frames).toHaveLength(1);
     expect(completed.frames[0][0]).toBe(0x06);
   });
