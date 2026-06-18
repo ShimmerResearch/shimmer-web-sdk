@@ -23,6 +23,7 @@ import {
   buildMessage,
   parseHeader,
   scanStreamFrame,
+  STREAM_FRAME_MAX_PAYLOAD,
   normalizeBytePayload,
   parsePendingEvents,
   type VerisenseMessage,
@@ -136,7 +137,10 @@ export type {
  * - `"commandPayload"` — `{ payload: Uint8Array }`
  */
 export class VerisenseBleDevice extends BaseShimmerClient {
-  private static readonly MAX_FRAME_PAYLOAD_LEN = 40000;
+  // Single source of truth for the max frame size, shared with the CRC-gated
+  // streaming scanner so both framing paths accept the same large (fragmented)
+  // payloads. See STREAM_FRAME_MAX_PAYLOAD.
+  private static readonly MAX_FRAME_PAYLOAD_LEN = STREAM_FRAME_MAX_PAYLOAD;
   private static readonly MAX_DEBUG_FRAME_PAYLOAD_LEN = 0xffff;
   // Static NUS UUIDs
   static readonly NUS_SERVICE = NUS_SERVICE;

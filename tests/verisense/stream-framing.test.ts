@@ -91,6 +91,23 @@ describe('scanStreamFrame', () => {
     ).toBe('invalid');
   });
 
+  it('accepts a large frame reassembled from several BLE notifications', () => {
+    // Regression guard: the firmware packages multi-sample IMU records into one
+    // logical frame (~1.8 kB for an LSM6DSV accel/gyro/mag burst) fragmented
+    // across BLE notifications; the host reassembles them before scanning. A
+    // ceiling near the BLE MTU (the old 512) silently dropped every such frame.
+    const payload = new Uint8Array(1791);
+    payload[0] = 0x06; // LSM6DSV (accel/gyro/mag) sensor id
+    for (let i = 1; i < payload.length; i++) payload[i] = (i * 7) & 0xff;
+    const frame = buildStreamFrame(payload);
+    expect(frame.length).toBe(3 + 1793);
+    const scan = scanStreamFrame(frame);
+    expect(scan.status).toBe('frame');
+    if (scan.status !== 'frame') return;
+    expect(scan.consumed).toBe(frame.length);
+    expect(scan.payload[0]).toBe(0x06);
+  });
+
   it('rejects a frame whose CRC does not match (corruption)', () => {
     const frame = buildStreamFrame(SAMPLE_PAYLOAD);
     const corrupt = frame.slice();
@@ -122,8 +139,9 @@ describe('resynchronisation (parse-loop behaviour)', () => {
 
   it('re-locks on the next valid frame after leading garbage (incl. a stray 0x3A)', () => {
     // Garbage that mimics a dropped-packet tail: ordinary bytes plus a false
-    // 0x3A header whose length/CRC will not validate.
-    const garbage = new Uint8Array([0xaa, 0xbb, STREAM_FRAME_HEADER, 0x99, 0x99]);
+    // 0x3A header whose length is out of range (0xFFFF > STREAM_FRAME_MAX_PAYLOAD)
+    // and so is rejected immediately, rather than blocking to buffer a bogus body.
+    const garbage = new Uint8Array([0xaa, 0xbb, STREAM_FRAME_HEADER, 0xff, 0xff]);
     const good = buildStreamFrame(SAMPLE_PAYLOAD);
     const { frames, dropped } = drainFrames(new Uint8Array([...garbage, ...good]));
 
@@ -133,7 +151,13 @@ describe('resynchronisation (parse-loop behaviour)', () => {
   });
 
   it('discards a corrupt frame and recovers on the following good frame', () => {
-    const good = buildStreamFrame(SAMPLE_PAYLOAD);
+    // Payload chosen so neither its bytes, length, nor CRC trailer contain a
+    // stray 0x3A: otherwise a flipped byte can leave an in-range false header
+    // that legitimately blocks on need-more (it resolves in a live stream once
+    // the claimed body arrives, but not within this fixed-size test buffer).
+    const good = buildStreamFrame(
+      new Uint8Array([0x06, 0x11, 0x21, 0x31, 0x00, 0x13, 0x14, 0x15, 0x16, 0x17]),
+    );
     const corrupt = good.slice();
     corrupt[5] ^= 0xff; // break the first frame's CRC
     const next = buildStreamFrame(new Uint8Array([0x07, 0x11, 0x22, 0x33, 0x44]));

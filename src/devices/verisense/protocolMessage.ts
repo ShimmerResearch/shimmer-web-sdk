@@ -57,13 +57,21 @@ export const STREAM_FRAME_HEADER = buildHeader(ASM_COMMAND.RESPONSE, ASM_PROPERT
 export const STREAM_FRAME_MIN_PAYLOAD = 6;
 
 /**
- * Largest streaming payload we will accept. The firmware emits each streaming
- * frame as a single BLE notification, so it can never exceed the BLE5 MTU
- * (244 bytes) minus the 3-byte frame header. The ceiling is deliberately
- * generous so a genuine frame is never rejected, while still bounding how far a
- * corrupt length field can run before the CRC rejects it during resync.
+ * Largest streaming payload we will accept. The firmware packages multi-sample
+ * sensor records into a single logical frame that is frequently much larger
+ * than one BLE notification (e.g. ~1.8 kB for an LSM6DSV accel/gyro/mag burst)
+ * and fragments it across several notifications; the host reassembles them in
+ * its receive buffer before this scanner runs. The ceiling must therefore cover
+ * the firmware's largest packaged payload — it mirrors the length-only path's
+ * `MAX_FRAME_PAYLOAD_LEN` (see VerisenseClient) — not the BLE MTU. It still
+ * bounds how far a corrupt length field can run before the CRC rejects it
+ * during resync.
+ *
+ * WARNING: do NOT shrink this to an MTU-sized value. A small ceiling silently
+ * drops every large frame (accel/gyro/mag), because their length exceeds the
+ * cap and the CRC trailer is never reached — the stream just looks dead.
  */
-export const STREAM_FRAME_MAX_PAYLOAD = 512;
+export const STREAM_FRAME_MAX_PAYLOAD = 40000;
 
 /** Result of attempting to read one streaming frame from a byte buffer. */
 export type StreamFrameScan =
