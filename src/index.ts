@@ -166,6 +166,23 @@ export {
   inferVerisenseLookupBankCount,
   isVerisenseLightDarkChannelEnabled,
 } from './devices/verisense/protocol.js';
+export {
+  parseCalibrationBlob,
+  serializeCalibrationBlob,
+  calibrationBlobCrc,
+  applyImuCalibration,
+  CalibSensorId,
+  SC_CALIB_FORMAT_VERSION,
+  SC_GLOBAL_HEADER_BYTES,
+  SC_DATA_LEN_IMU,
+} from './devices/verisense/calibration.js';
+export type {
+  CalibrationSet,
+  CalibrationBlock,
+  CalibrationSetInput,
+  CalibrationBlockInput,
+  ImuCalibration,
+} from './devices/verisense/calibration.js';
 export type {
   ProductionConfig,
   ProductionConfigBuildOptions,

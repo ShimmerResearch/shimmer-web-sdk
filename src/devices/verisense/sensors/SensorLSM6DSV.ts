@@ -1,6 +1,7 @@
 import { SensorBase } from './SensorBase.js';
 import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
+import { CalibSensorId, applyImuCalibration } from '../calibration.js';
 import type { StreamContribution } from '../../../core/StreamStats.js';
 
 export interface LSM6DSVSample {
@@ -22,6 +23,11 @@ export class SensorLSM6DSV extends SensorBase {
 
   private accelFsG = 2;
   private gyroFsDps = 2000;
+
+  // Numeric full-scale codes (register values) used to select the device
+  // calibration block: accel 0..3 (2/4/8/16 g), gyro 0..4 (125..2000 dps).
+  private fsXlCode = 0;
+  private fsGCode = 4;
 
   // Configured per-stream rates (the FIFO interleaves accel/gyro/mag, so each
   // stream is timestamped on its own rate — see computeSampleTimestamps). Public
@@ -126,16 +132,22 @@ export class SensorLSM6DSV extends SensorBase {
   }
 
   private calibrateAccel(raw: [number, number, number]): [number, number, number] {
+    const dev = this.calibration?.getImu(CalibSensorId.LSM6DSV_ACCEL, this.fsXlCode);
+    if (dev) return applyImuCalibration(raw, dev);
     const scale = (this.accelFsG / 32768) * 9.80665;
     return [raw[0] * scale, raw[1] * scale, raw[2] * scale];
   }
 
   private calibrateGyro(raw: [number, number, number]): [number, number, number] {
+    const dev = this.calibration?.getImu(CalibSensorId.LSM6DSV_GYRO, this.fsGCode);
+    if (dev) return applyImuCalibration(raw, dev);
     const scale = this.gyroFsDps / 32768;
     return [raw[0] * scale, raw[1] * scale, raw[2] * scale];
   }
 
   private calibrateMag(raw: [number, number, number]): [number, number, number] {
+    const dev = this.calibration?.getImu(CalibSensorId.LIS2MDL_MAG, 0);
+    if (dev) return applyImuCalibration(raw, dev);
     // LIS2MDL nominal sensitivity is 1.5 mGauss/LSB (0.15 uT/LSB).
     const scale = 0.15;
     return [raw[0] * scale, raw[1] * scale, raw[2] * scale];
@@ -202,6 +214,8 @@ export class SensorLSM6DSV extends SensorBase {
 
     this.accelFsG = this.decodeAccelFsG(fsXl);
     this.gyroFsDps = this.decodeGyroFsDps(fsG);
+    this.fsXlCode = fsXl;
+    this.fsGCode = fsG;
 
     this.accelHz = this.accEnabled ? this.decodeOdrHz(odrXl) : 0;
     this.gyroHz = this.gyroEnabled ? this.decodeOdrHz(odrG) : 0;

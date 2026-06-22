@@ -2,6 +2,7 @@ import { SensorBase } from './SensorBase.js';
 import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
 import { normalizeOperationalConfig } from '../protocol.js';
+import { CalibSensorId, applyImuCalibration } from '../calibration.js';
 
 type AccelRange = '2G' | '4G' | '8G' | '16G';
 
@@ -34,6 +35,9 @@ export class SensorLIS2DW12 extends SensorBase {
   };
 
   range: AccelRange = '2G';
+
+  /** Numeric full-scale index (0=2G..3=16G) used to select the device calibration block. */
+  private rangeIndex = 0;
 
   constructor() {
     super();
@@ -77,6 +81,11 @@ export class SensorLIS2DW12 extends SensorBase {
   }
 
   private _calibrate(raw: [number, number, number]): [number, number, number] {
+    // Prefer per-device calibration from the sensor when available for this range.
+    const dev = this.calibration?.getImu(CalibSensorId.LIS2DW12_ACCEL, this.rangeIndex);
+    if (dev) return applyImuCalibration(raw, dev);
+
+    // Fallback: nominal offset / alignment / datasheet sensitivity.
     const v: [number, number, number] = [
       raw[0] - this.offset[0],
       raw[1] - this.offset[1],
@@ -129,6 +138,7 @@ export class SensorLIS2DW12 extends SensorBase {
 
     const rangeMap: Record<number, AccelRange> = { 0: '2G', 1: '4G', 2: '8G', 3: '16G' };
     this.setRange(rangeMap[rangeSetting] ?? '2G');
+    this.rangeIndex = rangeSetting & 0x03;
 
     const lowPowerHzByCfg: Record<number, number> = {
       1: 1.6,

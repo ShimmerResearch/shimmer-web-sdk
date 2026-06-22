@@ -116,6 +116,17 @@ export function u16le_at(bytes: Uint8Array, off: number): number {
   return (bytes[off] | (bytes[off + 1] << 8)) >>> 0;
 }
 
+/** Read a signed 32-bit integer at byte offset `off`, little-endian. */
+export function i32le(bytes: Uint8Array, off: number): number {
+  // The `<< 24` makes the result a signed 32-bit integer (JS bitwise ops are 32-bit signed).
+  return bytes[off] | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24);
+}
+
+/** Read a 32-bit IEEE-754 float at byte offset `off`, little-endian. */
+export function f32le(bytes: Uint8Array, off: number): number {
+  return new DataView(bytes.buffer, bytes.byteOffset + off, 4).getFloat32(0, true);
+}
+
 /** Return current time in milliseconds. */
 export function nowMillis(): number {
   return Date.now();

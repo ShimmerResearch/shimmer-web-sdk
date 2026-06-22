@@ -1,4 +1,5 @@
 import type { StreamContribution } from '../../../core/StreamStats.js';
+import type { CalibrationSet } from '../calibration.js';
 
 /**
  * Abstract base class for all Verisense sensor decoders.
@@ -26,6 +27,18 @@ export abstract class SensorBase {
 
   /** Whether this sensor is enabled in the operational config. */
   enabled = true;
+
+  /**
+   * Per-device calibration read from the sensor, or null when none is available
+   * (decoders then fall back to nominal full-scale/datasheet scaling). Set via
+   * {@link applyCalibration}; subclasses read it in their calibrate routines.
+   */
+  protected calibration: CalibrationSet | null = null;
+
+  /** Supply (or clear) the device calibration set used by this decoder. */
+  applyCalibration(set: CalibrationSet | null): void {
+    this.calibration = set;
+  }
 
   /** Reset all timestamp state (call on (re)connect or when streaming restarts). */
   resetTimestamps(): void {

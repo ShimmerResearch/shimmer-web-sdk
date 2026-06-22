@@ -55,6 +55,7 @@ export const ASM_PROPERTY = Object.freeze({
   STREAM_MODE: 0x0a,
   DEVICE_DISCONNECT: 0x0b,
   STATUS2: 0x0c,
+  CALIBRATION: 0x0d,
 } as const);
 
 export type AsmProperty = (typeof ASM_PROPERTY)[keyof typeof ASM_PROPERTY];

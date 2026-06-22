@@ -18,6 +18,7 @@ import {
   NORDIC_DFU_BUTTONLESS_WITH_BONDS,
   NORDIC_DFU_OP_ENTER_BOOTLOADER,
 } from './constants.js';
+import { parseCalibrationBlob, SC_GLOBAL_HEADER_BYTES, type CalibrationSet } from './calibration.js';
 import {
   buildHeader,
   buildMessage,
@@ -2193,6 +2194,67 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.readOpConfigFromDevice();
   }
 
+  /** Per-device calibration last read from the device, or null. */
+  private _calibration: CalibrationSet | null = null;
+
+  /** The parsed calibration set last read via {@link readCalibrationParsed}, or null. */
+  getCalibration(): CalibrationSet | null {
+    return this._calibration;
+  }
+
+  /**
+   * Read the raw calibration blob from the device (CMD_AR_CFG_CALIB). The whole
+   * blob (~1 KB) arrives in one response, reassembled across BLE/USB fragments.
+   * Requires FW v2.0.4+; older firmware NACKs or times out.
+   */
+  async readCalibration(timeoutMs = 8000): Promise<Uint8Array> {
+    const rsp = await this.readProperty(ASM_PROPERTY.CALIBRATION, timeoutMs);
+    const blob = rsp.payload;
+    if (!blob || blob.length < SC_GLOBAL_HEADER_BYTES) {
+      throw new Error('readCalibration: device returned no/short calibration blob');
+    }
+    return new Uint8Array(blob);
+  }
+
+  /**
+   * Read + parse the calibration set, cache it, and push it into the IMU
+   * decoders so subsequent samples calibrate from per-device values. Call before
+   * a logged-data transfer and/or after connect (no-op on FW that lacks it —
+   * the call rejects and the decoders keep their full-scale fallback).
+   */
+  async readCalibrationParsed(): Promise<CalibrationSet> {
+    const blob = await this.readCalibration();
+    const set = parseCalibrationBlob(blob);
+    this._calibration = set;
+    try {
+      this.accel1.applyCalibration(set);
+      this.sensors[6].applyCalibration(set);
+    } catch (e) {
+      console.warn('[calib] apply after read failed:', e);
+    }
+    return set;
+  }
+
+  /**
+   * Write a calibration blob to the device (CMD_AR_CFG_CALIB), chunked in
+   * <=128-byte pieces as [offset_lo, offset_hi, ...chunk]. The device reassembles
+   * and commits on the final chunk. Requires FW v2.0.4+.
+   */
+  async writeCalibration(blob: Uint8Array, chunkSize = 128): Promise<void> {
+    if (!blob || blob.length < SC_GLOBAL_HEADER_BYTES) {
+      throw new Error('writeCalibration: invalid calibration blob');
+    }
+    const step = Math.max(1, Math.min(chunkSize, 128)); // firmware ramWrite caps chunks at 128
+    for (let offset = 0; offset < blob.length; offset += step) {
+      const chunk = blob.subarray(offset, Math.min(offset + step, blob.length));
+      const payload = new Uint8Array(2 + chunk.length);
+      payload[0] = offset & 0xff;
+      payload[1] = (offset >> 8) & 0xff;
+      payload.set(chunk, 2);
+      await this.writeProperty(ASM_PROPERTY.CALIBRATION, payload);
+    }
+  }
+
   getSensor(name: string | number): SensorBase | null {
     const k = String(name ?? '').toLowerCase();
     if (!k) return null;
@@ -2306,8 +2368,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     if (!validCommand) return false;
 
-    // Known properties are 0x01..0x0C; keep 0x00 permissive for transient frames.
-    return property === 0 || (property >= ASM_PROPERTY.STATUS1 && property <= ASM_PROPERTY.STATUS2);
+    // Known properties are 0x01..0x0D; keep 0x00 permissive for transient frames.
+    return (
+      property === 0 || (property >= ASM_PROPERTY.STATUS1 && property <= ASM_PROPERTY.CALIBRATION)
+    );
   }
 
   private _isPlausibleFrameStart(hdr: number, len: number): boolean {
@@ -2320,9 +2384,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     // Debug responses may carry large blobs (for example flash lookup tables),
     // while normal properties and streaming/logged payloads should stay bounded.
-    const isPendingDebugCommand =
-      this._mode === 'command' && this._pending?.expectedProperty === ASM_PROPERTY.DEBUG_COMMAND;
-    const maxLen = isPendingDebugCommand
+    // DEBUG and CALIBRATION responses can be large (lookup tables / the ~1 KB
+    // calibration blob) and arrive across multiple fragments.
+    const expectsLargeResponse =
+      this._mode === 'command' &&
+      (this._pending?.expectedProperty === ASM_PROPERTY.DEBUG_COMMAND ||
+        this._pending?.expectedProperty === ASM_PROPERTY.CALIBRATION);
+    const maxLen = expectsLargeResponse
       ? VerisenseBleDevice.MAX_DEBUG_FRAME_PAYLOAD_LEN
       : VerisenseBleDevice.MAX_FRAME_PAYLOAD_LEN;
     return len <= maxLen;

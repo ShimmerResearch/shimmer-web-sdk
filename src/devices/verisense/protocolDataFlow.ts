@@ -42,6 +42,79 @@ export function buildUploadBinaryFileName(uploadDate: Date, firstPayloadIndex: n
   return `${dateToYyMMddHHmmss(uploadDate)}_${pad5(firstPayloadIndex)}.bin`;
 }
 
+/**
+ * Build a sensor-calibration file name: `yyMMdd_HHmmss_<crc16hex>.calib`.
+ *
+ * Written into the per-sensor `SensorCalibration/` folder when calibration is
+ * read from the device. The 4-hex CRC-16 is the calibration-version tag (also
+ * stamped into every logged payload header), so the parser can match logged data
+ * to the exact calibration set. The `.calib` extension + dedicated folder trigger
+ * the sensor-calibration parser and are ignored by the `.bin` parser.
+ */
+export function buildCalibrationFileName(readDate: Date, calibCrc16: number): string {
+  if (!Number.isFinite(calibCrc16) || calibCrc16 < 0 || calibCrc16 > 0xffff) {
+    throw new Error('buildCalibrationFileName: calibCrc16 must be in range 0..65535');
+  }
+  const crcHex = (calibCrc16 & 0xffff).toString(16).toUpperCase().padStart(4, '0');
+  return `${dateToYyMMddHHmmss(readDate)}_${crcHex}.calib`;
+}
+
+/**
+ * Per-sensor sub-folders under `TrialID/ParticipantID/SensorUniqueID`, mirroring
+ * the ASM-DES08 cloud layout so a local capture maps 1:1 to the S3 key structure.
+ */
+export const SENSOR_DATA_SUBFOLDERS = Object.freeze({
+  /** Uploaded `.bin` sensor-data files. */
+  binaryFiles: 'BinaryFiles',
+  /** Calibration CSVs (GGIR auto-calibration + sensor-sourced). */
+  calibrationParameters: 'CalibrationParameters',
+  /** Sensor-read `.calib` blobs (trigger the new sensor-calibration parser). */
+  sensorCalibration: 'SensorCalibration',
+});
+
+/**
+ * Build the `[TrialID, ParticipantID, SensorUniqueID]` folder segments for the
+ * data tree. TrialID/ParticipantID are enrollment context supplied by the app;
+ * SensorUniqueID comes from the device production config. Rejects empty values
+ * and path separators so callers can't escape the chosen output directory.
+ */
+export function buildSensorFolderSegments(
+  trialId: string,
+  participantId: string,
+  sensorUniqueId: string,
+): string[] {
+  const clean = (s: string, label: string): string => {
+    const v = String(s ?? '').trim();
+    if (!v) throw new Error(`buildSensorFolderSegments: ${label} must be non-empty`);
+    if (/[\\/]/.test(v) || v === '.' || v === '..') {
+      throw new Error(`buildSensorFolderSegments: ${label} must not contain path separators`);
+    }
+    return v;
+  };
+  return [
+    clean(trialId, 'trialId'),
+    clean(participantId, 'participantId'),
+    clean(sensorUniqueId, 'sensorUniqueId'),
+  ];
+}
+
+/**
+ * Ensure a nested directory path exists under a root directory handle, creating
+ * each level as needed, and return the leaf handle. Browser-only (File System
+ * Access API) — the app obtains `root` from `showDirectoryPicker()` when the
+ * user selects an output location at transfer start.
+ */
+export async function ensureDirectoryPath(
+  root: FileSystemDirectoryHandle,
+  segments: string[],
+): Promise<FileSystemDirectoryHandle> {
+  let dir = root;
+  for (const seg of segments) {
+    dir = await dir.getDirectoryHandle(seg, { create: true });
+  }
+  return dir;
+}
+
 /** Build parsed CSV file name: yyMMdd_HHmmss_DataSource_00000.csv */
 export function buildParsedCsvFileName(
   startDate: Date,

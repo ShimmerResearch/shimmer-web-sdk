@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyDuplicateSuffix,
+  buildCalibrationFileName,
   buildParsedCsvFileName,
+  buildSensorFolderSegments,
   buildUploadBinaryFileName,
   evaluateParsedFileSplit,
   getFirstPayloadIndex,
   nextAvailableDuplicateFileName,
+  SENSOR_DATA_SUBFOLDERS,
 } from '../../src/devices/verisense/protocol.js';
 
 describe('Verisense data-flow helpers', () => {
@@ -21,11 +24,30 @@ describe('Verisense data-flow helpers', () => {
     );
   });
 
+  it('builds calibration filename format yyMMdd_HHmmss_<crc16hex>.calib', () => {
+    const d = new Date(Date.UTC(2018, 5, 27, 0, 1, 10));
+    expect(buildCalibrationFileName(d, 0x1a2b)).toBe('180627_000110_1A2B.calib');
+    expect(buildCalibrationFileName(d, 0)).toBe('180627_000110_0000.calib');
+    expect(() => buildCalibrationFileName(d, 0x10000)).toThrow(/range/);
+  });
+
   it('applies duplicate suffix and finds next available duplicate name', () => {
     expect(applyDuplicateSuffix('a.csv', 2)).toBe('a (2).csv');
 
     const existing = new Set(['a.csv', 'a (2).csv', 'a (3).csv']);
     expect(nextAvailableDuplicateFileName('a.csv', existing)).toBe('a (4).csv');
+  });
+
+  it('builds the sensor folder tree segments and rejects unsafe input', () => {
+    expect(buildSensorFolderSegments('TRIAL1', 'P001', '1809260136F8')).toEqual([
+      'TRIAL1',
+      'P001',
+      '1809260136F8',
+    ]);
+    expect(SENSOR_DATA_SUBFOLDERS.binaryFiles).toBe('BinaryFiles');
+    expect(SENSOR_DATA_SUBFOLDERS.sensorCalibration).toBe('SensorCalibration');
+    expect(() => buildSensorFolderSegments('', 'P001', 'S')).toThrow(/trialId/);
+    expect(() => buildSensorFolderSegments('T', 'a/b', 'S')).toThrow(/separator/);
   });
 
   it('extracts first payload index from payload bytes', () => {
