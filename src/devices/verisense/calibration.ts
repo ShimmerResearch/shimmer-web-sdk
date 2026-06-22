@@ -67,12 +67,16 @@ export type CalibQuality = (typeof CalibQuality)[keyof typeof CalibQuality];
  * so accel/gyro/mag can each carry their own calibration even though one
  * data-stream id (6) covers all three.
  *
- * Data-stream → calibration mapping: 6 → {37, 38, 42}, 2 → {39}.
+ * Data-stream → calibration mapping: 6 → {37, 38, 42}, 2 → {39}, 3 → {40, 41}.
  */
 export const CalibSensorId = {
   LSM6DSV_ACCEL: 37,
   LSM6DSV_GYRO: 38,
   LIS2DW12_ACCEL: 39,
+  /** 1st-gen LSM6DS3 accel (data-stream id 3). */
+  LSM6DS3_ACCEL: 40,
+  /** 1st-gen LSM6DS3 gyro (data-stream id 3). */
+  LSM6DS3_GYRO: 41,
   LIS2MDL_MAG: 42,
 } as const;
 export type CalibSensorId = (typeof CalibSensorId)[keyof typeof CalibSensorId];

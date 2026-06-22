@@ -187,6 +187,20 @@ export type {
   CalibrationBlockInput,
   ImuCalibration,
 } from './devices/verisense/calibration.js';
+export {
+  VERISENSE_CALIBRATION_MIN_FW,
+  supportsVerisenseCalibration,
+  unixSecondsToCalibTsBytes,
+  calibTsBytesToUnixSeconds,
+  getVerisenseCalibrationSensors,
+  buildDefaultVerisenseCalibrationSet,
+  getVerisenseCalibrationSensorAvailability,
+} from './devices/verisense/calibrationDefaults.js';
+export type {
+  VerisenseCalibrationRange,
+  VerisenseCalibrationSensor,
+  VerisenseCalibrationAvailability,
+} from './devices/verisense/calibrationDefaults.js';
 export type {
   ProductionConfig,
   ProductionConfigBuildOptions,

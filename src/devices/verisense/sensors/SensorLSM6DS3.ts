@@ -1,6 +1,7 @@
 import { SensorBase } from './SensorBase.js';
 import { i16le } from '../protocol.js';
 import { OP_IDX } from '../constants.js';
+import { CalibSensorId, applyImuCalibration } from '../calibration.js';
 
 type AccelRange = '2G' | '4G' | '8G' | '16G';
 type GyroRange = '250DPS' | '500DPS' | '1000DPS' | '2000DPS';
@@ -18,10 +19,15 @@ export interface LSM6DS3Sample {
 export class SensorLSM6DS3 extends SensorBase {
   offset: [number, number, number] = [0, 0, 0];
 
+  // Applied directly as `physical = align · (raw − offset)` (no inversion), so this
+  // must be the *inverse* alignment R⁻¹ = Rᵀ — matching the Shimmer Java reference
+  // `UtilCalibration` (C = R⁻¹·K⁻¹·(U−B)) and the gen-1 calibration doc's R, which
+  // is the forward §8 rotation. (Previously stored the un-transposed R, which
+  // applied R instead of R⁻¹.)
   align: [[number, number, number], [number, number, number], [number, number, number]] = [
-    [0, 0, 1],
-    [-1, 0, 0],
     [0, -1, 0],
+    [0, 0, -1],
+    [1, 0, 0],
   ];
 
   private readonly accSensByRange: Record<AccelRange, [number, number, number]> = {
@@ -75,6 +81,42 @@ export class SensorLSM6DS3 extends SensorBase {
     ];
   }
 
+  // Calibration-block range codes (must match getVerisenseCalibrationSensors gen-1).
+  private static readonly ACC_RANGE_CODE: Record<AccelRange, number> = {
+    '2G': 0,
+    '4G': 1,
+    '8G': 2,
+    '16G': 3,
+  };
+  private static readonly GYRO_RANGE_CODE: Record<GyroRange, number> = {
+    '250DPS': 0,
+    '500DPS': 1,
+    '1000DPS': 2,
+    '2000DPS': 3,
+  };
+
+  private _calibrateAccel(raw: [number, number, number]): [number, number, number] {
+    const dev = this.calibration?.getImu(
+      CalibSensorId.LSM6DS3_ACCEL,
+      SensorLSM6DS3.ACC_RANGE_CODE[this.accRange],
+    );
+    if (dev) return applyImuCalibration(raw, dev);
+    const aligned = this._applyAlignAndOffset(raw);
+    const s = this.accSensByRange[this.accRange];
+    return [aligned[0] / s[0], aligned[1] / s[1], aligned[2] / s[2]];
+  }
+
+  private _calibrateGyro(raw: [number, number, number]): [number, number, number] {
+    const dev = this.calibration?.getImu(
+      CalibSensorId.LSM6DS3_GYRO,
+      SensorLSM6DS3.GYRO_RANGE_CODE[this.gyroRange],
+    );
+    if (dev) return applyImuCalibration(raw, dev);
+    const aligned = this._applyAlignAndOffset(raw);
+    const s = this.gyroSensByRange[this.gyroRange];
+    return [aligned[0] / s[0], aligned[1] / s[1], aligned[2] / s[2]];
+  }
+
   override parsePayload(sensorPayloadBytes: Uint8Array): LSM6DS3Sample[] {
     let bytesPerSample = 6;
     if (this.gyroEnabled && this.accEnabled) bytesPerSample = 12;
@@ -116,14 +158,10 @@ export class SensorLSM6DS3 extends SensorBase {
       let gyroCal: [number, number, number] | null = null;
 
       if (accRaw) {
-        const aligned = this._applyAlignAndOffset(accRaw);
-        const s = this.accSensByRange[this.accRange];
-        accCal = [aligned[0] / s[0], aligned[1] / s[1], aligned[2] / s[2]];
+        accCal = this._calibrateAccel(accRaw);
       }
       if (gyroRaw) {
-        const aligned = this._applyAlignAndOffset(gyroRaw);
-        const s = this.gyroSensByRange[this.gyroRange];
-        gyroCal = [aligned[0] / s[0], aligned[1] / s[1], aligned[2] / s[2]];
+        gyroCal = this._calibrateGyro(gyroRaw);
       }
 
       out.push({
