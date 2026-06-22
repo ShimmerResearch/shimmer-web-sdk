@@ -18,7 +18,11 @@ import {
   NORDIC_DFU_BUTTONLESS_WITH_BONDS,
   NORDIC_DFU_OP_ENTER_BOOTLOADER,
 } from './constants.js';
-import { parseCalibrationBlob, SC_GLOBAL_HEADER_BYTES, type CalibrationSet } from './calibration.js';
+import {
+  parseCalibrationBlob,
+  SC_GLOBAL_HEADER_BYTES,
+  type CalibrationSet,
+} from './calibration.js';
 import {
   buildHeader,
   buildMessage,
