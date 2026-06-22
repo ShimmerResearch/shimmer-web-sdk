@@ -56,7 +56,11 @@ describe('getVerisenseCalibrationSensors (defaults catalog)', () => {
   const sensors = getVerisenseCalibrationSensors();
   it('covers the gen-2 calibration set with the expected alignment determinants', () => {
     const byId = Object.fromEntries(sensors.map((s) => [s.id, s]));
-    expect(Object.keys(byId).map(Number).sort((a, b) => a - b)).toEqual([37, 38, 39, 42]);
+    expect(
+      Object.keys(byId)
+        .map(Number)
+        .sort((a, b) => a - b),
+    ).toEqual([37, 38, 39, 42]);
     // accel/gyro are proper rotations; the LIS2MDL frame is left-handed.
     expect(det3(byId[CalibSensorId.LSM6DSV_ACCEL].align)).toBe(1);
     expect(det3(byId[CalibSensorId.LSM6DSV_GYRO].align)).toBe(1);
@@ -69,7 +73,11 @@ describe('getVerisenseCalibrationSensors (defaults catalog)', () => {
   it('1st-gen hardware returns the LIS2DW12 + LSM6DS3 set (transposed doc R)', () => {
     const g1 = getVerisenseCalibrationSensors(62, 1); // SR62 = 1st-gen
     const byId = Object.fromEntries(g1.map((s) => [s.id, s]));
-    expect(Object.keys(byId).map(Number).sort((a, b) => a - b)).toEqual([39, 40, 41]);
+    expect(
+      Object.keys(byId)
+        .map(Number)
+        .sort((a, b) => a - b),
+    ).toEqual([39, 40, 41]);
     // align = Rᵀ of the doc's R (Shimmer Java applies R⁻¹). All proper rotations.
     expect(byId[CalibSensorId.LIS2DW12_ACCEL].align).toEqual([0, 1, 0, 0, 0, 1, 1, 0, 0]);
     expect(byId[CalibSensorId.LSM6DS3_ACCEL].align).toEqual([0, -1, 0, 0, 0, -1, 1, 0, 0]);
