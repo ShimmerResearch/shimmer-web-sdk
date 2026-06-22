@@ -5,7 +5,9 @@ import {
   calibrationBlobCrc,
   applyImuCalibration,
   CalibSensorId,
+  CalibQuality,
   SC_GLOBAL_HEADER_BYTES,
+  SC_BLOCK_HEADER_BYTES,
   SC_DATA_LEN_IMU,
   type CalibrationSetInput,
   type ImuCalibration,
@@ -65,6 +67,7 @@ describe('Verisense calibration TLV codec', () => {
     expect(b0.imu!.bias).toEqual([0, 0, 0]);
     expect(b0.imu!.sens[0]).toBe(Math.fround(1671.665922915));
     expect(b0.imu!.align).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    expect(b0.quality).toBe(0); // unknown by default (no producer yet)
 
     // Block 1 — per-unit accel: signed bias + non-zero ts + axis-swap rotation.
     const b1 = set.blocks[1];
@@ -81,6 +84,23 @@ describe('Verisense calibration TLV codec', () => {
     expect(set.getImu(CalibSensorId.LSM6DSV_ACCEL, 3)!.bias).toEqual([-1.5, 2.25, -3.75]);
     expect(set.getImu(CalibSensorId.LSM6DSV_ACCEL, 0)!.sens[0]).toBe(Math.fround(1671.665922915));
     expect(set.getImu(CalibSensorId.LIS2DW12_ACCEL, 0)).toBeNull(); // not present
+  });
+
+  it('packs calibration quality into range-byte bits [7:6] without disturbing the index', () => {
+    const input = sampleInput();
+    input.blocks[1].range = 3;
+    input.blocks[1].quality = CalibQuality.GOOD; // 3
+    const blob = serializeCalibrationBlob(input);
+
+    // Wire byte = index (bits 5:0) | quality<<6 = 3 | (3<<6) = 0xC3.
+    const b1Off = SC_GLOBAL_HEADER_BYTES + (SC_BLOCK_HEADER_BYTES + SC_DATA_LEN_IMU);
+    expect(blob[b1Off + 2]).toBe(0x03 | (0x03 << 6));
+
+    const set = parseCalibrationBlob(blob);
+    expect(set.blocks[1].range).toBe(3); // index unaffected
+    expect(set.blocks[1].quality).toBe(CalibQuality.GOOD);
+    // Lookup still keys on the index, ignoring the quality bits.
+    expect(set.getImu(CalibSensorId.LSM6DSV_ACCEL, 3)!.bias).toEqual([-1.5, 2.25, -3.75]);
   });
 
   it('writes a spec-exact byte layout (offsets, totalLen, block headers)', () => {

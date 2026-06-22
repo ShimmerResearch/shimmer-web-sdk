@@ -172,9 +172,13 @@ export {
   calibrationBlobCrc,
   applyImuCalibration,
   CalibSensorId,
+  CalibQuality,
   SC_CALIB_FORMAT_VERSION,
   SC_GLOBAL_HEADER_BYTES,
   SC_DATA_LEN_IMU,
+  SC_CAL_RANGE_MASK,
+  SC_CAL_QUALITY_SHIFT,
+  SC_CAL_QUALITY_MASK,
 } from './devices/verisense/calibration.js';
 export type {
   CalibrationSet,

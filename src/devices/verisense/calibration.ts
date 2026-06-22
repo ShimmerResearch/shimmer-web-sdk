@@ -21,7 +21,7 @@
  *
  *   Per-sensor block (12-byte header + payload)
  *     0  u16  sensorId          (calibration-domain id, see {@link CalibSensorId})
- *     2  u8   range             (full-scale index; 0 for single-range sensors)
+ *     2  u8   range/quality     (bits[5:0] full-scale index; bits[7:6] calib quality)
  *     3  u8   dataLen
  *     4  u8[8] ts               (0 = default/seeded; RTC time = real per-unit cal)
  *    12  payload[dataLen]
@@ -40,6 +40,25 @@ export const SC_GLOBAL_HEADER_BYTES = 12;
 export const SC_BLOCK_HEADER_BYTES = 12;
 export const SC_TS_BYTES = 8;
 export const SC_DATA_LEN_IMU = 60;
+
+/**
+ * The per-block `range` byte packs the full-scale index in bits [5:0] and a 2-bit
+ * calibration-quality indicator in bits [7:6]. Lookups/comparisons must use only
+ * the index (`range & SC_CAL_RANGE_MASK`). Quality has no producer yet (always 0),
+ * so it is reserved without growing the blob or bumping the format version.
+ */
+export const SC_CAL_RANGE_MASK = 0x3f;
+export const SC_CAL_QUALITY_SHIFT = 6;
+export const SC_CAL_QUALITY_MASK = 0x03;
+
+/** Calibration-quality indicator (ST MotionAC / Android sensor-accuracy convention). */
+export const CalibQuality = {
+  UNKNOWN: 0,
+  POOR: 1,
+  OK: 2,
+  GOOD: 3,
+} as const;
+export type CalibQuality = (typeof CalibQuality)[keyof typeof CalibQuality];
 
 /**
  * Calibration-domain sensor IDs. Distinct from the data-stream sensor IDs
@@ -70,7 +89,10 @@ export interface ImuCalibration {
 
 export interface CalibrationBlock {
   sensorId: number;
+  /** Full-scale index (the low 6 bits of the wire `range` byte). */
   range: number;
+  /** Calibration quality, bits [7:6] of the wire `range` byte (0 = unknown today). */
+  quality: number;
   dataLen: number;
   /** 8-byte calibration timestamp; all-zero means default/seeded. */
   ts: Uint8Array;
@@ -143,7 +165,9 @@ export function parseCalibrationBlob(blob: Uint8Array): CalibrationSet {
       throw new Error(`parseCalibrationBlob: block ${i} header out of range`);
     }
     const sensorId = u16le_at(blob, off);
-    const range = blob[off + 2];
+    const rangeByte = blob[off + 2];
+    const range = rangeByte & SC_CAL_RANGE_MASK;
+    const quality = (rangeByte >> SC_CAL_QUALITY_SHIFT) & SC_CAL_QUALITY_MASK;
     const dataLen = blob[off + 3];
     const ts = blob.slice(off + 4, off + 4 + SC_TS_BYTES);
     const payloadStart = off + SC_BLOCK_HEADER_BYTES;
@@ -152,7 +176,7 @@ export function parseCalibrationBlob(blob: Uint8Array): CalibrationSet {
     }
     const payload = blob.slice(payloadStart, payloadStart + dataLen);
     const isDefault = ts.every((b) => b === 0);
-    const block: CalibrationBlock = { sensorId, range, dataLen, ts, isDefault, payload };
+    const block: CalibrationBlock = { sensorId, range, quality, dataLen, ts, isDefault, payload };
     if (dataLen === SC_DATA_LEN_IMU) {
       block.imu = parseImuPayload(payload);
     }
@@ -181,7 +205,10 @@ export function parseCalibrationBlob(blob: Uint8Array): CalibrationSet {
 
 export interface CalibrationBlockInput {
   sensorId: number;
+  /** Full-scale index (only the low 6 bits are used). */
   range: number;
+  /** Calibration quality (0-3); defaults to 0 (unknown). Packed into range byte bits [7:6]. */
+  quality?: number;
   /** 8-byte timestamp; defaults to all-zero (a "default/seeded" marker). */
   ts?: Uint8Array | null;
   imu?: ImuCalibration;
@@ -237,7 +264,9 @@ export function serializeCalibrationBlob(input: CalibrationSetInput): Uint8Array
   input.blocks.forEach((b, i) => {
     const payload = payloads[i];
     dv.setUint16(off, b.sensorId & 0xffff, true);
-    out[off + 2] = b.range & 0xff;
+    out[off + 2] =
+      (b.range & SC_CAL_RANGE_MASK) |
+      (((b.quality ?? 0) & SC_CAL_QUALITY_MASK) << SC_CAL_QUALITY_SHIFT);
     out[off + 3] = payload.length & 0xff;
     if (b.ts) out.set(b.ts.subarray(0, SC_TS_BYTES), off + 4); // else leave zero (default)
     out.set(payload, off + SC_BLOCK_HEADER_BYTES);
