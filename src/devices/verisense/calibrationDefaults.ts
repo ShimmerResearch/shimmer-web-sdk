@@ -9,10 +9,7 @@
  */
 
 import { CalibSensorId, SC_TS_BYTES, type CalibrationSetInput } from './calibration.js';
-import {
-  compareVerisenseFirmwareVersion,
-  type VerisenseFirmwareVersion,
-} from './protocolUtils.js';
+import { compareVerisenseFirmwareVersion, type VerisenseFirmwareVersion } from './protocolUtils.js';
 import {
   isVerisenseSecondGenerationHardware,
   type VerisenseHardwareSensorSupport,
