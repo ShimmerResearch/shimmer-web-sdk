@@ -1648,18 +1648,16 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       if (isFinal) {
         // Final chunk completes the page; the device flashes it (~0.7 s) and
         // replies ACK_NEXT_STAGE (or NACK on failure -> throws -> page retry).
-        await this._requestByCommand(
-          ASM_COMMAND.WRITE,
-          ASM_PROPERTY.DEBUG_COMMAND,
-          payload,
-          6000,
-        );
+        await this._requestByCommand(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, payload, 6000);
       } else {
         // Mid-page chunk: reliable, in-order delivery via write-with-response,
         // with no application-level reply from the device.
-        await this.writeBytes(buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, payload), {
-          withResponse: true,
-        });
+        await this.writeBytes(
+          buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, payload),
+          {
+            withResponse: true,
+          },
+        );
       }
     }
   }
