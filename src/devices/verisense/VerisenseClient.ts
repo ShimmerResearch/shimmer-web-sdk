@@ -5,6 +5,8 @@ import {
   ASM_PROPERTY,
   BLE_LINK_MIN_FW,
   DEBUG_COMMAND_ID,
+  HUB_FW_UPLOAD_STAGE,
+  MSBL,
   STREAM_MODE,
   type AsmCommand,
   type AsmProperty,
@@ -1540,6 +1542,140 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       timeoutMs,
     );
     return { payload: rsp.payload };
+  }
+
+  /**
+   * Stream a MAX32674C algorithm-hub firmware image (.msbl) to the device and
+   * flash it into the hub via the Maxim bootloader. This is a one-time factory
+   * operation: it blocks the device for ~1-2 minutes while the hub flash is
+   * erased and each page is written. Only SR68 Pulse+ hardware (the only board
+   * carrying the hub) accepts it — other hardware NACKs the BEGIN stage.
+   *
+   * @param msbl       raw .msbl file bytes
+   * @param onProgress optional progress callback (pagesDone, totalPages)
+   * @returns the hub application firmware version string read back after flashing
+   */
+  async uploadHubFirmware(
+    msbl: Uint8Array | number[],
+    onProgress?: (pagesDone: number, totalPages: number) => void,
+  ): Promise<string> {
+    const img = msbl instanceof Uint8Array ? msbl : new Uint8Array(msbl);
+    if (img.length < MSBL.HEADER_SIZE) {
+      throw new Error('uploadHubFirmware: file is too small to be a valid .msbl');
+    }
+
+    const numPages = img[MSBL.OFF_NUMPAGES] | (img[MSBL.OFF_NUMPAGES + 1] << 8);
+    const expectedLen = MSBL.HEADER_SIZE + numPages * MSBL.PAGE_FILE_BYTES;
+    if (numPages === 0 || img.length < expectedLen) {
+      throw new Error(
+        `uploadHubFirmware: invalid .msbl (pages=${numPages}, length=${img.length}, expected>=${expectedLen})`,
+      );
+    }
+
+    // BEGIN: device enters bootloader, programs IV/auth/page-count, erases flash.
+    try {
+      await this._requestByCommand(
+        ASM_COMMAND.WRITE,
+        ASM_PROPERTY.DEBUG_COMMAND,
+        this._buildHubUploadPayload(HUB_FW_UPLOAD_STAGE.BEGIN, img.subarray(0, MSBL.HEADER_SIZE)),
+        15000,
+      );
+    } catch (e) {
+      throw new Error(`Hub FW upload BEGIN failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Pages: stream each page in order, awaiting ACK_NEXT_STAGE (page flashed).
+    const MAX_PAGE_RETRIES = 5;
+    for (let page = 0; page < numPages; page++) {
+      const base = MSBL.HEADER_SIZE + page * MSBL.PAGE_FILE_BYTES;
+      const pageBytes = img.subarray(base, base + MSBL.PAGE_FILE_BYTES);
+
+      let attempt = 0;
+      for (;;) {
+        try {
+          await this._sendHubPage(page, pageBytes);
+          break;
+        } catch (e) {
+          if (++attempt >= MAX_PAGE_RETRIES) {
+            await this._abortHubUpload();
+            throw new Error(
+              `Hub FW upload failed at page ${page + 1}/${numPages} after ${attempt} attempts: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            );
+          }
+        }
+      }
+      onProgress?.(page + 1, numPages);
+    }
+
+    // END: device resets the hub to application mode and returns its FW version.
+    const endRsp = await this._requestByCommand(
+      ASM_COMMAND.WRITE,
+      ASM_PROPERTY.DEBUG_COMMAND,
+      this._buildHubUploadPayload(HUB_FW_UPLOAD_STAGE.END),
+      8000,
+    );
+    return new TextDecoder().decode(endRsp.payload).replace(/\0+$/, '').trim();
+  }
+
+  /** Build a debug payload `[HUB_FW_UPLOAD, stage, ...stageArgs]`. */
+  private _buildHubUploadPayload(stage: number, stageArgs: Uint8Array | number[] = []): Uint8Array {
+    const a = stageArgs instanceof Uint8Array ? stageArgs : new Uint8Array(stageArgs);
+    const staged = new Uint8Array(1 + a.length);
+    staged[0] = stage & 0xff;
+    staged.set(a, 1);
+    return this._buildDebugPayload(DEBUG_COMMAND_ID.HUB_FW_UPLOAD, staged);
+  }
+
+  /** Send one 8208-byte page as in-order <=64-byte chunks; await ACK_NEXT_STAGE. */
+  private async _sendHubPage(page: number, pageBytes: Uint8Array): Promise<void> {
+    const CHUNK = 64; // keep each packet within the device's ~96-byte RX buffer
+    const total = pageBytes.length;
+
+    for (let off = 0; off < total; off += CHUNK) {
+      const end = Math.min(off + CHUNK, total);
+      const isFinal = end >= total;
+
+      const args = new Uint8Array(4 + (end - off));
+      args[0] = page & 0xff;
+      args[1] = (page >> 8) & 0xff;
+      args[2] = off & 0xff;
+      args[3] = (off >> 8) & 0xff;
+      args.set(pageBytes.subarray(off, end), 4);
+      const payload = this._buildHubUploadPayload(HUB_FW_UPLOAD_STAGE.PAGE_CHUNK, args);
+
+      if (isFinal) {
+        // Final chunk completes the page; the device flashes it (~0.7 s) and
+        // replies ACK_NEXT_STAGE (or NACK on failure -> throws -> page retry).
+        await this._requestByCommand(
+          ASM_COMMAND.WRITE,
+          ASM_PROPERTY.DEBUG_COMMAND,
+          payload,
+          6000,
+        );
+      } else {
+        // Mid-page chunk: reliable, in-order delivery via write-with-response,
+        // with no application-level reply from the device.
+        await this.writeBytes(buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEBUG_COMMAND, payload), {
+          withResponse: true,
+        });
+      }
+    }
+  }
+
+  /** Best-effort abort: tell the device to reset the hub back to application mode. */
+  private async _abortHubUpload(): Promise<void> {
+    try {
+      await this._requestByCommand(
+        ASM_COMMAND.WRITE,
+        ASM_PROPERTY.DEBUG_COMMAND,
+        this._buildHubUploadPayload(HUB_FW_UPLOAD_STAGE.ABORT),
+        5000,
+      );
+    } catch {
+      /* best effort */
+    }
   }
 
   async readFlashLookupTable(index = 0, timeoutMs = 12000): Promise<{ payload: Uint8Array }> {

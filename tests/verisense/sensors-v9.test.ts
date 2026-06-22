@@ -178,12 +178,39 @@ describe('SensorPPG hub mode (2nd-gen raw MAX86176 PPG, id 4)', () => {
 });
 
 describe('v9 operational config schema', () => {
-  it('blank config is 86 bytes, header 0x5A, version 9', () => {
+  it('blank config is 92 bytes, header 0x5A, version 9', () => {
     const op = createBlankVerisenseOperationalConfig();
     expect(op.length).toBe(VERISENSE_OP_CONFIG_BYTE_SIZE);
-    expect(VERISENSE_OP_CONFIG_BYTE_SIZE).toBe(86);
+    expect(VERISENSE_OP_CONFIG_BYTE_SIZE).toBe(92);
     expect(op[0]).toBe(0x5a);
     expect(op[OP_IDX.OP_CONFIG_VERSION]).toBe(OP_CONFIG_VERSION_V9);
+  });
+
+  it('seeds the MAX32674 subject parameters with Maxim defaults', () => {
+    const op = createBlankVerisenseOperationalConfig();
+    // height 175 cm and weight 78 kg are u16 little-endian
+    expect(op[OP_IDX.PERSON_HEIGHT_CM] | (op[OP_IDX.PERSON_HEIGHT_CM + 1] << 8)).toBe(175);
+    expect(op[OP_IDX.PERSON_WEIGHT_KG] | (op[OP_IDX.PERSON_WEIGHT_KG + 1] << 8)).toBe(78);
+    expect(op[OP_IDX.PERSON_AGE]).toBe(30);
+    expect(op[OP_IDX.PERSON_GENDER]).toBe(0);
+  });
+
+  it('round-trips the subject parameter fields', () => {
+    const op = createBlankVerisenseOperationalConfig();
+    const cases: Array<[string, number]> = [
+      ['PERSON_HEIGHT_CM', 180],
+      ['PERSON_WEIGHT_KG', 85],
+      ['PERSON_AGE', 42],
+      ['PERSON_GENDER', 1],
+    ];
+    for (const [key, value] of cases) {
+      const field = VERISENSE_OPERATIONAL_FIELD_SCHEMA.find(
+        (f) => f.key === key,
+      ) as VerisenseOperationalField;
+      expect(field).toBeDefined();
+      writeVerisenseOperationalFieldValue(op, field, value);
+      expect(readVerisenseOperationalFieldValue(op, field)).toBe(value);
+    }
   });
 
   it('exposes the new sensor enable fields', () => {

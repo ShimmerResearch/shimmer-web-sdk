@@ -111,9 +111,31 @@ export const DEBUG_COMMAND_ID = Object.freeze({
   DELETE_ALL_BONDS: 0x15,
   BLE_LINK_PARAMS_READ: 0x16,
   BLE_LINK_OPTIMIZE: 0x17,
+  /** Streamed MAX32674C algorithm-hub firmware (.msbl) upload (factory). The
+   * byte after this id is a HUB_FW_UPLOAD_STAGE sub-stage. */
+  HUB_FW_UPLOAD: 0x18,
 } as const);
 
 export type DebugCommandId = (typeof DEBUG_COMMAND_ID)[keyof typeof DEBUG_COMMAND_ID];
+
+/** Sub-stages for the streamed MAX32674C hub firmware upload, carried in the
+ * payload byte immediately after DEBUG_COMMAND_ID.HUB_FW_UPLOAD. */
+export const HUB_FW_UPLOAD_STAGE = Object.freeze({
+  BEGIN: 0x00,
+  PAGE_CHUNK: 0x01,
+  END: 0x02,
+  ABORT: 0x03,
+} as const);
+
+/** MAX32674C .msbl image geometry (mirrors firmware flashUpdater.h). A page on
+ * the wire is PAGE_PAYLOAD + PAGE_CRC bytes; HEADER_SIZE bytes precede page 0. */
+export const MSBL = Object.freeze({
+  HEADER_SIZE: 0x4c,
+  OFF_NUMPAGES: 0x44,
+  PAGE_PAYLOAD: 8192,
+  PAGE_CRC: 16,
+  PAGE_FILE_BYTES: 8208,
+} as const);
 
 // ---------------------------------------------------------------------------
 // Operational config byte offsets
@@ -201,6 +223,11 @@ export const OP_IDX = Object.freeze({
   LED_AUTO_BRIGHTNESS_CFG: 82,
   LED_MAX_BRIGHTNESS: 83,
   LED_LUX_THRESHOLD: 84,
+  // MAX32674 algorithm-suite subject parameters (bytes 86-91)
+  PERSON_HEIGHT_CM: 86, // u16 LE, cm
+  PERSON_WEIGHT_KG: 88, // u16 LE, kg
+  PERSON_AGE: 90, // u8, years
+  PERSON_GENDER: 91, // u8, 0=Male, 1=Female
 } as const);
 
 /** Operational config layout version stored at OP_IDX.OP_CONFIG_VERSION (byte 9).

@@ -1527,9 +1527,49 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     min: 0,
     max: 65535,
   },
+  {
+    key: 'PERSON_HEIGHT_CM',
+    label: 'Height',
+    desc: 'Subject height for the MAX32674 algorithm suite (cm)',
+    kind: 'u16',
+    index: OP_IDX.PERSON_HEIGHT_CM,
+    min: 50,
+    max: 250,
+  },
+  {
+    key: 'PERSON_WEIGHT_KG',
+    label: 'Weight',
+    desc: 'Subject weight for the MAX32674 algorithm suite (kg)',
+    kind: 'u16',
+    index: OP_IDX.PERSON_WEIGHT_KG,
+    min: 10,
+    max: 300,
+  },
+  {
+    key: 'PERSON_AGE',
+    label: 'Age',
+    desc: 'Subject age for the MAX32674 algorithm suite (years)',
+    kind: 'u8',
+    index: OP_IDX.PERSON_AGE,
+    min: 0,
+    max: 120,
+  },
+  {
+    key: 'PERSON_GENDER',
+    label: 'Gender',
+    desc: 'Subject gender for the MAX32674 algorithm suite',
+    kind: 'u8',
+    index: OP_IDX.PERSON_GENDER,
+    min: 0,
+    max: 1,
+    options: [
+      [0, 'Male'],
+      [1, 'Female'],
+    ],
+  },
 ];
 
-export const VERISENSE_OP_CONFIG_BYTE_SIZE = 86;
+export const VERISENSE_OP_CONFIG_BYTE_SIZE = 92;
 export type VerisenseOperationalField = VerisenseOperationalFieldDefinition;
 
 export function createBlankVerisenseOperationalConfig(
@@ -1540,6 +1580,15 @@ export function createBlankVerisenseOperationalConfig(
   // Stamp the layout version so v9-sized configs are recognised as second-gen.
   if (byteSize >= VERISENSE_OP_CONFIG_BYTE_SIZE) {
     blank[OP_IDX.OP_CONFIG_VERSION] = OP_CONFIG_VERSION_V9;
+    // Seed the MAX32674 subject parameters with the Maxim algorithm defaults
+    // (height 175 cm, weight 78 kg, age 30 yr, gender Male) so the UI shows
+    // sane values rather than blanks. u16 fields are little-endian.
+    blank[OP_IDX.PERSON_HEIGHT_CM] = 175 & 0xff;
+    blank[OP_IDX.PERSON_HEIGHT_CM + 1] = (175 >> 8) & 0xff;
+    blank[OP_IDX.PERSON_WEIGHT_KG] = 78 & 0xff;
+    blank[OP_IDX.PERSON_WEIGHT_KG + 1] = (78 >> 8) & 0xff;
+    blank[OP_IDX.PERSON_AGE] = 30;
+    blank[OP_IDX.PERSON_GENDER] = 0;
   }
   return blank;
 }
@@ -1837,6 +1886,12 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       ],
     },
     {
+      id: 'person',
+      title: 'Subject / Person Parameters',
+      openByDefault: false,
+      keys: ['PERSON_AGE', 'PERSON_HEIGHT_CM', 'PERSON_WEIGHT_KG', 'PERSON_GENDER'],
+    },
+    {
       id: 'led',
       title: 'LED Auto-Brightness',
       openByDefault: false,
@@ -1863,6 +1918,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUP_SENSOR: Readonly<
   light: 'ambientLight',
   skin_temp: 'skinTemperature',
   algo: 'algorithmHub',
+  person: 'algorithmHub',
   led: 'ledAutoBrightness',
 };
 
