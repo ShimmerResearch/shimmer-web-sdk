@@ -917,11 +917,27 @@ export function parseStatusPayload(
     memoryCapacityKb == null ? null : Math.max(0, memoryCapacityKb - memoryFreeKb);
 
   // Bank breakdown: FULL=syncable data, 2DEL=partially-deleted, BAD=unusable flash.
-  // Present in payloads >= 57 bytes (tick-capable extended format).
-  const hasBankData = response.length >= 57;
-  const memoryFullBanksKb = hasBankData ? u32le_at(response, 45) : null;
-  const memoryTwoDelBanksKb = hasBankData ? u32le_at(response, 49) : null;
-  const memoryBadBanksKb = hasBankData ? u32le_at(response, 53) : null;
+  // Ported from ASM_Device.parse_status. Present in payloads >= 56 bytes. In the
+  // extended (fw v1.02.102+, payload >= 65 bytes) format the FULL and 2DEL totals
+  // are split: 3 low bytes at 47-49 / 50-52 plus a high byte appended at offset
+  // 58 / 59 respectively (mirroring the free-memory split to byte 57).
+  const hasBankData = response.length >= 56;
+  let memoryFullBanksKb: number | null = null;
+  let memoryTwoDelBanksKb: number | null = null;
+  let memoryBadBanksKb: number | null = null;
+  if (hasBankData) {
+    if (hasExtendedCapacity) {
+      memoryFullBanksKb =
+        (response[47] | (response[48] << 8) | (response[49] << 16) | (response[58] << 24)) >>> 0;
+      memoryTwoDelBanksKb =
+        (response[50] | (response[51] << 8) | (response[52] << 16) | (response[59] << 24)) >>> 0;
+      memoryBadBanksKb = u32le_at(response, 53); // bytes 53-56
+    } else {
+      memoryFullBanksKb = (response[47] | (response[48] << 8) | (response[49] << 16)) >>> 0;
+      memoryTwoDelBanksKb = (response[50] | (response[51] << 8) | (response[52] << 16)) >>> 0;
+      memoryBadBanksKb = (response[53] | (response[54] << 8) | (response[55] << 16)) >>> 0;
+    }
+  }
 
   const batteryFallCounter = response.length >= 26 ? u16le_at(response, 24) : null;
 
