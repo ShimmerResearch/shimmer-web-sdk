@@ -674,6 +674,12 @@ const LOG_EVENT_NAMES: Record<number, string> = {
   50: 'LTC4123_RECOVERY_ATTEMPT',
   51: 'LTC4123_RECOVERY_GAVE_UP',
   52: 'LTC4123_CHRG_COMPLETE_OVERRIDDEN_BAD_BATT',
+  // DEV-790 USB enumeration debug events
+  53: 'USB_POWER_READY_EVT',
+  54: 'USB_USBD_ENABLE_CALLED',
+  55: 'USB_USBD_START_CALLED',
+  56: 'USB_COM_PORT_DISABLED_ON_DETECT',
+  57: 'USB_USBD_STOPPED_EVT',
 };
 
 const LOOKUP_STATUS_NAMES: Record<number, VerisenseLookupTableEntry['statusName']> = {
