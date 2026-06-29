@@ -1685,6 +1685,37 @@ export function setVerisenseOperationalBitRange(
   op[index] = (op[index] & ~(mask << shift)) | ((value & mask) << shift);
 }
 
+/** GEN_CFG_0 bit masks for the two host comms channels (see byte map / firmware
+ * ASM_definitions.h). */
+const GEN_CFG_0_BLUETOOTH_EN_MASK = 1 << 4;
+const GEN_CFG_0_USB_EN_MASK = 1 << 3;
+
+/**
+ * Enforce the USB/Bluetooth comms-channel interlock on an operational-config
+ * buffer.
+ *
+ * A Verisense must never be configured with BOTH Bluetooth and USB disabled, or
+ * it becomes unreachable for reconfiguration (the radio is the only wireless way
+ * back in, and disabling USB removes the wired fallback). If a config has both
+ * `BLUETOOTH_EN` and `USB_EN` cleared, this forces BOTH back on.
+ *
+ * This mirrors the firmware safeguard (`enforceCommsChannelInterlock` in
+ * `ASM_Production/main.c`, applied on config write and parse). Enforcing it here
+ * in the SDK means any consuming application is protected — a device can't be
+ * stranded by a third-party tool writing 0/0.
+ *
+ * Mutates `op` in place. Returns `true` if a correction was applied.
+ */
+export function enforceVerisenseCommsChannelInterlock(op: Uint8Array): boolean {
+  if (!op || op.length <= OP_IDX.GEN_CFG_0) return false;
+  const genCfg0 = op[OP_IDX.GEN_CFG_0];
+  const bothDisabled =
+    (genCfg0 & GEN_CFG_0_BLUETOOTH_EN_MASK) === 0 && (genCfg0 & GEN_CFG_0_USB_EN_MASK) === 0;
+  if (!bothDisabled) return false;
+  op[OP_IDX.GEN_CFG_0] = genCfg0 | GEN_CFG_0_BLUETOOTH_EN_MASK | GEN_CFG_0_USB_EN_MASK;
+  return true;
+}
+
 export interface VerisenseOperationalSensorEnableField {
   readonly key: string;
   readonly index: number;

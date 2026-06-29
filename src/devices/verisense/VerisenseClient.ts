@@ -51,6 +51,7 @@ import {
   formatVerisenseFirmwareVersion,
   normalizeOperationalConfig,
   parseProductionConfigPayload,
+  enforceVerisenseCommsChannelInterlock,
   VERISENSE_OP_CONFIG_BYTE_SIZE,
   type ProductionConfig,
   type VerisenseBleLinkDebugPayload,
@@ -1080,7 +1081,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!payload || payload.length < 50) {
       throw new Error('writeOperationalConfig: payload length must be at least 50 bytes');
     }
-    await this.writeProperty(ASM_PROPERTY.OPERATIONAL_CONFIGURATION, payload);
+    // Safety interlock (mirrors firmware): never write a config with both
+    // Bluetooth and USB disabled, or the device becomes unreachable for
+    // reconfiguration. Apply to a copy so the caller's buffer is left untouched
+    // (normalizeBytePayload returns the input reference for a Uint8Array).
+    const corrected = new Uint8Array(payload);
+    enforceVerisenseCommsChannelInterlock(corrected);
+    await this.writeProperty(ASM_PROPERTY.OPERATIONAL_CONFIGURATION, corrected);
   }
 
   async writeTime(rtc7: Uint8Array | number[]): Promise<void> {

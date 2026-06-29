@@ -136,6 +136,7 @@ export {
   readVerisenseOperationalFieldValue,
   writeVerisenseOperationalFieldValue,
   setVerisenseOperationalBitRange,
+  enforceVerisenseCommsChannelInterlock,
   VERISENSE_SENSOR_ENABLE_FIELDS,
   VERISENSE_OPERATIONAL_FIELD_GROUPS,
   VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID,
