@@ -56,19 +56,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
       [1, 'Enabled'],
     ],
   },
-  {
-    key: 'PRIORITISE_LONG_TERM_FLASH',
-    label: 'Prioritise Long-Term Flash',
-    desc: 'Prioritise long-term flash behavior',
-    kind: 'bit',
-    index: OP_IDX.GEN_CFG_0,
-    shift: 2,
-    width: 1,
-    options: [
-      [0, 'Disabled'],
-      [1, 'Enabled'],
-    ],
-  },
+  // GEN_CFG_0 bit 2 is reserved (was PRIORITISE_LONG_TERM_FLASH, removed in
+  // DEV-806): never used and never read by the firmware. The bit is left unused
+  // in the byte layout (free to repurpose); older configs that set it are simply
+  // ignored.
   {
     key: 'DEVICE_EN',
     label: 'Device',
@@ -1758,7 +1749,6 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       keys: [
         'BLUETOOTH_EN',
         'USB_EN',
-        'PRIORITISE_LONG_TERM_FLASH',
         'DEVICE_EN',
         'RECORDING_EN',
         'DATA_COMPRESSION_MODE',
