@@ -7,12 +7,7 @@ import {
 } from './hardwareModels.js';
 
 export type VerisenseOperationalFieldKind =
-  | 'bit'
-  | 'u8'
-  | 'u16'
-  | 'u32'
-  | 'inactiveResume'
-  | 'inactiveMinutes';
+  'bit' | 'u8' | 'u16' | 'u32' | 'inactiveResume' | 'inactiveMinutes';
 
 export type VerisenseOperationalFieldOption = readonly [number, string];
 
