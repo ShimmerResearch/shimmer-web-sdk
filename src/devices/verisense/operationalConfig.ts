@@ -136,7 +136,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'PENDING_EVENTS_SCHEDULER_DISABLED',
     label: 'Pending Events Scheduler',
-    desc: '1 = disabled',
+    desc: 'Enable/disable pending events scheduler',
     kind: 'bit',
     index: OP_IDX.GEN_CFG_2,
     shift: 4,
@@ -688,7 +688,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LSM6DSV_ODR_XL',
     label: 'LSM6DSV Accel ODR',
-    desc: 'Accel ODR (LSM6DSV ODR_XL datasheet register value, byte 18 bits 3:0)',
+    desc: 'Accel ODR (LSM6DSV ODR_XL datasheet register value)',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_0,
     shift: 0,
@@ -712,7 +712,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LSM6DSV_FS_XL',
     label: 'LSM6DSV Accel Range',
-    desc: 'Second-gen accel range code (byte 18 bits 5:4)',
+    desc: 'Second-gen accel range code',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_0,
     shift: 4,
@@ -727,7 +727,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LSM6DSV_ODR_G',
     label: 'LSM6DSV Gyro ODR',
-    desc: 'Gyro ODR (LSM6DSV ODR_G datasheet register value, byte 19 bits 3:0)',
+    desc: 'Gyro ODR (LSM6DSV ODR_G datasheet register value)',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_1,
     shift: 0,
@@ -751,7 +751,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LSM6DSV_FS_G',
     label: 'LSM6DSV Gyro Range',
-    desc: 'Gyro range (LSM6DSV FS_G datasheet register value, byte 19 bits 7:4)',
+    desc: 'Gyro range (LSM6DSV FS_G datasheet register value)',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_1,
     shift: 4,
@@ -767,7 +767,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LIS2MDL_ODR',
     label: 'Mag Output Rate',
-    desc: 'Magnetometer output (sensor-hub) rate. Firmware derives the LIS2MDL ODR to keep a fresh sample available (byte 20 bits 1:0). Bounded by the accel/gyro ODR (the sensor-hub trigger).',
+    desc: 'Magnetometer output (sensor-hub) rate. Firmware derives the LIS2MDL ODR to keep a fresh sample available. Bounded by the accel/gyro ODR (the sensor-hub trigger).',
     kind: 'bit',
     index: OP_IDX.LSM6DSV_CFG_2,
     shift: 0,
@@ -800,9 +800,18 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     max: 4294967295,
   },
   {
+    key: 'INACTIVE_TIMEOUT_MINUTES',
+    label: 'Inactive Timeout (minutes)',
+    desc: 'Minutes of no activity before the device stops recording and sleeps. 0 disables inactivity detection.',
+    kind: 'inactiveMinutes',
+    index: OP_IDX.INACTIVE_TIMEOUT,
+    min: 0,
+    max: 63,
+  },
+  {
     key: 'RESUME_REC_ON_ACTIVITY',
     label: 'Resume Rec On Activity',
-    desc: 'INACTIVE_TIMEOUT bit 6',
+    desc: 'Automatically resume recording when activity is detected after an inactivity sleep. Only has an effect when Logging is enabled and the inactive timeout is above 0.',
     kind: 'inactiveResume',
     index: OP_IDX.INACTIVE_TIMEOUT,
     options: [
@@ -811,18 +820,9 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     ],
   },
   {
-    key: 'INACTIVE_TIMEOUT_MINUTES',
-    label: 'Inactive Timeout (min)',
-    desc: 'INACTIVE_TIMEOUT bits [5:0]',
-    kind: 'inactiveMinutes',
-    index: OP_IDX.INACTIVE_TIMEOUT,
-    min: 0,
-    max: 63,
-  },
-  {
     key: 'BLE_CONNECTION_TRIES_PER_DAY',
-    label: 'BLE Retry Count',
-    desc: 'BLE connection tries per day',
+    label: 'Connection Attempts per Wake',
+    desc: 'Number of connection attempts the device makes each time a sync window opens (applies to all schedules).',
     kind: 'u8',
     index: OP_IDX.BLE_RETRY_COUNT,
     min: 0,
@@ -853,26 +853,26 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'BLE_DATA_TRANS_WKUP_INT_HOURS',
-    label: 'BLE Data Wakeup Interval (h)',
-    desc: 'Data transfer wake interval',
+    label: 'Data Transfer Wake Interval (hrs)',
+    desc: 'How often the data-transfer sync runs: 0 = off, 24 = once daily at the sync time, 1–23 = every N hours.',
     kind: 'u8',
     index: OP_IDX.BLE_DATA_TRANS_WKUP_INT_HRS,
     min: 0,
-    max: 255,
+    max: 24,
   },
   {
     key: 'BLE_DATA_TRANS_WKUP_TIME',
-    label: 'BLE Data Wakeup Time',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Data Transfer Sync Time',
+    desc: 'Time of day for the data-transfer sync (minutes since midnight, 0–1439).',
     kind: 'u16',
     index: OP_IDX.BLE_DATA_TRANS_WKUP_TIME,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
   {
     key: 'BLE_DATA_TRANS_WKUP_DUR',
-    label: 'BLE Data Wakeup Duration',
-    desc: 'Duration in units used by firmware',
+    label: 'Data Transfer Active Duration (minutes)',
+    desc: 'Minutes Bluetooth stays active during the data-transfer sync window.',
     kind: 'u8',
     index: OP_IDX.BLE_DATA_TRANS_WKUP_DUR,
     min: 0,
@@ -880,35 +880,35 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'BLE_DATA_TRANS_RETRY_INT',
-    label: 'BLE Data Retry Interval',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Data Transfer Retry Interval (minutes)',
+    desc: 'Minutes between connection attempts within the data-transfer sync window.',
     kind: 'u16',
     index: OP_IDX.BLE_DATA_TRANS_RETRY_INT,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
   {
     key: 'BLE_STATUS_WKUP_INT_HOURS',
-    label: 'BLE Status Wakeup Interval (h)',
-    desc: 'Status wake interval',
+    label: 'Status Wake Interval (hrs)',
+    desc: 'How often the status sync runs: 0 = off, 24 = once daily at the sync time, 1–23 = every N hours.',
     kind: 'u8',
     index: OP_IDX.BLE_STATUS_WKUP_INT_HRS,
     min: 0,
-    max: 255,
+    max: 24,
   },
   {
     key: 'BLE_STATUS_WKUP_TIME',
-    label: 'BLE Status Wakeup Time',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Status Sync Time',
+    desc: 'Time of day for the status sync (minutes since midnight, 0–1439).',
     kind: 'u16',
     index: OP_IDX.BLE_STATUS_WKUP_TIME,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
   {
     key: 'BLE_STATUS_WKUP_DUR',
-    label: 'BLE Status Wakeup Duration',
-    desc: 'Duration in units used by firmware',
+    label: 'Status Active Duration (minutes)',
+    desc: 'Minutes Bluetooth stays active during the status sync window.',
     kind: 'u8',
     index: OP_IDX.BLE_STATUS_WKUP_DUR,
     min: 0,
@@ -916,35 +916,35 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'BLE_STATUS_RETRY_INT',
-    label: 'BLE Status Retry Interval',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Status Retry Interval (minutes)',
+    desc: 'Minutes between connection attempts within the status sync window.',
     kind: 'u16',
     index: OP_IDX.BLE_STATUS_RETRY_INT,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
   {
     key: 'BLE_RTC_SYNC_WKUP_INT_HOURS',
-    label: 'BLE RTC Sync Wakeup Interval (h)',
-    desc: 'RTC sync wake interval',
+    label: 'Time Sync Wake Interval (hrs)',
+    desc: 'How often the time (RTC) sync runs: 0 = off, 24 = once daily at the sync time, 1–23 = every N hours.',
     kind: 'u8',
     index: OP_IDX.BLE_RTC_SYNC_WKUP_INT_HRS,
     min: 0,
-    max: 255,
+    max: 24,
   },
   {
     key: 'BLE_RTC_SYNC_WKUP_TIME',
-    label: 'BLE RTC Sync Wakeup Time',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Time Sync Time',
+    desc: 'Time of day for the time (RTC) sync (minutes since midnight, 0–1439).',
     kind: 'u16',
     index: OP_IDX.BLE_RTC_SYNC_WKUP_TIME,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
   {
     key: 'BLE_RTC_SYNC_WKUP_DUR',
-    label: 'BLE RTC Sync Wakeup Duration',
-    desc: 'Duration in units used by firmware',
+    label: 'Time Sync Active Duration (minutes)',
+    desc: 'Minutes Bluetooth stays active during the time (RTC) sync window.',
     kind: 'u8',
     index: OP_IDX.BLE_RTC_SYNC_WKUP_DUR,
     min: 0,
@@ -952,12 +952,12 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'BLE_RTC_SYNC_RETRY_INT',
-    label: 'BLE RTC Sync Retry Interval',
-    desc: 'LSB/MSB 16-bit value',
+    label: 'Time Sync Retry Interval (minutes)',
+    desc: 'Minutes between connection attempts within the time (RTC) sync window.',
     kind: 'u16',
     index: OP_IDX.BLE_RTC_SYNC_RETRY_INT,
     min: 0,
-    max: 65535,
+    max: 1439,
   },
 
   // ADC/PPG
@@ -1038,36 +1038,40 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'GSR_RANGE_SETTING',
     label: 'GSR Range',
-    desc: '0:40k, 1:287k, 2:1M, 3:3.3M, 4:Auto',
+    desc: 'Selectable GSR range setting',
     kind: 'bit',
     index: OP_IDX.ADC_CHANNEL_SETTINGS_1,
     shift: 0,
     width: 3,
     options: [
-      [0, 'Range 0 (40k)'],
-      [1, 'Range 1 (287k)'],
-      [2, 'Range 2 (1M)'],
-      [3, 'Range 3 (3.3M)'],
-      [4, 'Auto'],
+      [0, 'Range 0 (8k-63k or 125uS-15.87uS)'],
+      [1, 'Range 1 (63k-220k or 15.87uS-4.5uS)'],
+      [2, 'Range 2 (220k-680k or 4.5uS-1.47uS)'],
+      [3, 'Range 3 (680k-4.7M or 1.47uS-0.21uS)'],
+      [4, 'Auto-Range'],
     ],
   },
   {
-    key: 'ADAPTIVE_SCHEDULER_INTERVAL',
-    label: 'Adaptive Scheduler Interval',
-    desc: '16-bit adaptive scheduler interval',
-    kind: 'u16',
-    index: OP_IDX.ADAPTIVE_SCHEDULER_INT,
-    min: 0,
-    max: 65535,
-  },
-  {
     key: 'ADAPTIVE_SCHEDULER_FAILCOUNT_MAX',
-    label: 'Adaptive Scheduler Failcount Max',
-    desc: 'Maximum failed attempts',
+    label: 'Fallback Trigger (missed syncs)',
+    desc: 'Consecutive missed sync windows before the adaptive fallback turns on and starts retrying more often. Typical 2–3. 0 disables the fallback.',
     kind: 'u8',
+    // Max is the full u8 range: the firmware disabled sentinel is 0xFF, and the
+    // encoder clamps to max — a tighter cap would corrupt a disabled config.
     index: OP_IDX.ADAPTIVE_SCHEDULER_FAILCOUNT_MAX,
     min: 0,
     max: 255,
+  },
+  {
+    key: 'ADAPTIVE_SCHEDULER_INTERVAL',
+    label: 'Fallback Retry Interval (minutes)',
+    desc: 'Once the fallback is on, minutes between extra BLE retry wakes. Typical ≈426 (about 7 hours). 0 (or 65535) disables the fallback.',
+    kind: 'u16',
+    // Max is the full u16 range: the firmware disabled sentinel is 0xFFFF, and
+    // the encoder clamps to max — a tighter cap would corrupt a disabled config.
+    index: OP_IDX.ADAPTIVE_SCHEDULER_INT,
+    min: 0,
+    max: 65535,
   },
   {
     key: 'PPG_REC_DUR_SECS',
@@ -1080,7 +1084,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'PPG_REC_INT_MINS',
-    label: 'PPG Record Interval (min)',
+    label: 'PPG Record Interval (minutes)',
     desc: '0 = always on',
     kind: 'u16',
     index: OP_IDX.PPG_REC_INT_MINS_LSB,
@@ -1194,7 +1198,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'PPG_UNUSED_BYTE',
     label: 'PPG Unused Byte',
-    desc: 'Reserved byte 65',
+    desc: 'Reserved',
     kind: 'u8',
     index: 65,
     min: 0,
@@ -1385,7 +1389,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     // and set automatically.
     key: 'SKIN_TEMP_SAMPLE_RATE',
     label: 'Skin Temp Sample Rate',
-    desc: 'MLX90632 sample rate (medical output = chip refresh ÷2; extended ÷3). Drives both the chip refresh and the read poll. Byte 76 bits 3:1.',
+    desc: 'MLX90632 sample rate (medical output = chip refresh ÷2; extended ÷3). Drives both the chip refresh and the read poll.',
     kind: 'bit',
     index: OP_IDX.SKIN_TEMP_CONFIG,
     shift: 1,
@@ -1733,11 +1737,25 @@ export const VERISENSE_SENSOR_ENABLE_FIELDS: readonly VerisenseOperationalSensor
   { key: 'ALGO_HUB_EN', index: OP_IDX.GEN_CFG_3, shift: 5 },
 ];
 
+export interface VerisenseOperationalFieldSubgroupDefinition {
+  readonly id: string;
+  readonly title: string;
+  readonly keys: readonly string[];
+}
+
 export interface VerisenseOperationalFieldGroupDefinition {
   readonly id: string;
   readonly title: string;
   readonly openByDefault: boolean;
   readonly keys: readonly string[];
+  /**
+   * Optional presentational partition of {@link keys} into labelled subpanels
+   * rendered inside the group. Purely for layout: group membership, hardware
+   * support detection and field resolution all continue to use {@link keys}.
+   * Subgroups need not be exhaustive — any key in {@link keys} not covered by a
+   * subgroup is rendered above the subpanels, so nothing is ever hidden.
+   */
+  readonly subgroups?: readonly VerisenseOperationalFieldSubgroupDefinition[];
 }
 
 export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFieldGroupDefinition[] =
@@ -1754,10 +1772,10 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'DATA_COMPRESSION_MODE',
         'HR_PPG_CHANNEL',
         'STEP_COUNT_EN',
-        'PENDING_EVENTS_SCHEDULER_DISABLED',
         'BATT_TYPE',
         'MAG_EN',
         'LED_MODE',
+        'BLE_TX_POWER',
       ],
     },
     {
@@ -1814,16 +1832,26 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       keys: ['LSM6DSV_ODR_XL', 'LSM6DSV_FS_XL', 'LSM6DSV_ODR_G', 'LSM6DSV_FS_G', 'LIS2MDL_ODR'],
     },
     {
-      id: 'scheduler_ble',
-      title: 'Schedule / BLE Wake',
+      id: 'recording_window',
+      title: 'Recording Window',
+      openByDefault: false,
+      keys: ['START_TIME', 'END_TIME'],
+    },
+    {
+      id: 'inactivity',
+      title: 'Inactivity',
+      openByDefault: false,
+      keys: ['INACTIVE_TIMEOUT_MINUTES', 'RESUME_REC_ON_ACTIVITY'],
+    },
+    {
+      id: 'ble_wake',
+      title: 'BLE Wake Schedule',
       openByDefault: false,
       keys: [
-        'START_TIME',
-        'END_TIME',
-        'RESUME_REC_ON_ACTIVITY',
-        'INACTIVE_TIMEOUT_MINUTES',
+        'PENDING_EVENTS_SCHEDULER_DISABLED',
         'BLE_CONNECTION_TRIES_PER_DAY',
-        'BLE_TX_POWER',
+        'ADAPTIVE_SCHEDULER_INTERVAL',
+        'ADAPTIVE_SCHEDULER_FAILCOUNT_MAX',
         'BLE_DATA_TRANS_WKUP_INT_HOURS',
         'BLE_DATA_TRANS_WKUP_TIME',
         'BLE_DATA_TRANS_WKUP_DUR',
@@ -1837,6 +1865,46 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'BLE_RTC_SYNC_WKUP_DUR',
         'BLE_RTC_SYNC_RETRY_INT',
       ],
+      // PENDING_EVENTS and BLE retry count stay ungrouped (rendered above the
+      // subpanels); the remaining fields cluster by purpose: data transfer,
+      // status, RTC sync, and the adaptive scheduler.
+      subgroups: [
+        {
+          id: 'ble_data',
+          title: 'Data Transfer Schedule',
+          keys: [
+            'BLE_DATA_TRANS_WKUP_INT_HOURS',
+            'BLE_DATA_TRANS_WKUP_TIME',
+            'BLE_DATA_TRANS_WKUP_DUR',
+            'BLE_DATA_TRANS_RETRY_INT',
+          ],
+        },
+        {
+          id: 'ble_status',
+          title: 'Status Sync Schedule',
+          keys: [
+            'BLE_STATUS_WKUP_INT_HOURS',
+            'BLE_STATUS_WKUP_TIME',
+            'BLE_STATUS_WKUP_DUR',
+            'BLE_STATUS_RETRY_INT',
+          ],
+        },
+        {
+          id: 'ble_rtc_sync',
+          title: 'Time Sync Schedule',
+          keys: [
+            'BLE_RTC_SYNC_WKUP_INT_HOURS',
+            'BLE_RTC_SYNC_WKUP_TIME',
+            'BLE_RTC_SYNC_WKUP_DUR',
+            'BLE_RTC_SYNC_RETRY_INT',
+          ],
+        },
+        {
+          id: 'adaptive_scheduler',
+          title: 'Adaptive Scheduler (fallback)',
+          keys: ['ADAPTIVE_SCHEDULER_FAILCOUNT_MAX', 'ADAPTIVE_SCHEDULER_INTERVAL'],
+        },
+      ],
     },
     {
       id: 'adc_gsr',
@@ -1846,8 +1914,6 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'ADC_SAMPLE_RATE',
         'ADC_OVERSAMPLE_RATE',
         'GSR_RANGE_SETTING',
-        'ADAPTIVE_SCHEDULER_INTERVAL',
-        'ADAPTIVE_SCHEDULER_FAILCOUNT_MAX',
       ],
     },
     {
@@ -1925,7 +1991,7 @@ export const VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID = 'gen';
 /**
  * Maps each hardware-gated operational-config group id to the sensor block that
  * gates it (see {@link VerisenseHardwareSensorSupport}). Group ids absent from
- * this map (e.g. `gen`, `scheduler_ble`) configure behaviour that applies to
+ * this map (e.g. `gen`, `ble_wake`) configure behaviour that applies to
  * every board and are always considered supported.
  */
 export const VERISENSE_OPERATIONAL_FIELD_GROUP_SENSOR: Readonly<
