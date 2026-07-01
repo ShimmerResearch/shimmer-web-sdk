@@ -1910,11 +1910,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
       id: 'adc_gsr',
       title: 'ADC / GSR',
       openByDefault: false,
-      keys: [
-        'ADC_SAMPLE_RATE',
-        'ADC_OVERSAMPLE_RATE',
-        'GSR_RANGE_SETTING',
-      ],
+      keys: ['ADC_SAMPLE_RATE', 'ADC_OVERSAMPLE_RATE', 'GSR_RANGE_SETTING'],
     },
     {
       id: 'ppg',
