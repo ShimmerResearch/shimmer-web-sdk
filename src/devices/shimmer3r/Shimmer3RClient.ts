@@ -117,8 +117,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   // Callbacks
   onInquiry:
-    | ((info: ReturnType<Shimmer3RClient['_interpretInquiryResponseShimmer3R']>) => void)
-    | null = null;
+    ((info: ReturnType<Shimmer3RClient['_interpretInquiryResponseShimmer3R']>) => void) | null =
+    null;
   onExpPowerChanged: ((expPower: number) => void) | null = null;
 
   constructor(opts: Shimmer3RClientOptions = {}) {
