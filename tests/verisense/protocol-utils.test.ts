@@ -116,7 +116,7 @@ describe('Hardware model helpers', () => {
     // Always-on groups present; 2nd-gen IMU present; both 1st-gen IMU groups
     // excluded (accel1's LIS2DW12 is routed to the algo hub, not recorded from).
     expect(gen2Pulse?.has('gen')).toBe(true);
-    expect(gen2Pulse?.has('scheduler_ble')).toBe(true);
+    expect(gen2Pulse?.has('ble_wake')).toBe(true);
     expect(gen2Pulse?.has('lsm6dsv')).toBe(true);
     expect(gen2Pulse?.has('algo')).toBe(true);
     expect(gen2Pulse?.has('accel1')).toBe(false);
