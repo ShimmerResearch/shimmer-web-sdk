@@ -1,0 +1,5 @@
+# Normalize all text files to LF on checkout and commit so tooling (prettier,
+# eslint) behaves identically on Windows, macOS, and Linux/CI. Without this,
+# a Windows checkout (core.autocrlf=true) produces CRLF working-tree files that
+# trip `prettier --check` even though the repo content is already formatted.
+* text=auto eol=lf

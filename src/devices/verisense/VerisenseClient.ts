@@ -78,10 +78,8 @@ import {
   validatePendingResponse,
 } from './requestValidation.js';
 import type {
-  BleLinkAutoOptimizeSample,
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
-  BleLinkAutoOptimizeStopReason,
   BleThroughputTestOptions,
   BleThroughputTestResult,
   DeviceMode,
@@ -1328,6 +1326,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       const sanitizeChunk = (text: string): string => {
         // Drop control bytes that occasionally appear in factory stream noise
         // while preserving CR/LF/TAB for report formatting.
+        // eslint-disable-next-line no-control-regex -- intentionally strips binary control bytes
         return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
       };
 
@@ -1588,7 +1587,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         15000,
       );
     } catch (e) {
-      throw new Error(`Hub FW upload BEGIN failed: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`Hub FW upload BEGIN failed: ${e instanceof Error ? e.message : String(e)}`, {
+        cause: e,
+      });
     }
 
     // Pages: stream each page in order, awaiting ACK_NEXT_STAGE (page flashed).
@@ -1609,6 +1610,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
               `Hub FW upload failed at page ${page + 1}/${numPages} after ${attempt} attempts: ${
                 e instanceof Error ? e.message : String(e)
               }`,
+              { cause: e },
             );
           }
         }
@@ -1945,7 +1947,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   private async _assertBleLinkDebugSupported(): Promise<void> {
-    let parsed: ProductionConfig | null = null;
+    let parsed: ProductionConfig | null;
 
     if (this.productionConfig?.length) {
       if (this._isErasedBlob(this.productionConfig)) {
@@ -2287,7 +2289,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   async readOpConfigFromDevice(): Promise<Uint8Array> {
     const rsp = await this.readOperationalConfig();
-    let op = normalizeOperationalConfig(rsp?.payload);
+    const op = normalizeOperationalConfig(rsp?.payload);
 
     // Some firmware erase flows can return an empty payload for operational config.
     // Treat this as erased (all 0xFF) instead of invalid.
