@@ -110,9 +110,7 @@ export interface BleThroughputTestResult {
 }
 
 export type VerisenseConnectRetryReason =
-  | 'request-timeout'
-  | 'gatt-disconnected'
-  | 'unexpected-response-property';
+  'request-timeout' | 'gatt-disconnected' | 'unexpected-response-property';
 
 export interface VerisenseConnectWithRetryOptions {
   device?: BluetoothDevice | null;
@@ -171,11 +169,7 @@ export interface SyncSession {
 }
 
 export type BleLinkAutoOptimizeStopReason =
-  | 'stabilized'
-  | 'timeout'
-  | 'aborted'
-  | 'unsupported'
-  | 'not-ble';
+  'stabilized' | 'timeout' | 'aborted' | 'unsupported' | 'not-ble';
 
 export interface BleLinkAutoOptimizeOptions {
   pollIntervalMs?: number;
