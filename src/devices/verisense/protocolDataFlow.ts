@@ -1,10 +1,7 @@
 import { u16le_at } from './protocolUtils.js';
 
 export type ParsedSplitReason =
-  | 'midday-midnight-boundary'
-  | 'config-change'
-  | 'timestamp-discontinuity'
-  | 'power-reset';
+  'midday-midnight-boundary' | 'config-change' | 'timestamp-discontinuity' | 'power-reset';
 
 export interface EvaluateParsedSplitInput {
   prevTimestampSec: number;
