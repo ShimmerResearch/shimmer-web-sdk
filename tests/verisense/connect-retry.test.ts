@@ -28,9 +28,9 @@ describe('VerisenseBleDevice.connectWithRetry cancel-on-disconnect', () => {
     });
     const onRetry = vi.fn();
 
-    await expect(
-      v.connectWithRetry({ maxRetries: 2, retrySettleMs: 0, onRetry }),
-    ).resolves.toBe(true);
+    await expect(v.connectWithRetry({ maxRetries: 2, retrySettleMs: 0, onRetry })).resolves.toBe(
+      true,
+    );
 
     expect(v.connect).toHaveBeenCalledTimes(2);
     expect(onRetry).toHaveBeenCalledTimes(1);
@@ -48,9 +48,9 @@ describe('VerisenseBleDevice.connectWithRetry cancel-on-disconnect', () => {
     });
     const onRetry = vi.fn();
 
-    await expect(
-      v.connectWithRetry({ maxRetries: 2, retrySettleMs: 0, onRetry }),
-    ).rejects.toThrow(/connect cancelled/i);
+    await expect(v.connectWithRetry({ maxRetries: 2, retrySettleMs: 0, onRetry })).rejects.toThrow(
+      /connect cancelled/i,
+    );
 
     expect(v.connect).toHaveBeenCalledTimes(1);
     expect(onRetry).not.toHaveBeenCalled();
