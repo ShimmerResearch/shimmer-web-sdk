@@ -7,6 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Verisense Secure-DFU flow module** (`dfu.ts`, DEV-845) — the reliability layer the device console built around Nordic's `web-bluetooth-dfu` library, promoted so every app inherits it: transient-vs-protocol error classification (`classifyVerisenseDfuError`, `VERISENSE_DFU_TRANSIENT_ERROR_REGEX`), a fix for the library's swallowed-rejection hang (`patchSecureDfuSendOperation`), bounded + retried DFU-mode entry with a full GATT reset between attempts (`setVerisenseDfuModeWithRetry`), transfer retry for the combined-package part-2 reconnect (`updateVerisenseDfuImageWithRetry`), the full two-phase update state machine with interrupted-update resume (`runVerisenseDfuUpdate`), the bootloader picker filter (`buildVerisenseDfuRequestDeviceOptions`), packet-pacing defaults, routine-log-noise filter, and `isSafeFirmwareArchiveName`. The library objects are injected (structurally typed); progress is reported via `onStatus`/`onRetry` callbacks so apps keep their own UI.
+- `VerisenseBleDevice.applyOperationalConfig(op)` — push an op-config into every sensor decoder in one call (previously each app had to fan out to `accel1`/`gyroAccel2`/`adc`/`ppg`/... itself).
+- `expectedVerisenseStreamSensorIds` / `expectedVerisenseStreamSensorIdsFromConfig` — predict which stream-packet sensor IDs a config will produce, including the gen1/gen2 IMU split (ID 3 vs 6).
+- BLE wake-schedule tables and codecs: `VERISENSE_BLE_SYNC_SCHEDULES` (the three firmware sync schedules and their op-config field keys), `VERISENSE_BLE_SCHEDULE_DEFAULTS`, `VERISENSE_BLE_SCHEDULE_RANGES`, and `minutesSinceMidnightToHHMM` / `hhmmToMinutesSinceMidnight`.
+- Sensor rate-default table `VERISENSE_SENSOR_RATE_DEFAULT_GROUPS` + `resolveVerisenseSensorRateFieldKey` — firmware default ODR/mode codes per sensor group for config editors that auto-seed rates on enable / power down on disable.
+- `padVerisenseOperationalConfig` — pad legacy 86-byte op-config templates onto a blank full-size v9 image.
+- Advertised-name codec: `buildVerisenseAdvertisedName` / `parseVerisenseAdvertisedName` (`prefix-passkeyId-uniqueId`), `deriveVerisenseMacIdFromName`, and `verisenseDeviceFileTag`.
+- `defaultVerisensePasskeyForId` / `VERISENSE_DEFAULT_PASSKEY_BY_ID` — the fixed firmware passkey for passkey ID "01" (previously hard-coded in app code).
+- `decodeVerisenseBleOptimizationResult` — decode the BLE-link optimize `optimizationResult` bit mask into booleans.
+- `VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS` — shared plausibility bound for device timestamps.
+- `RtcDriftMonitor` (core, DEV-844) — least-squares RTC drift (ppm) estimation from periodic device-time reads, with host-NTP-step attribution/rebaselines vs device-step counting, and CSV export of the sample series.
+- `csvCell` (core) — RFC-4180-style CSV cell escaping.
+- `VerisenseBleDevice.readFlashLookupTable` now takes an optional `retries` argument.
 - Live stream statistics: `StreamStatsTracker` (core), `VerisenseBleDevice.getStreamStats()`, a throttled `streamStats` event, and per-sub-stream `SensorBase.getStreamContributions()` for windowed throughput and sample-gap-derived packet loss.
 
 ### Fixed

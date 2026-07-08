@@ -1724,12 +1724,27 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     }
   }
 
-  async readFlashLookupTable(index = 0, timeoutMs = 12000): Promise<{ payload: Uint8Array }> {
-    return this.readDebugCommand(
-      DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ,
-      this._debugIndexArgs(index),
-      timeoutMs,
-    );
+  /** Read the flash lookup table. The read walks the whole flash on-device
+   * and can time out on busy sensors, so `retries` re-issues the command
+   * (total attempts = retries + 1) before giving up. */
+  async readFlashLookupTable(
+    index = 0,
+    timeoutMs = 12000,
+    retries = 0,
+  ): Promise<{ payload: Uint8Array }> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await this.readDebugCommand(
+          DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ,
+          this._debugIndexArgs(index),
+          timeoutMs,
+        );
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? new Error('readFlashLookupTable: read failed');
   }
 
   async readRealWorldClockScheduler(index = 0): Promise<{ payload: Uint8Array }> {
@@ -2350,14 +2365,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     if (!erased) {
       try {
-        this.accel1.applyOperationalConfig(op);
-        this.sensors[3].applyOperationalConfig(op);
-        this.sensors[6].applyOperationalConfig(op);
-        this.adc.applyOperationalConfig(op);
-        this.ppg.applyOperationalConfig(op);
-        this.sensors[7].applyOperationalConfig(op);
-        this.sensors[8].applyOperationalConfig(op);
-        this.sensors[9].applyOperationalConfig(op);
+        this.applyOperationalConfig(op);
       } catch (e) {
         console.warn('[opcfg] apply after read failed:', e);
       }
@@ -2367,6 +2375,25 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
     this.emit('opConfig', { op, erased });
     return new Uint8Array(op);
+  }
+
+  /**
+   * Push an operational config into every sensor decoder (rates, ranges,
+   * channel enables) and cache it as the client's working config. Used
+   * automatically after {@link readOpConfigFromDevice}; call it directly when
+   * loading a config from a template/file without a device round-trip.
+   */
+  applyOperationalConfig(opConfigBytes: Uint8Array | number[]): void {
+    const op = opConfigBytes instanceof Uint8Array ? opConfigBytes : new Uint8Array(opConfigBytes);
+    this.operationalConfig = op;
+    this.accel1.applyOperationalConfig(op);
+    this.sensors[3].applyOperationalConfig(op);
+    this.sensors[6].applyOperationalConfig(op);
+    this.adc.applyOperationalConfig(op);
+    this.ppg.applyOperationalConfig(op);
+    this.sensors[7].applyOperationalConfig(op);
+    this.sensors[8].applyOperationalConfig(op);
+    this.sensors[9].applyOperationalConfig(op);
   }
 
   async writeOpConfig(opConfigBytes: Uint8Array | number[]): Promise<void> {

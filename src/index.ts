@@ -24,6 +24,14 @@ export type {
   FieldKind,
   InertialCalibration,
 } from './core/types.js';
+export { csvCell } from './core/csv.js';
+export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
+export type {
+  RtcDriftSampleInput,
+  RtcDriftSample,
+  RtcDriftSampleEvent,
+  RtcDriftMonitorOptions,
+} from './core/RtcDriftMonitor.js';
 export { StreamStatsTracker } from './core/StreamStats.js';
 export type {
   StreamContribution,
@@ -166,7 +174,66 @@ export {
   getVerisenseStreamSensorLabel,
   inferVerisenseLookupBankCount,
   isVerisenseLightDarkChannelEnabled,
+  VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS,
+  decodeVerisenseBleOptimizationResult,
+  VERISENSE_DEFAULT_PASSKEY_BY_ID,
+  defaultVerisensePasskeyForId,
+  buildVerisenseAdvertisedName,
+  parseVerisenseAdvertisedName,
+  deriveVerisenseMacIdFromName,
+  verisenseDeviceFileTag,
+  padVerisenseOperationalConfig,
+  VERISENSE_SENSOR_RATE_DEFAULT_GROUPS,
+  resolveVerisenseSensorRateFieldKey,
+  VERISENSE_BLE_SYNC_SCHEDULES,
+  VERISENSE_BLE_SCHEDULE_RANGES,
+  VERISENSE_BLE_SCHEDULE_DEFAULTS,
+  minutesSinceMidnightToHHMM,
+  hhmmToMinutesSinceMidnight,
+  expectedVerisenseStreamSensorIds,
+  expectedVerisenseStreamSensorIdsFromConfig,
 } from './devices/verisense/protocol.js';
+export type {
+  VerisenseBleOptimizationResult,
+  VerisenseAdvertisedNameParts,
+  VerisenseImuGeneration,
+  VerisenseSensorRateDefaultField,
+  VerisenseSensorRateDefaultGroup,
+  VerisenseBleSyncSchedule,
+  VerisenseStreamSensorEnables,
+} from './devices/verisense/protocol.js';
+
+// Verisense Nordic Secure-DFU flow (DEV-845)
+export {
+  VERISENSE_DFU_TRANSIENT_ERROR_REGEX,
+  VERISENSE_DFU_CONNECT_ATTEMPTS,
+  VERISENSE_DFU_RETRY_DELAY_MS,
+  VERISENSE_DFU_REBOOT_DELAY_MS,
+  VERISENSE_DFU_SET_MODE_TIMEOUT_MS,
+  VERISENSE_DFU_RELIABLE_PACKET_DELAY_MS,
+  VERISENSE_DFU_FAST_PACKET_DELAY_MS,
+  VERISENSE_DFU_BOOTLOADER_NAME_PREFIX,
+  VERISENSE_DFU_ROUTINE_LOG_REGEX,
+  isRoutineVerisenseDfuLogMessage,
+  verisenseDfuAttemptLabel,
+  patchSecureDfuSendOperation,
+  classifyVerisenseDfuError,
+  promiseWithTimeout,
+  isSafeFirmwareArchiveName,
+  buildVerisenseDfuRequestDeviceOptions,
+  setVerisenseDfuModeWithRetry,
+  updateVerisenseDfuImageWithRetry,
+  runVerisenseDfuUpdate,
+} from './devices/verisense/dfu.js';
+export type {
+  VerisenseDfuImage,
+  VerisenseDfuPackage,
+  SecureDfuLike,
+  VerisenseDfuErrorCategory,
+  VerisenseDfuErrorInfo,
+  VerisenseDfuRetryInfo,
+  VerisenseDfuFlowOptions,
+} from './devices/verisense/dfu.js';
 export {
   parseCalibrationBlob,
   serializeCalibrationBlob,
