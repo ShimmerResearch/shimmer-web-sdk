@@ -178,6 +178,22 @@ describe('setVerisenseDfuModeWithRetry', () => {
     ).rejects.toThrow('connection lost');
     expect(setDfuMode).toHaveBeenCalledTimes(3);
   });
+
+  it('clamps 0/negative/NaN attempts to at least one attempt', async () => {
+    for (const attempts of [0, -2, Number.NaN]) {
+      const device = fakeDevice();
+      const setDfuMode = vi.fn().mockRejectedValue(new Error('connection lost'));
+      await expect(
+        setVerisenseDfuModeWithRetry({ setDfuMode, update: vi.fn() }, device, {
+          attempts,
+          retryDelayMs: 1,
+        }),
+      ).rejects.toThrow('connection lost');
+      // 0/negative clamp to a single attempt; NaN falls back to the default (3).
+      expect(setDfuMode.mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(setDfuMode.mock.calls.length).toBeLessThanOrEqual(3);
+    }
+  });
 });
 
 describe('updateVerisenseDfuImageWithRetry', () => {

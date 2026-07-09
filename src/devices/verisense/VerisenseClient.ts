@@ -1726,14 +1726,16 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   /** Read the flash lookup table. The read walks the whole flash on-device
    * and can time out on busy sensors, so `retries` re-issues the command
-   * (total attempts = retries + 1) before giving up. */
+   * (total attempts = retries + 1) before giving up. Non-finite or negative
+   * `retries` is treated as 0; rejections are always `Error` instances. */
   async readFlashLookupTable(
     index = 0,
     timeoutMs = 12000,
     retries = 0,
   ): Promise<{ payload: Uint8Array }> {
+    const extraAttempts = Number.isFinite(retries) ? Math.max(0, Math.trunc(retries)) : 0;
     let lastError: unknown = null;
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    for (let attempt = 0; attempt <= extraAttempts; attempt++) {
       try {
         return await this.readDebugCommand(
           DEBUG_COMMAND_ID.FLASH_LOOKUP_TABLE_READ,
@@ -1744,7 +1746,8 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         lastError = e;
       }
     }
-    throw lastError ?? new Error('readFlashLookupTable: read failed');
+    if (lastError instanceof Error) throw lastError;
+    throw new Error(lastError == null ? 'readFlashLookupTable: read failed' : String(lastError));
   }
 
   async readRealWorldClockScheduler(index = 0): Promise<{ payload: Uint8Array }> {

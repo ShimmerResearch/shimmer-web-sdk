@@ -300,6 +300,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Normalize an `attempts` option to a finite integer >= 1 so the retry
+ * loops keep their documented "total attempts" semantics for 0/negative/NaN
+ * inputs. */
+function normalizeAttempts(attempts: number | undefined): number {
+  const v = Number(attempts ?? VERISENSE_DFU_CONNECT_ATTEMPTS);
+  return Number.isFinite(v) ? Math.max(1, Math.trunc(v)) : VERISENSE_DFU_CONNECT_ATTEMPTS;
+}
+
 /**
  * `SecureDfu.update()` with retries on connection-level errors. Combined
  * (SoftDevice+bootloader+application) packages transfer in two parts with a
@@ -313,7 +321,7 @@ export async function updateVerisenseDfuImageWithRetry(
   image: VerisenseDfuImage,
   options: VerisenseDfuFlowOptions = {},
 ): Promise<void> {
-  const totalAttempts = options.attempts ?? VERISENSE_DFU_CONNECT_ATTEMPTS;
+  const totalAttempts = normalizeAttempts(options.attempts);
   const retryDelayMs = options.retryDelayMs ?? VERISENSE_DFU_RETRY_DELAY_MS;
   for (let attemptsRemaining = totalAttempts; ; attemptsRemaining--) {
     try {
@@ -346,7 +354,7 @@ export async function setVerisenseDfuModeWithRetry(
   device: BluetoothDevice,
   options: VerisenseDfuFlowOptions = {},
 ): Promise<BluetoothDevice | null> {
-  const totalAttempts = options.attempts ?? VERISENSE_DFU_CONNECT_ATTEMPTS;
+  const totalAttempts = normalizeAttempts(options.attempts);
   const retryDelayMs = options.retryDelayMs ?? VERISENSE_DFU_RETRY_DELAY_MS;
   const timeoutMs = options.setDfuModeTimeoutMs ?? VERISENSE_DFU_SET_MODE_TIMEOUT_MS;
   for (let attemptsRemaining = totalAttempts; ; attemptsRemaining--) {

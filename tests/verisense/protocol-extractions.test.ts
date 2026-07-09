@@ -238,6 +238,14 @@ describe('minutes ↔ HH:MM transforms', () => {
     expect(minutesSinceMidnightToHHMM(null)).toBeNull();
   });
 
+  it('rounds fractional minutes without ever emitting ":60"', () => {
+    expect(minutesSinceMidnightToHHMM(59.6)).toBe('01:00');
+    expect(minutesSinceMidnightToHHMM(59.4)).toBe('00:59');
+    expect(minutesSinceMidnightToHHMM(1439.4)).toBe('23:59');
+    // Rounds past the valid range -> rejected, not "24:00".
+    expect(minutesSinceMidnightToHHMM(1439.6)).toBeNull();
+  });
+
   it('parses HH:MM (and H:MM)', () => {
     expect(hhmmToMinutesSinceMidnight('01:00')).toBe(60);
     expect(hhmmToMinutesSinceMidnight('7:05')).toBe(425);

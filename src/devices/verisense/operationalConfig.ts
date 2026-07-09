@@ -2186,13 +2186,15 @@ export const VERISENSE_BLE_SCHEDULE_DEFAULTS = Object.freeze({
   connectionTries: 5,
 });
 
-/** Format minutes-since-midnight as `"HH:MM"`, or null when out of range. */
+/** Format minutes-since-midnight as `"HH:MM"`, or null when out of range.
+ * Fractional input is rounded to the nearest whole minute first, so the
+ * minutes component always stays in 0–59. */
 export function minutesSinceMidnightToHHMM(mins: number | null | undefined): string | null {
   if (mins == null) return null;
-  const v = Number(mins);
+  const v = Math.round(Number(mins));
   if (!Number.isFinite(v) || v < 0 || v > 1439) return null;
   const h = Math.floor(v / 60);
-  const m = Math.round(v % 60);
+  const m = v % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
