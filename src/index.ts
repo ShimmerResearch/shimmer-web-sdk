@@ -5,6 +5,7 @@
  *
  * Exports:
  * - {@link Shimmer3RClient} — Shimmer3R BLE client
+ * - {@link Shimmer3Client} — classic-Bluetooth (RFCOMM/SPP) Shimmer3 client
  * - {@link VerisenseBleDevice} — Verisense BLE + Web Serial client
  * - {@link ObjectCluster} — shared sensor data frame container
  * - {@link SensorBitmapShimmer3} — Shimmer3R sensor enable bitmasks
@@ -82,6 +83,40 @@ export {
   nudgeGsrResistance,
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
+
+// Shimmer3 (classic Bluetooth / RFCOMM)
+export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
+export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';
+export {
+  SHIMMER3_DEFAULTS,
+  SHIMMER3_SPP_UUID,
+  SHIMMER3_SAMPLING_CLOCK_FREQ,
+} from './devices/shimmer3/constants.js';
+export {
+  FW_ID,
+  ACK as SHIMMER3_ACK,
+  NACK as SHIMMER3_NACK,
+  NEED_MORE as SHIMMER3_NEED_MORE,
+  RESYNC as SHIMMER3_RESYNC,
+  SHIMMER3_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3_INQ_CONFIG_OFFSET,
+  SHIMMER3_INQ_CONFIG_LENGTH,
+  SHIMMER3_INQ_NUM_CHANNELS_OFFSET,
+  SHIMMER3_INQ_CHANNELS_OFFSET,
+  interpretShimmer3InquiryResponse,
+  buildShimmer3Schema,
+  parseShimmer3DeviceVersionResponse,
+  parseShimmer3FwVersionResponse,
+  shimmer3UsesThreeByteTimestamp,
+  shimmer3ControlMessageLength,
+} from './devices/shimmer3/protocol.js';
+export type {
+  Shimmer3InquiryResult,
+  Shimmer3StreamSchema,
+  Shimmer3ChannelField,
+  Shimmer3DeviceVersion,
+  Shimmer3FwVersion,
+} from './devices/shimmer3/protocol.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';

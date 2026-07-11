@@ -4,10 +4,11 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
-| Device                  | Class                | Transport                 |
-| ----------------------- | -------------------- | ------------------------- |
-| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth             |
-| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial |
+| Device                  | Class                | Transport                            |
+| ----------------------- | -------------------- | ------------------------------------ |
+| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth                        |
+| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP (injected transport only) |
+| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial            |
 
 ## Quick Start
 
@@ -76,6 +77,35 @@ Implement `ShimmerTransport` for a new platform: map `write` to the write
 characteristic, deliver each inbound notification verbatim to the `onNotify`
 callback (never merge or re-split chunks), and fire `onDisconnect` on link loss.
 `LoopbackTransport` is an in-memory implementation used by the test suites.
+
+### Classic-Bluetooth Shimmer3 (`Shimmer3Client`)
+
+The classic (pre-3R) Shimmer3 speaks the same LiteProtocol but over an **RFCOMM/SPP
+byte stream** rather than BLE. Because Web Bluetooth cannot open an RFCOMM socket,
+classic Shimmer3 is **impossible in a browser** — `Shimmer3Client` therefore
+_requires_ an injected transport and `connect()` throws without one. A platform
+that can open SPP (e.g. a React Native Android module calling
+`createRfcommSocketToServiceRecord`, SPP UUID `SHIMMER3_SPP_UUID`) supplies the
+transport; the transport should report `capabilities.framed = false` since RFCOMM
+has no message boundaries.
+
+```ts
+import { Shimmer3Client, SensorBitmapShimmer3 } from '@shimmerresearch/shimmer-web-sdk';
+
+const client = new Shimmer3Client({ transport: rfcommTransport }); // required
+client.onStatus = (m) => console.log(m);
+
+await client.connect(); // handshake: flush buffer → HW version → FW version
+await client.setSamplingRate(51.2);
+await client.setSensors(SensorBitmapShimmer3.SENSOR_GYRO);
+await client.setGSRRange(2);
+await client.startStreaming();
+```
+
+Unlike the BLE clients, `Shimmer3Client` runs a **byte-stream parser**: inbound
+bytes are accumulated and complete LiteProtocol messages are extracted with a
+length-aware framer, so ACKs and responses are recovered correctly no matter how
+the RFCOMM stream splits or coalesces them.
 
 ## Building
 
