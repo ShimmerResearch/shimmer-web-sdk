@@ -16,6 +16,27 @@
 // Core
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
+
+// Transport abstraction (pluggable byte pipes)
+export {
+  WebBluetoothTransport,
+  WebSerialTransport,
+  LoopbackTransport,
+} from './core/transport/index.js';
+export type {
+  ShimmerTransport,
+  ShimmerTransportKind,
+  TransportCapabilities,
+  TransportWriteOptions,
+  Unsubscribe,
+  DiscoveredDevice,
+  DeviceKind,
+  TransportScanner,
+  WebBluetoothTransportOptions,
+  WebSerialTransportOptions,
+  LoopbackTransportOptions,
+  LoopbackWrite,
+} from './core/transport/index.js';
 export { isUniformByteArray } from './core/arrayBuffer.js';
 export type {
   IShimmerClient,

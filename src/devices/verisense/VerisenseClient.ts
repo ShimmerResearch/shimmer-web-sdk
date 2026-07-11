@@ -71,6 +71,9 @@ import { SensorMAX32674 } from './sensors/SensorMAX32674.js';
 import { SensorMLX90632 } from './sensors/SensorMLX90632.js';
 import { isVerisenseSecondGenerationHardware } from './hardwareModels.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
+import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
+import { WebSerialTransport } from '../../core/transport/WebSerialTransport.js';
+import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { StreamStatsTracker, type StreamStatsSnapshot } from '../../core/StreamStats.js';
 import {
   defaultAcceptedCommands,
@@ -179,16 +182,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   // Transport handles
   private _transportKind: TransportKind = null;
+  // Byte pipe. Injected (RN / tests) or a web transport built at connect time.
+  private _injectedTransport: ShimmerTransport | null = null;
+  private _transport: ShimmerTransport | null = null;
+  private _notifyUnsub: Unsubscribe | null = null;
+  private _disconnectUnsub: Unsubscribe | null = null;
+  // GATT handles mirrored from the active WebBluetoothTransport so the web-only
+  // paths (Nordic DFU, connectWithRetry) keep reaching the live connection.
+  // They stay null for injected (non-web) transports.
   device: BluetoothDevice | null = null;
   private server: BluetoothRemoteGATTServer | null = null;
   private service: BluetoothRemoteGATTService | null = null;
   tx: BluetoothRemoteGATTCharacteristic | null = null;
   rx: BluetoothRemoteGATTCharacteristic | null = null;
   port: SerialPort | null = null;
-  private _serialAbort: AbortController | null = null;
-  private _serialReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-  private _serialReadLoopTask: Promise<void> | null = null;
-  private _onGattDisconnected: (() => void) | null = null;
   private _suppressDisconnectedEvent = false;
 
   // Protocol state
@@ -228,6 +235,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     super({ debug: opts.debug ?? true });
     this.hardwareIdentifier = opts.hardwareIdentifier ?? 'VERISENSE_PULSE_PLUS';
     this.stripStreamCrc = opts.stripStreamCrc ?? true;
+    this._injectedTransport = opts.transport ?? null;
 
     this.sensors = {
       1: new SensorADC(),
@@ -304,11 +312,87 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   // BLE connect / disconnect
   // ---------------------------------------------------------------------------
 
+  /** Build the default Web Bluetooth transport over the NUS service. */
+  private _makeWebBleTransport(opts: {
+    device?: BluetoothDevice | null;
+    filters?: BluetoothLEScanFilter[];
+    optionalServices?: BluetoothServiceUUID[];
+  }): WebBluetoothTransport {
+    return new WebBluetoothTransport({
+      serviceUUID: NUS_SERVICE,
+      // Verisense: the host writes command frames to NUS_TX and receives
+      // notifications on NUS_RX (mirror image of Shimmer3R). Normal commands use
+      // write-without-response; callers request write-with-response explicitly.
+      writeCharUUID: NUS_TX,
+      notifyCharUUID: NUS_RX,
+      requestDeviceOptions: {
+        filters: opts.filters ?? [{ services: [NUS_SERVICE] }],
+        // NORDIC_DFU_SERVICE must be granted at requestDevice() time so the
+        // buttonless DFU control point is reachable from rebootToDfuBootloader().
+        optionalServices: opts.optionalServices ?? [NUS_SERVICE, NORDIC_DFU_SERVICE],
+      },
+      device: opts.device ?? null,
+      defaultWriteWithResponse: false,
+      debug: this.debug,
+      logTag: '[Verisense:ble]',
+    });
+  }
+
+  /** Subscribe to a transport's notify/disconnect streams. */
+  private _wireTransport(transport: ShimmerTransport): void {
+    this._transport = transport;
+    this._notifyUnsub = transport.onNotify((bytes) => this._feedStreamBytes(bytes));
+    this._disconnectUnsub = transport.onDisconnect(() => this._handleTransportDisconnect());
+  }
+
+  /** Drop the current transport's notify/disconnect subscriptions. */
+  private _unwireTransport(): void {
+    try {
+      this._notifyUnsub?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this._disconnectUnsub?.();
+    } catch {
+      /* ignore */
+    }
+    this._notifyUnsub = null;
+    this._disconnectUnsub = null;
+  }
+
+  /** Handle an unexpected / requested transport disconnect (link drop). */
+  private _handleTransportDisconnect(): void {
+    const kind: TransportKind = this._transportKind === 'serial' ? 'serial' : 'ble';
+    this._mode = 'idle';
+    this._transportKind = null;
+    if (this._suppressDisconnectedEvent) return;
+    this.emit('disconnected', { kind });
+  }
+
+  /**
+   * Mirror the active WebBluetoothTransport's GATT handles onto the legacy
+   * public fields so the web-only paths (Nordic DFU, connectWithRetry) can reach
+   * the live connection. Injected (non-web) transports leave them null.
+   */
+  private _mirrorTransportHandles(): void {
+    const t = this._transport;
+    if (t instanceof WebBluetoothTransport) {
+      this.device = t.device;
+      this.server = t.server;
+      this.tx = t.writeCharacteristic;
+      this.rx = t.notifyCharacteristic;
+    } else if (t instanceof WebSerialTransport) {
+      this.port = t.port;
+    }
+  }
+
   override async connect(
     opts: {
       device?: BluetoothDevice | null;
       filters?: BluetoothLEScanFilter[];
       optionalServices?: BluetoothServiceUUID[];
+      transport?: ShimmerTransport;
     } = {},
   ): Promise<boolean> {
     if (this._transportKind === 'serial' || this.port) {
@@ -324,46 +408,18 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     // must not cancel this fresh connect attempt.
     this._connectCancelRequested = false;
 
-    const requestOpts: RequestDeviceOptions = {
-      filters: opts.filters ?? [{ services: [NUS_SERVICE] }],
-      // NORDIC_DFU_SERVICE must be granted at requestDevice() time so the
-      // buttonless DFU control point is reachable from rebootToDfuBootloader().
-      optionalServices: opts.optionalServices ?? [NUS_SERVICE, NORDIC_DFU_SERVICE],
-    };
+    // Tear down any leftover wiring before building a fresh transport.
+    this._unwireTransport();
 
-    this.device = opts.device ?? (await navigator.bluetooth.requestDevice(requestOpts));
+    const transport = opts.transport ?? this._injectedTransport ?? this._makeWebBleTransport(opts);
+    this._wireTransport(transport);
 
-    try {
-      if (this._onGattDisconnected && this.device) {
-        this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
-      }
-    } catch {
-      /* ignore */
-    }
+    await transport.connect();
+    this._mirrorTransportHandles();
 
-    this._onGattDisconnected = () => {
-      this._mode = 'idle';
-      this._transportKind = null;
-      if (this._suppressDisconnectedEvent) return;
-      this.emit('disconnected', { kind: 'ble' });
-    };
-    this.device.addEventListener('gattserverdisconnected', this._onGattDisconnected);
-
-    this.server = await this.device.gatt!.connect();
-    this.service = await this.server.getPrimaryService(NUS_SERVICE);
-    this.tx = await this.service.getCharacteristic(NUS_TX);
-    this.rx = await this.service.getCharacteristic(NUS_RX);
-
-    await this.rx.startNotifications();
-    this.rx.addEventListener('characteristicvaluechanged', (ev: Event) => {
-      const dv = (ev.target as BluetoothRemoteGATTCharacteristic | null)?.value;
-      if (!dv) return;
-      const bytes = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
-      this._feedStreamBytes(bytes);
-    });
-
-    this._emitStatus(`Connected: ${this.device.name ?? 'Verisense'}`);
-    this.emit('connected', { name: this.device.name, id: this.device.id });
+    const name = this.device?.name ?? transport.deviceName;
+    this._emitStatus(`Connected: ${name ?? 'Verisense'}`);
+    this.emit('connected', { name: this.device?.name, id: this.device?.id });
 
     await this._bootstrapConfigsAfterConnect();
 
@@ -372,21 +428,14 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   private async _cleanupFailedBleConnectAttempt(retrySettleMs: number): Promise<void> {
     this._suppressDisconnectedEvent = true;
-    try {
-      if (this._onGattDisconnected && this.device) {
-        this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
-      }
-    } catch {
-      /* ignore */
-    }
 
+    this._unwireTransport();
     try {
-      if (this.device?.gatt?.connected) {
-        this.device.gatt.disconnect();
-      }
+      await this._transport?.disconnect();
     } catch {
       /* ignore */
     }
+    this._transport = null;
 
     this.tx = null;
     this.rx = null;
@@ -560,9 +609,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       parity?: ParityType;
       flowControl?: FlowControlType;
       filters?: SerialPortFilter[] | null;
+      transport?: ShimmerTransport;
     } = {},
   ): Promise<boolean> {
-    if (!('serial' in navigator)) {
+    const injected = opts.transport ?? this._injectedTransport;
+    if (!injected && !('serial' in navigator)) {
       throw new Error('Web Serial not supported. Use Chrome/Edge on HTTPS or http://localhost.');
     }
 
@@ -575,165 +626,29 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     this._transportKind = 'serial';
     this._mode = 'idle';
     this._resetAssembler();
+    this._unwireTransport();
 
-    const serial = (
-      navigator as unknown as {
-        serial: { requestPort(o?: { filters?: SerialPortFilter[] }): Promise<SerialPort> };
-      }
-    ).serial;
-    if (!opts.port) {
-      opts.port = await serial.requestPort(opts.filters ? { filters: opts.filters } : undefined);
-    }
-    this.port = opts.port!;
+    const transport =
+      injected ??
+      new WebSerialTransport({
+        port: opts.port ?? null,
+        baudRate: opts.baudRate,
+        dataBits: opts.dataBits,
+        stopBits: opts.stopBits,
+        parity: opts.parity,
+        flowControl: opts.flowControl,
+        filters: opts.filters ?? null,
+        debug: this.debug,
+      });
+    this._wireTransport(transport);
 
-    await (
-      this.port as unknown as {
-        open(o: {
-          baudRate: number;
-          dataBits: number;
-          stopBits: number;
-          parity: string;
-          flowControl: string;
-        }): Promise<void>;
-      }
-    ).open({
-      baudRate: opts.baudRate ?? 115200,
-      dataBits: opts.dataBits ?? 8,
-      stopBits: opts.stopBits ?? 1,
-      parity: opts.parity ?? 'none',
-      flowControl: opts.flowControl ?? 'none',
-    });
-
-    this._serialAbort = new AbortController();
-    this._startSerialReadLoop(this._serialAbort.signal);
+    await transport.connect();
+    this._mirrorTransportHandles();
 
     this._emitStatus('Connected via USB Serial');
     this.emit('connected', { kind: 'serial' });
     await this._bootstrapConfigsAfterConnect();
     return true;
-  }
-
-  private async _serialWrite(u8: Uint8Array): Promise<void> {
-    const writable = (this.port as unknown as { writable?: WritableStream<Uint8Array> }).writable;
-    if (!writable) throw new Error('Not connected');
-    const writer = writable.getWriter();
-    try {
-      await writer.write(u8);
-    } finally {
-      writer.releaseLock();
-    }
-  }
-
-  private _startSerialReadLoop(signal: AbortSignal): void {
-    const port = this.port!;
-    this._serialReadLoopTask = (async () => {
-      let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-      try {
-        const readable = (port as unknown as { readable?: ReadableStream<Uint8Array> }).readable;
-        if (!readable) return;
-        reader = readable.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-        this._serialReader = reader;
-
-        while (!signal.aborted) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value?.length) this._feedStreamBytes(new Uint8Array(value));
-        }
-      } catch (e) {
-        if (!signal.aborted) console.warn('[serial] read loop error:', e);
-      } finally {
-        try {
-          reader?.releaseLock?.();
-        } catch {
-          /* ignore */
-        }
-        if (this._serialReader === reader) this._serialReader = null;
-        this._serialReadLoopTask = null;
-        if (!signal.aborted) {
-          this._mode = 'idle';
-          this.emit('disconnected', { kind: 'serial' });
-        }
-      }
-    })();
-  }
-
-  private async _serialDisconnect(reason = 'user'): Promise<void> {
-    try {
-      this._serialAbort?.abort();
-    } catch {
-      /* ignore */
-    }
-
-    const cancelActiveReader = async (): Promise<boolean> => {
-      const r = this._serialReader;
-      if (!r) return false;
-      try {
-        await r.cancel();
-      } catch {
-        /* ignore */
-      }
-      try {
-        r.releaseLock();
-      } catch {
-        /* ignore */
-      }
-      if (this._serialReader === r) this._serialReader = null;
-      return true;
-    };
-
-    await cancelActiveReader();
-
-    const portReadableLocked = (this.port as unknown as { readable?: { locked?: boolean } })
-      ?.readable?.locked;
-    if (portReadableLocked && !this._serialReader) {
-      for (let i = 0; i < 10; i++) {
-        await new Promise<void>((r) => setTimeout(r, 20));
-        if (await cancelActiveReader()) break;
-      }
-    }
-
-    try {
-      const task = this._serialReadLoopTask;
-      if (task) await Promise.race([task, new Promise<void>((r) => setTimeout(r, 750))]);
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      const writable = (
-        this.port as unknown as {
-          writable?: { locked?: boolean; getWriter(): WritableStreamDefaultWriter<unknown> };
-        }
-      )?.writable;
-      if (writable?.locked) {
-        const w = writable.getWriter();
-        try {
-          await (w as unknown as { abort?(): void }).abort?.();
-        } catch {
-          /* ignore */
-        }
-        try {
-          w.releaseLock();
-        } catch {
-          /* ignore */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      await (this.port as unknown as { close(): Promise<void> })?.close?.();
-    } catch {
-      /* ignore */
-    }
-
-    this.port = null;
-    this._serialAbort = null;
-    this._serialReader = null;
-    this._serialReadLoopTask = null;
-
-    console.warn(`[serial] disconnect done reason=${reason}`);
   }
 
   override async disconnect(opts: { reason?: string } = {}): Promise<boolean> {
@@ -760,41 +675,30 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }
     }
 
-    if (this._transportKind === 'serial') {
-      try {
-        await this._serialDisconnect(opts.reason ?? 'user');
-      } catch {
-        /* ignore */
-      }
-    } else {
+    if (this._transportKind !== 'serial') {
       // Best-effort courtesy notification; swallow the rejection when the BLE
       // transport is not up (e.g. disconnect clicked mid-connect, tx not set).
+      // Issued before teardown so it rides the still-open transport.
       void this.writeBytes(buildMessage(ASM_COMMAND.WRITE, ASM_PROPERTY.DEVICE_DISCONNECT), {
         withResponse: false,
       }).catch(() => {});
-      try {
-        if (this.rx) await this.rx.stopNotifications?.();
-      } catch {
-        /* ignore */
-      }
-      try {
-        if (this._onGattDisconnected && this.device) {
-          this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnected);
-        }
-      } catch {
-        /* ignore */
-      }
-      try {
-        if (this.device?.gatt?.connected) this.device.gatt.disconnect();
-      } catch {
-        /* ignore */
-      }
     }
 
+    // Tear the transport down. Suppress its own disconnect callback since we emit
+    // our own 'disconnected' below (preserving the previous single emit).
+    this._suppressDisconnectedEvent = true;
+    this._unwireTransport();
+    try {
+      await this._transport?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    this._suppressDisconnectedEvent = false;
+
+    this._transport = null;
     this._mode = 'idle';
     this._transportKind = null;
     this.port = null;
-    this._serialAbort = null;
     this.tx = this.rx = null;
     this.service = this.server = this.device = null;
 
@@ -966,11 +870,15 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   ): Promise<void> {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
 
-    if (this._transportKind === 'serial') {
-      await this._serialWrite(u8);
+    // Route through the active transport (web or injected). The transport applies
+    // the correct write-with/without-response semantics.
+    if (this._transport) {
+      await this._transport.write(u8, { withResponse: opts.withResponse });
       return;
     }
 
+    // Legacy fallback: a fake write characteristic injected directly onto `tx`
+    // (used by unit tests that exercise the command path without a transport).
     if (!this.tx) throw new Error('Not connected');
 
     if (opts.withResponse) {

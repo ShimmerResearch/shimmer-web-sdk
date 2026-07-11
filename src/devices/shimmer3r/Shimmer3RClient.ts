@@ -17,7 +17,8 @@ import {
   getOversamplingRatioADS1292R,
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
-import { toArrayBuffer } from '../../core/arrayBuffer.js';
+import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
+import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -57,6 +58,13 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * @default 'u24'
    */
   timestampFmt?: TimestampFmt;
+  /**
+   * Inject a transport (byte pipe) instead of the default Web Bluetooth one. Lets
+   * non-browser runtimes (React Native, Bluetooth Classic) or tests drive the
+   * client. When omitted, `connect()` builds a {@link WebBluetoothTransport} over
+   * the configured service/characteristic UUIDs, so browser usage is unchanged.
+   */
+  transport?: ShimmerTransport;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,15 +94,22 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
  * ```
  */
 export class Shimmer3RClient extends BaseShimmerClient {
-  // BLE handles
+  // BLE UUIDs (used to build the default Web Bluetooth transport)
   private serviceUUID: string;
   private rxUUID: string;
   private txUUID: string;
 
+  /**
+   * The selected `BluetoothDevice` when connected over the default Web Bluetooth
+   * transport; `null` for injected transports (React Native / loopback).
+   */
   device: BluetoothDevice | null = null;
-  private server: BluetoothRemoteGATTServer | null = null;
-  private rx: BluetoothRemoteGATTCharacteristic | null = null;
-  private tx: BluetoothRemoteGATTCharacteristic | null = null;
+
+  // Transport (byte pipe). Injected via options/connect, or a WebBluetoothTransport by default.
+  private _injectedTransport: ShimmerTransport | null = null;
+  private _transport: ShimmerTransport | null = null;
+  private _notifyUnsub: Unsubscribe | null = null;
+  private _disconnectUnsub: Unsubscribe | null = null;
 
   // Protocol state
   private _rxBuf: Uint8Array = new Uint8Array(0);
@@ -127,6 +142,31 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.rxUUID = opts.rxUUID ?? SHIMMER3R_DEFAULTS.CHAR_RX_UUID;
     this.txUUID = opts.txUUID ?? SHIMMER3R_DEFAULTS.CHAR_TX_UUID;
     this.forceTimestampFmt = opts.timestampFmt ?? 'u24';
+    this._injectedTransport = opts.transport ?? null;
+  }
+
+  /** Best-effort label for `ObjectCluster`s and status messages. */
+  private _deviceLabel(): string {
+    return this.device?.name ?? this._transport?.deviceName ?? 'Shimmer3R';
+  }
+
+  /** Build the default Web Bluetooth transport over the configured UUIDs. */
+  private _makeWebTransport(): WebBluetoothTransport {
+    return new WebBluetoothTransport({
+      serviceUUID: this.serviceUUID,
+      // Shimmer3R: the RX characteristic is the host→device write pipe; TX is the
+      // device→host notify pipe. Writes are acknowledged (write-with-response),
+      // matching the previous `rx.writeValue(...)` behaviour.
+      writeCharUUID: this.rxUUID,
+      notifyCharUUID: this.txUUID,
+      requestDeviceOptions: {
+        filters: [{ services: [this.serviceUUID] }],
+        optionalServices: [this.serviceUUID],
+      },
+      defaultWriteWithResponse: true,
+      debug: this.debug,
+      logTag: '[Shimmer3R:ble]',
+    });
   }
 
   protected override _log(...args: unknown[]): void {
@@ -137,37 +177,38 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Connection management
   // ---------------------------------------------------------------------------
 
-  override async connect(): Promise<void> {
+  /**
+   * Open a connection. In a browser this triggers the Web Bluetooth device
+   * picker (unchanged behaviour). Pass a {@link ShimmerTransport} to drive the
+   * client over a different pipe (React Native, Bluetooth Classic, tests); it
+   * takes precedence over any transport supplied to the constructor.
+   */
+  override async connect(transport?: ShimmerTransport): Promise<void> {
+    const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
+    this._transport = t;
+    this._notifyUnsub = t.onNotify(this._handleNotify);
+    this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
+
     this._emitStatus('Requesting Bluetooth device…');
-    this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [this.serviceUUID] }],
-      optionalServices: [this.serviceUUID],
-    });
-    this._emitStatus(`Selected: ${this.device.name ?? 'Shimmer3R'}`);
-    this.server = await this.device.gatt!.connect();
+    await t.connect();
+    if (t instanceof WebBluetoothTransport) this.device = t.device;
+    this._emitStatus(`Selected: ${this._deviceLabel()}`);
     this._emitStatus('GATT connected');
-    const svc = await this.server.getPrimaryService(this.serviceUUID);
-    this.rx = await svc.getCharacteristic(this.rxUUID);
-    this.tx = await svc.getCharacteristic(this.txUUID);
     this._emitStatus('RX/TX obtained');
-    await this.tx.startNotifications();
-    this.tx.addEventListener('characteristicvaluechanged', this._handleNotify);
     this._emitStatus('Notifications started');
   }
 
   override async disconnect(): Promise<void> {
     try {
-      if (this.tx) {
-        try {
-          await this.tx.stopNotifications();
-        } catch {
-          /* ignore */
-        }
-        this.tx.removeEventListener('characteristicvaluechanged', this._handleNotify);
-      }
-      if (this.device?.gatt?.connected) this.device.gatt.disconnect();
+      this._notifyUnsub?.();
+      this._disconnectUnsub?.();
+      await this._transport?.disconnect();
+    } catch {
+      /* ignore */
     } finally {
-      this.device = this.server = this.rx = this.tx = null;
+      this._notifyUnsub = this._disconnectUnsub = null;
+      this._transport = null;
+      this.device = null;
       this._rxBuf = new Uint8Array(0);
       this.schema = null;
       this._streaming = false;
@@ -176,12 +217,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
+  /** Handle an unexpected / requested transport disconnect. */
+  private _handleTransportDisconnect = (): void => {
+    this._streaming = false;
+    this._emitStatus('Device disconnected');
+  };
+
   // ---------------------------------------------------------------------------
-  // BLE notify handler
+  // Notify handler (fed raw notification chunks by the transport)
   // ---------------------------------------------------------------------------
 
-  private _handleNotify = (evt: Event): void => {
-    const chunk = new Uint8Array((evt as any).target.value.buffer);
+  private _handleNotify = (chunk: Uint8Array): void => {
     this._log('Notify len=', chunk.length, 'data=', chunk);
 
     // 1) Consume an expected ACK
@@ -243,7 +289,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     expPower: 0 | 1,
   ): Promise<{ expPower: number; ackRemainder: Uint8Array | null }> {
     if (expPower !== 0 && expPower !== 1) throw new Error('expPower must be 0 (off) or 1 (on)');
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
 
     const cmd = new Uint8Array([OPCODES.SET_INTERNAL_EXP_POWER_ENABLE_COMMAND, expPower]);
     this._emitStatus(
@@ -270,7 +316,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!Number.isInteger(gsrRange) || gsrRange < 0 || gsrRange > 4) {
       throw new Error('gsrRange must be 0–4');
     }
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
 
     const cmd = new Uint8Array([OPCODES.SET_GSR_RANGE_COMMAND, gsrRange & 0xff]);
     this._emitStatus('SET_GSR_RANGE → waiting for ACK…');
@@ -296,7 +342,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     sensors: number,
   ): Promise<{ sensors: number; ackRemainder: Uint8Array | null; enabledSensors: number }> {
     if (!Number.isFinite(sensors)) throw new Error('sensors must be a finite number');
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
 
     sensors = (sensors >>> 0) & 0xffffff;
     const b1 = sensors & 0xff;
@@ -339,7 +385,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!Number.isFinite(rateHz) || rateHz <= 0) {
       throw new Error('Sampling rate must be a positive number (Hz)');
     }
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
 
     let divisor = Math.floor(32768 / rateHz);
     divisor = Math.max(1, Math.min(0xffff, divisor));
@@ -389,7 +435,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Enable EMG (ADS1292R) in 16-bit mode on EXG1 & EXG2. */
   async enableEMG16Bit(): Promise<void> {
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
       new Uint8Array([
         0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20, 0x00, 0x00, 0x02, 0x03,
@@ -403,7 +449,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Enable EXG test signal in 16-bit mode (useful for verifying ExG hardware). */
   async enableEXGTestSignal16Bit(): Promise<void> {
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
       new Uint8Array([
         0x61, 0x00, 0x00, 0x0a, 0x02, 0xab, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
@@ -417,7 +463,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Enable ECG in 16-bit mode on EXG1 & EXG2. */
   async enableECG16Bit(): Promise<void> {
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     await this._writeExgPages(
       new Uint8Array([
         0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x40, 0x40, 0x2d, 0x00, 0x00, 0x02, 0x03,
@@ -705,7 +751,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         const frame = buf.subarray(0, frameBytes);
         try {
           let cursor = 1;
-          const oc = new ObjectCluster(this.device?.name ?? 'Shimmer3R');
+          const oc = new ObjectCluster(this._deviceLabel());
 
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
@@ -784,9 +830,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   private async _write(u8: Uint8Array): Promise<void> {
-    if (!this.rx) throw new Error('Not connected (RX missing)');
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     this._log('Write', u8);
-    await this.rx.writeValue(toArrayBuffer(u8));
+    await this._transport.write(u8);
   }
 
   private async _writeExpectingAck(
