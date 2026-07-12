@@ -375,7 +375,13 @@ describe('decodeVerisenseLoggedData', () => {
   it('stops at the 0xFFFF/0xFFFF erased-flash sentinel', () => {
     const good = buildPage({
       payloadIndex: 0,
-      blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, 1, buildLis2dw12Body(() => [0, 0, 0]))],
+      blocks: [
+        buildDataBlock(
+          LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1,
+          1,
+          buildLis2dw12Body(() => [0, 0, 0]),
+        ),
+      ],
     });
     const blob = concat(good, Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]));
     const split = splitVerisenseLoggedPages(blob);
@@ -403,17 +409,31 @@ describe('findLoggedPayloadIndexGaps', () => {
     const mkPage = (idx: number): Uint8Array =>
       buildPage({
         payloadIndex: idx,
-        blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, idx, buildLis2dw12Body(() => [1, 1, 1]))],
+        blocks: [
+          buildDataBlock(
+            LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1,
+            idx,
+            buildLis2dw12Body(() => [1, 1, 1]),
+          ),
+        ],
       });
     const res = decodeVerisenseLoggedData(concat(mkPage(0), mkPage(3)));
-    expect(res.payloadIndexGaps).toEqual([{ afterPayloadIndex: 0, nextPayloadIndex: 3, missing: 2 }]);
+    expect(res.payloadIndexGaps).toEqual([
+      { afterPayloadIndex: 0, nextPayloadIndex: 3, missing: 2 },
+    ]);
   });
 });
 
 describe('decodeVerisenseLoggedData — boundary guard (never mis-decodes on a wrong footer length)', () => {
   const page = buildPage({
     payloadIndex: 0,
-    blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, 1, buildLis2dw12Body(() => [1, 1, 1]))],
+    blocks: [
+      buildDataBlock(
+        LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1,
+        1,
+        buildLis2dw12Body(() => [1, 1, 1]),
+      ),
+    ],
   });
 
   it('is clean when the design version matches the page', () => {
