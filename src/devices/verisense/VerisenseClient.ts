@@ -70,6 +70,11 @@ import { SensorVD6283 } from './sensors/SensorVD6283.js';
 import { SensorMAX32674 } from './sensors/SensorMAX32674.js';
 import { SensorMLX90632 } from './sensors/SensorMLX90632.js';
 import { isVerisenseSecondGenerationHardware } from './hardwareModels.js';
+import {
+  decodeVerisenseLoggedData,
+  type DecodeVerisenseLoggedDataOptions,
+  type DecodeVerisenseLoggedDataResult,
+} from './loggedData.js';
 import { toArrayBuffer } from '../../core/arrayBuffer.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import { WebSerialTransport } from '../../core/transport/WebSerialTransport.js';
@@ -858,6 +863,35 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       if (writable) await writable.close();
     }
+  }
+
+  /**
+   * Decode a raw logged-data transfer (the concatenated flash pages returned by
+   * {@link transferLoggedData}) into per-sensor samples, offline. Seeds the
+   * decoder with this client's current operational config, per-device
+   * calibration and hardware identifier so the block sizes, channel enables,
+   * sampling rates and calibration match the connected device; any of those can
+   * be overridden via `options`.
+   *
+   * Accepts the transfer `Blob`, an `ArrayBuffer`, or a `Uint8Array`. See
+   * {@link decodeVerisenseLoggedData} for the layered decode contract and the
+   * hardware-verification caveats.
+   */
+  async decodeLoggedData(
+    data: Blob | ArrayBuffer | Uint8Array,
+    options: DecodeVerisenseLoggedDataOptions = {},
+  ): Promise<DecodeVerisenseLoggedDataResult> {
+    let bytes: Uint8Array;
+    if (data instanceof Uint8Array) bytes = data;
+    else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else bytes = new Uint8Array(await data.arrayBuffer());
+
+    return decodeVerisenseLoggedData(bytes, {
+      operationalConfig: this.operationalConfig,
+      calibration: this._calibration,
+      hardwareIdentifier: this.hardwareIdentifier,
+      ...options,
+    });
   }
 
   // ---------------------------------------------------------------------------

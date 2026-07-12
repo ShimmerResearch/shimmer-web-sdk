@@ -107,6 +107,74 @@ bytes are accumulated and complete LiteProtocol messages are extracted with a
 length-aware framer, so ACKs and responses are recovered correctly no matter how
 the RFCOMM stream splits or coalesces them.
 
+## Verisense logged-data (flash-page) decoder
+
+`VerisenseBleDevice.transferLoggedData()` downloads the device's logged session as
+raw flash "payload" pages. `decodeVerisenseLoggedData()` turns those bytes into
+decoded per-sensor samples **offline**, with no hardware and no browser:
+
+```ts
+import { VerisenseBleDevice, decodeVerisenseLoggedData } from '@shimmerresearch/shimmer-web-sdk';
+
+const v = new VerisenseBleDevice();
+await v.connect();
+await v.readCalibrationParsed(); // optional: per-device calibration
+const result = await v.transferLoggedData(); // { blob, bytesWritten, ... }
+const bytes = new Uint8Array(await result.blob.arrayBuffer());
+
+const decoded = decodeVerisenseLoggedData(bytes, {
+  operationalConfig: v.operationalConfig ?? undefined, // enables/rates + FIFO block sizes
+  calibration: v.getCalibration(), // apply per-device calibration
+});
+
+console.log(
+  decoded.samplesDecoded,
+  'samples across',
+  Object.keys(decoded.sensors).length,
+  'sensors',
+);
+console.log(
+  'pages',
+  decoded.pagesTotal,
+  'bad',
+  decoded.pagesBad,
+  'skipped',
+  decoded.recordsSkipped,
+);
+// decoded.sensors[2].samples → LIS2DW12 samples ({ raw, cal, timestamps })
+```
+
+A logged flash page is a **container** — a page header (index + length + config),
+one-or-more data blocks, a footer (RTC/temperature/battery), and a page CRC. Each
+data block's sample framing (`[sensorId][tick u24 LE][FIFO bytes]`) is **identical
+to a live BLE stream payload**, so the decoder reuses the same `Sensor*.parsePayload`
+decoders, calibration and `SensorBase` timestamp logic — it only adds the container
+handling. Bad-CRC, unsizable, and truncated pages are **counted and reported, never
+guessed** (`pagesBad`, `recordsSkipped`, `truncatedTrailingPage`).
+
+### Logged-data decoder — verification status
+
+⚠️ **The logged-data decoder has NOT yet been validated against a real hardware
+flash capture.** The page/data-block layout was reconstructed from the Java
+reference (`PayloadDetails`, `PayloadContentsDetailsV8orAbove`, `DataBlockDetails`,
+`AsmBinaryFileConstants`) and the SDK's own live-stream decoders, and is unit-tested
+by round-tripping fixtures built to that layout. The following seams (tagged
+`@remarks HARDWARE-VERIFY` in `loggedData.ts`) must be confirmed against a capture:
+
+| Seam                                                               | Confidence | What a capture must confirm                                                    |
+| ------------------------------------------------------------------ | ---------- | ------------------------------------------------------------------------------ |
+| ADC / LIS2DW12 block size = 192 B                                  | High       | Fixed FIFO buffer sizes hold on-flash                                          |
+| LSM6DS3 block size (FIFO threshold × 2, from op config)            | Medium     | Byte size matches the configured FIFO watermark                                |
+| PPG block size                                                     | Low        | Derivation from channels × samples (supply `blockSizes[4]`)                    |
+| 2nd-gen ids (LSM6DSV 6, VD6283 7, MAX32674 8, MLX90632 9)          | Unknown    | Their flash datablock id + block size (no Java reference; supply `blockSizes`) |
+| PPG sample endianness                                              | Medium     | LE (SDK live decoder) vs BE (Java flash reference)                             |
+| Payload-config / footer length per firmware payload-design version | Medium     | `payloadConfigLength` / `payloadDesignVersion` defaults                        |
+| Absolute per-sample RTC (minute back-fill)                         | N/A        | Only relative tick timing + raw footer RTC are produced today                  |
+| Payload-design v1–v7 and ZLIB/XZ-compressed pages                  | N/A        | Not decoded — reported as skipped                                              |
+
+Any block size and the config/footer lengths can be overridden via the
+`decodeVerisenseLoggedData` options once verified.
+
 ## Building
 
 ```bash

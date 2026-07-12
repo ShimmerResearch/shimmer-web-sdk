@@ -379,3 +379,30 @@ export { SensorMAX32674 } from './devices/verisense/sensors/SensorMAX32674.js';
 export type { MAX32674Sample } from './devices/verisense/sensors/SensorMAX32674.js';
 export { SensorMLX90632 } from './devices/verisense/sensors/SensorMLX90632.js';
 export type { MLX90632Sample } from './devices/verisense/sensors/SensorMLX90632.js';
+
+// Verisense logged-data (flash-page) decoder
+export {
+  decodeVerisenseLoggedData,
+  splitVerisenseLoggedPages,
+  findLoggedPayloadIndexGaps,
+  verifyLoggedPageCrc,
+  resolveLoggedBlockSize,
+  loggedFooterLength,
+  loggedPayloadConfigLength,
+  loggedExtendedConfigBytes,
+  LOGGED_DATABLOCK_SENSOR_ID,
+  LOGGED_ADC_BLOCK_BYTES,
+  LOGGED_LIS2DW12_BLOCK_BYTES,
+  LOGGED_DATABLOCK_HEADER_BYTES,
+  LOGGED_PAGE_FIXED_OVERHEAD,
+  LOGGED_TICKS_PER_SECOND,
+} from './devices/verisense/loggedData.js';
+export type {
+  DecodeVerisenseLoggedDataOptions,
+  DecodeVerisenseLoggedDataResult,
+  DecodedLoggedSensor,
+  DecodedLoggedFooter,
+  LoggedPageSpan,
+  LoggedPageSplit,
+  LoggedPayloadIndexGap,
+} from './devices/verisense/loggedData.js';
