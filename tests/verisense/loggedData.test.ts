@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   decodeVerisenseLoggedData,
   splitVerisenseLoggedPages,
+  findLoggedPayloadIndexGaps,
   verifyLoggedPageCrc,
   resolveLoggedBlockSize,
   loggedFooterLength,
@@ -369,5 +370,68 @@ describe('decodeVerisenseLoggedData', () => {
     const res = decodeVerisenseLoggedData(page, { operationalConfig: op });
     expect(res.recordsSkipped).toBe(0);
     expect(res.sensors[3].samplesDecoded).toBe(2);
+  });
+
+  it('stops at the 0xFFFF/0xFFFF erased-flash sentinel', () => {
+    const good = buildPage({
+      payloadIndex: 0,
+      blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, 1, buildLis2dw12Body(() => [0, 0, 0]))],
+    });
+    const blob = concat(good, Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]));
+    const split = splitVerisenseLoggedPages(blob);
+    expect(split.pages).toHaveLength(1);
+    expect(split.truncatedTrailingPage).toBe(false);
+  });
+});
+
+describe('findLoggedPayloadIndexGaps', () => {
+  it('reports dropped-page gaps and resets in the payload-index sequence', () => {
+    const gaps = findLoggedPayloadIndexGaps([
+      { payloadIndex: 0 },
+      { payloadIndex: 1 },
+      { payloadIndex: 5 }, // dropped 2,3,4
+      { payloadIndex: 6 },
+      { payloadIndex: 2 }, // reset / wrap (non-increasing)
+    ]);
+    expect(gaps).toEqual([
+      { afterPayloadIndex: 1, nextPayloadIndex: 5, missing: 3 },
+      { afterPayloadIndex: 6, nextPayloadIndex: 2, missing: 0 },
+    ]);
+  });
+
+  it('is surfaced on the decode result', () => {
+    const mkPage = (idx: number): Uint8Array =>
+      buildPage({
+        payloadIndex: idx,
+        blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, idx, buildLis2dw12Body(() => [1, 1, 1]))],
+      });
+    const res = decodeVerisenseLoggedData(concat(mkPage(0), mkPage(3)));
+    expect(res.payloadIndexGaps).toEqual([{ afterPayloadIndex: 0, nextPayloadIndex: 3, missing: 2 }]);
+  });
+});
+
+describe('decodeVerisenseLoggedData — boundary guard (never mis-decodes on a wrong footer length)', () => {
+  const page = buildPage({
+    payloadIndex: 0,
+    blocks: [buildDataBlock(LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1, 1, buildLis2dw12Body(() => [1, 1, 1]))],
+  });
+
+  it('is clean when the design version matches the page', () => {
+    const res = decodeVerisenseLoggedData(page, { payloadDesignVersion: 9 });
+    expect(res.bytesUnattributed).toBe(0);
+    expect(res.pagesWithSkippedRecords).toBe(0);
+    expect(res.sensors[LOGGED_DATABLOCK_SENSOR_ID.ACCEL_1].samplesDecoded).toBe(32);
+  });
+
+  it('flags leftover bytes when the assumed footer is too short (v8 vs real v9)', () => {
+    const res = decodeVerisenseLoggedData(page, { payloadDesignVersion: 8 });
+    expect(res.bytesUnattributed).toBeGreaterThan(0);
+    expect(res.pagesWithSkippedRecords).toBe(1);
+  });
+
+  it('skips the block (no mis-attribution) when the assumed footer is too long (v10 vs real v9)', () => {
+    const res = decodeVerisenseLoggedData(page, { payloadDesignVersion: 10 });
+    expect(res.pagesWithSkippedRecords).toBe(1);
+    expect(res.samplesDecoded).toBe(0);
   });
 });
