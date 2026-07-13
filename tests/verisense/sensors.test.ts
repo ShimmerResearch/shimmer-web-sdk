@@ -169,6 +169,87 @@ describe('SensorADC', () => {
     expect(out?.mV ?? 0).toBeCloseTo(expected, 6);
   });
 
+  // DEV-874 Bug 1: the gen-2 DC GSR front end (21/150/562/1740 kΩ, 0.4986 V
+  // reference, 1.8 V ADC reference) applies to every GSR-capable board except
+  // the SR62 — selection must follow the hardware revision, not the
+  // caller-supplied identifier string. Expected conductances are the DEV-793
+  // resistor-sweep acceptance values.
+  describe('gen-2 GSR calibration by hardware revision (DEV-874)', () => {
+    /** 12-bit ADC count a gen-2 front end produces for a resistive load. */
+    const gen2AdcForLoad = (rLoadKohms: number, rFeedbackKohms: number): number =>
+      Math.round((0.4986 * (1 + rFeedbackKohms / rLoadKohms) * 4095) / 1.8);
+
+    /** GSR-only auto-range payload word for a range + 12-bit ADC count. */
+    const payloadWord = (range: number, adc12: number): Uint8Array => {
+      const raw = ((range & 0x03) << 14) | (adc12 & 0x0fff);
+      return new Uint8Array([raw & 0xff, (raw >> 8) & 0xff]);
+    };
+
+    const decodeGsr = (sensor: SensorADC, range: number, adc12: number) =>
+      sensor.parsePayload(payloadWord(range, adc12))[0].gsr!;
+
+    const GEN2_REF_KOHMS = [21.0, 150.0, 562.0, 1740.0];
+    const SWEEP: Array<{ rKohms: number; range: number; uS: number }> = [
+      { rKohms: 33, range: 0, uS: 30.3 },
+      { rKohms: 100, range: 1, uS: 10.0 },
+      { rKohms: 470, range: 2, uS: 2.13 },
+      { rKohms: 2700, range: 3, uS: 0.37 },
+    ];
+
+    it('SR61-5 decodes the DEV-793 resistor sweep with the gen-2 resistor set', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(61, 5, 0);
+
+      for (const { rKohms, range, uS } of SWEEP) {
+        const adc12 = gen2AdcForLoad(rKohms, GEN2_REF_KOHMS[range]);
+        const gsr = decodeGsr(sensor, range, adc12);
+        expect(gsr.range).toBe(range);
+        // Within 1% of the fitted load (ADC quantization only).
+        expect(Math.abs(gsr.kOhms - rKohms) / rKohms).toBeLessThan(0.01);
+        expect(gsr.uS).toBeCloseTo(uS, 1);
+      }
+    });
+
+    it('SR68-9 uses the same gen-2 set (previously identifier-gated behavior kept)', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(68, 9, 0);
+      const adc12 = gen2AdcForLoad(100, GEN2_REF_KOHMS[1]);
+      expect(decodeGsr(sensor, 1, adc12).uS).toBeCloseTo(10.0, 1);
+    });
+
+    it('SR62 keeps the Shimmer3 resistor set, 0.5 V GSR reference and 3.0 V ADC reference', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(62, 0, 0);
+
+      // 100 kΩ on range 1 (287 kΩ feedback): volts = 0.5·(1+287/100), 3.0 V ref.
+      const adc12 = Math.round((0.5 * (1 + 287.0 / 100.0) * 4095) / 3.0);
+      const gsr = decodeGsr(sensor, 1, adc12);
+      expect(gsr.kOhms).toBeCloseTo(100, 0);
+      expect(gsr.uS).toBeCloseTo(10.0, 1);
+    });
+
+    it('falls back to the identifier string only when no revision has been read', () => {
+      const pulse = new SensorADC(); // default identifier VERISENSE_PULSE_PLUS
+      const adc12 = gen2AdcForLoad(100, GEN2_REF_KOHMS[1]);
+      expect(decodeGsr(pulse, 1, adc12).uS).toBeCloseTo(10.0, 1);
+
+      const gsrPlus = new SensorADC();
+      gsrPlus.setHardwareIdentifier('VERISENSE_GSR_PLUS');
+      const adc12Sr62 = Math.round((0.5 * (1 + 287.0 / 100.0) * 4095) / 3.0);
+      expect(decodeGsr(gsrPlus, 1, adc12Sr62).uS).toBeCloseTo(10.0, 1);
+    });
+
+    it('applies the gen-2 range-3 uncal clamp limit (1134) on SR61-5', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(61, 5, 0);
+      // Below the gen-2 limit the ADC count is clamped to 1134 before calibration.
+      const clamped = decodeGsr(sensor, 3, 700);
+      const atLimit = decodeGsr(sensor, 3, 1134);
+      expect(clamped.adc12).toBe(1134);
+      expect(clamped.kOhms).toBe(atLimit.kOhms);
+    });
+  });
+
   it('decodeAdcSampleRateHz maps rate codes to 32768/divisor (Off -> null)', () => {
     expect(gsr.decodeAdcSampleRateHz(0)).toBeNull(); // Off
     expect(gsr.decodeAdcSampleRateHz(23)).toBeCloseTo(51.2, 6); // 32768/640
@@ -334,6 +415,53 @@ describe('SensorLSM6DSV', () => {
     // Each stream's last sample anchors at the block's last-sample time.
     expect(ts[4].tsMillis).toBeCloseTo(1000, 6);
     expect(ts[5].tsMillis).toBeCloseTo(1000, 6);
+  });
+
+  // DEV-874 Bug 2: LSM6DSV gyro default scaling must use the ST angular-rate
+  // sensitivity (4.375 mdps/LSB at ±125 dps, doubling per range), NOT FS/32768 —
+  // the gyro does not span the 16-bit range at nominal full scale.
+  describe('gyro default scaling (DEV-874)', () => {
+    /** One-entry LSM6DSV payload: 16-bit count then tag<<3 + xyz i16le. */
+    const payloadFor = (tag: number, x: number): Uint8Array =>
+      new Uint8Array([1, 0, (tag & 0x1f) << 3, x & 0xff, (x >> 8) & 0xff, 0, 0, 0, 0]);
+
+    const configure = (fsGCode: number): SensorLSM6DSV => {
+      const sensor = new SensorLSM6DSV();
+      const op = new Uint8Array(72);
+      op[1] = 0b01100000; // accel2En + gyroEn
+      op[18] = 0x03; // odrXl 15 Hz, fsXl ±2g
+      op[19] = ((fsGCode & 0x0f) << 4) | 0x03; // fsG | odrG 15 Hz
+      sensor.applyOperationalConfig(op);
+      return sensor;
+    };
+
+    it('raw 32767 at ±500 dps reads ~573.4 dps (not 500.0)', () => {
+      const sensor = configure(2); // ±500 dps
+      const out = sensor.parsePayload(payloadFor(1, 32767));
+      expect(out[0].gyro?.cal[0]).toBeCloseTo(573.4, 1);
+    });
+
+    it('sensitivity doubles per range from 4.375 mdps/LSB at ±125 dps', () => {
+      // 1 LSB in dps per full-scale code (= 1/LSB-per-dps: 228.571→14.286).
+      const expected: Array<[number, number]> = [
+        [0, 0.004375],
+        [1, 0.00875],
+        [2, 0.0175],
+        [3, 0.035],
+        [4, 0.07],
+      ];
+      for (const [code, dpsPerLsb] of expected) {
+        const sensor = configure(code);
+        const out = sensor.parsePayload(payloadFor(1, 1000));
+        expect(out[0].gyro?.cal[0]).toBeCloseTo(1000 * dpsPerLsb, 6);
+      }
+    });
+
+    it('accel default scaling is unchanged (FS/32768 · g)', () => {
+      const sensor = configure(2);
+      const out = sensor.parsePayload(payloadFor(2, 32767));
+      expect(out[0].accel?.cal[0]).toBeCloseTo((2 / 32768) * 9.80665 * 32767, 3);
+    });
   });
 
   it('spreads sensor-hub mag over the same block window as accel (block-derived rate)', () => {
