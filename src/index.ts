@@ -154,6 +154,7 @@ export {
   getVerisenseHardwareFriendlyName,
   formatVerisenseHardwareRevision,
   isVerisenseSecondGenerationHardware,
+  isVerisenseGsrSupportedHardware,
   getVerisenseHardwareCapabilities,
   getVerisenseHardwareSensorSupport,
   getVerisenseHardwareRevision,

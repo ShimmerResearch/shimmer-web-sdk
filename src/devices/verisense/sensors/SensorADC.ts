@@ -109,6 +109,29 @@ export class SensorADC extends SensorBase {
     return 1.0;
   }
 
+  /**
+   * Whether this board uses the SR62 (Verisense GSR+) Shimmer3-style analog
+   * front end: 3.0 V SAADC reference, 40.2/287/1000/3300 kΩ GSR feedback
+   * resistors, 0.5 V GSR reference and range-3 uncal limit 683. Every other
+   * GSR-capable board (SR61 >= 5, SR68 >= 5 — firmware
+   * `ShimBrd_isGsrSupportedForHwVersion`) carries the second-generation DC
+   * front end: 1.8 V reference, 21/150/562/1740 kΩ, 0.4986 V, limit 1134.
+   *
+   * Mirrors the firmware's `selectFeedbackResistorsFromHwVersion` (hal_gsr.c),
+   * which keys the choice on the major revision alone (SR62 vs everything
+   * else). Prefers the production-config hardware revision; falls back to the
+   * caller-supplied hardware identifier when no revision has been read yet.
+   * Previously this was keyed only on the `VERISENSE_PULSE_PLUS` identifier
+   * string, so an SR61-5/6 presenting its true identity decoded ~1.91× high
+   * (DEV-874).
+   */
+  private usesSr62GsrFrontEnd(): boolean {
+    if (this.hwRevisionMajor != null) {
+      return this.hwRevisionMajor === 62;
+    }
+    return this.hardwareIdentifier === 'VERISENSE_GSR_PLUS';
+  }
+
   setEnabled(
     arg1: boolean | { gsr?: boolean; batt?: boolean },
     opConfigBytes?: Uint8Array | null,
@@ -171,7 +194,7 @@ export class SensorADC extends SensorBase {
   calibrateAdcToVolts(uncal12bit: number): number {
     const adcRange = 2 ** 12 - 1;
     let refVoltage = 1.8 / 4.0;
-    if (this.hardwareIdentifier === 'VERISENSE_GSR_PLUS') {
+    if (this.usesSr62GsrFrontEnd()) {
       refVoltage = 3.0 / 4.0;
     }
     const adcScaling = 1.0 / 4.0;
@@ -179,11 +202,12 @@ export class SensorADC extends SensorBase {
   }
 
   calibrateGsrToKOhmsUsingAmplifierEq(volts: number, range: number): number {
-    let rFeedback = this.SHIMMER3_REF_KOHMS[range];
-    if (this.hardwareIdentifier === 'VERISENSE_PULSE_PLUS') {
-      rFeedback = this.SR68_REF_KOHMS[range];
+    let rFeedback = this.SR68_REF_KOHMS[range];
+    let gsrRefVoltage = 0.4986;
+    if (this.usesSr62GsrFrontEnd()) {
+      rFeedback = this.SHIMMER3_REF_KOHMS[range];
+      gsrRefVoltage = 0.5;
     }
-    const gsrRefVoltage = this.hardwareIdentifier === 'VERISENSE_PULSE_PLUS' ? 0.4986 : 0.5;
     return rFeedback / (volts / gsrRefVoltage - 1.0);
   }
 
@@ -233,10 +257,9 @@ export class SensorADC extends SensorBase {
         if (currentRange === 4) currentRange = (gsrraw >> 14) & 0x03;
 
         if (currentRange === 3) {
-          const limit =
-            this.hardwareIdentifier === 'VERISENSE_PULSE_PLUS'
-              ? this.GSR_UNCAL_LIMIT_RANGE3_SR68
-              : this.GSR_UNCAL_LIMIT_RANGE3_SR62;
+          const limit = this.usesSr62GsrFrontEnd()
+            ? this.GSR_UNCAL_LIMIT_RANGE3_SR62
+            : this.GSR_UNCAL_LIMIT_RANGE3_SR68;
           if (adc12 < limit) adc12 = limit;
         }
 

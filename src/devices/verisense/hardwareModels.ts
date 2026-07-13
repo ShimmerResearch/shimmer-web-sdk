@@ -65,6 +65,24 @@ export function getVerisenseHardwareCapabilities(
 }
 
 /**
+ * GSR-capable hardware. Mirrors the firmware's authoritative
+ * `ShimBrd_isGsrSupportedForHwVersion` (shimmer_boards.c):
+ * - SR62 (any revision)
+ * - SR61 minor >= 5
+ * - SR68 minor >= 5
+ *
+ * Deliberately NOT {@link isVerisenseSecondGenerationHardware}: that predicate
+ * requires SR68 >= 9, but GSR arrived on the SR68 at minor revision 5.
+ */
+export function isVerisenseGsrSupportedHardware(revHwMajor: number, revHwMinor: number): boolean {
+  const major = Number(revHwMajor);
+  const minor = Number(revHwMinor);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
+
+  return major === 62 || ((major === 61 || major === 68) && minor >= 5);
+}
+
+/**
  * Which physical sensor blocks a Verisense board carries. Each flag lines up
  * with an operational-config field group (see
  * `getVerisenseSupportedOperationalFieldGroupIds`), so callers can decide which
@@ -177,11 +195,14 @@ export function getVerisenseHardwareSensorSupport(
             algorithmHub: true,
             ledAutoBrightness: true,
           }
-        : // SR68.1-8: LIS2DW12 + PPG; skin temperature added from SR68.7.
+        : // SR68.1-8: LIS2DW12 + PPG; GSR added from SR68.5 (Model IC matrix +
+          // firmware ShimBrd_isGsrSupportedForHwVersion); skin temperature from
+          // SR68.7.
           {
             ...VERISENSE_SENSOR_SUPPORT_NONE,
             accel1: true,
             ppg: true,
+            gsr: isVerisenseGsrSupportedHardware(major, minor),
             skinTemperature: minor >= 7,
           };
     default:
