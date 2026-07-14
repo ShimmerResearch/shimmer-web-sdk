@@ -39,6 +39,25 @@ export type {
   SensorStreamStats,
   StreamStatsSnapshot,
 } from './core/StreamStats.js';
+export {
+  MadgwickAhrs,
+  MagHardIronEstimator,
+  OrientationEstimator,
+  quatMultiply,
+  quatConjugate,
+  quatNormalize,
+  quatRotateVector,
+  quatSlerp,
+  quatToEulerDeg,
+} from './core/orientation.js';
+export type {
+  Quaternion,
+  Vec3,
+  EulerAnglesDeg,
+  OrientationSampleInput,
+  OrientationEstimatorOptions,
+  OrientationMode,
+} from './core/orientation.js';
 
 // Shimmer3R
 export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
