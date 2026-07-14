@@ -279,9 +279,23 @@ export class MadgwickAhrs {
 
     const s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
     const s1 =
-      _4q1 * q3q3 - _2q3 * ax + 4 * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
+      _4q1 * q3q3 -
+      _2q3 * ax +
+      4 * q0q0 * q1 -
+      _2q0 * ay -
+      _4q1 +
+      _8q1 * q1q1 +
+      _8q1 * q2q2 +
+      _4q1 * az;
     const s2 =
-      4 * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
+      4 * q0q0 * q2 +
+      _2q0 * ax +
+      _4q2 * q3q3 -
+      _2q3 * ay -
+      _4q2 +
+      _8q2 * q1q1 +
+      _8q2 * q2q2 +
+      _4q2 * az;
     const s3 = 4 * q1q1 * q3 - _2q1 * ax + 4 * q2q2 * q3 - _2q2 * ay;
     norm = Math.hypot(s0, s1, s2, s3) || 1;
     this.integrate(gx, gy, gz, s0 / norm, s1 / norm, s2 / norm, s3 / norm, dtSec);
@@ -302,12 +316,7 @@ export class MadgwickAhrs {
     const qDot1 = 0.5 * (q0 * gx + q2 * gz - q3 * gy) - this.beta * s1;
     const qDot2 = 0.5 * (q0 * gy - q1 * gz + q3 * gx) - this.beta * s2;
     const qDot3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx) - this.beta * s3;
-    this.q = quatNormalize([
-      q0 + qDot0 * dt,
-      q1 + qDot1 * dt,
-      q2 + qDot2 * dt,
-      q3 + qDot3 * dt,
-    ]);
+    this.q = quatNormalize([q0 + qDot0 * dt, q1 + qDot1 * dt, q2 + qDot2 * dt, q3 + qDot3 * dt]);
   }
 }
 

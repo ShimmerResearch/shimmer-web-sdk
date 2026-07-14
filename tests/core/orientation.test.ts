@@ -105,12 +105,7 @@ describe('MadgwickAhrs', () => {
       qTrue = quatNormalize(quatMultiply(qTrue, dq));
       const accel = quatRotateVector(quatConjugate(qTrue), [0, 0, 1]);
       const mag = quatRotateVector(quatConjugate(qTrue), [22, 0, -41]);
-      f.update(
-        [gyroDps[0] * D2R, gyroDps[1] * D2R, gyroDps[2] * D2R],
-        accel,
-        mag,
-        dt,
-      );
+      f.update([gyroDps[0] * D2R, gyroDps[1] * D2R, gyroDps[2] * D2R], accel, mag, dt);
     }
     expect(quatSimilarity(f.q, qTrue)).toBeGreaterThan(0.995);
   });
