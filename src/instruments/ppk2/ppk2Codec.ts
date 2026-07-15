@@ -50,13 +50,13 @@ export function clonePpk2Modifiers(m: Readonly<Ppk2Modifiers>): Ppk2Modifiers {
     calibrated: m.calibrated,
     hw: m.hw,
     ia: m.ia,
-    r: [...m.r],
-    gs: [...m.gs],
-    gi: [...m.gi],
-    o: [...m.o],
-    s: [...m.s],
-    i: [...m.i],
-    ug: [...m.ug],
+    r: [...m.r] as Ppk2RangeTable,
+    gs: [...m.gs] as Ppk2RangeTable,
+    gi: [...m.gi] as Ppk2RangeTable,
+    o: [...m.o] as Ppk2RangeTable,
+    s: [...m.s] as Ppk2RangeTable,
+    i: [...m.i] as Ppk2RangeTable,
+    ug: [...m.ug] as Ppk2RangeTable,
   };
 }
 
@@ -330,6 +330,9 @@ export class MinMaxDownsampler {
   constructor(binSize: number, maxBins = Number.POSITIVE_INFINITY) {
     if (!Number.isInteger(binSize) || binSize < 1) {
       throw new Error('binSize must be a positive integer');
+    }
+    if (maxBins !== Number.POSITIVE_INFINITY && (!Number.isInteger(maxBins) || maxBins < 1)) {
+      throw new Error('maxBins must be a positive integer or Infinity');
     }
     this.binSize = binSize;
     this.maxBins = maxBins;

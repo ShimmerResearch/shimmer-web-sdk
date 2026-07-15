@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   Ppk2SampleDecoder,
   DEFAULT_PPK2_MODIFIERS,
@@ -18,8 +17,9 @@ interface DecodeVector {
   expectedLogic: number[];
 }
 
+// ESM-safe fixture path (no __dirname under "type": "module").
 const fixture: { decodeVectors: DecodeVector[] } = JSON.parse(
-  readFileSync(join(__dirname, 'fixtures', 'ppk2-fixtures.json'), 'utf-8'),
+  readFileSync(new URL('fixtures/ppk2-fixtures.json', import.meta.url), 'utf-8'),
 );
 
 function rawBytes(v: DecodeVector): Uint8Array {
@@ -119,5 +119,16 @@ describe('MinMaxDownsampler', () => {
     ds.push(Float64Array.from([1, 2, 3, 4, 5]));
     expect(ds.binCount).toBe(3);
     expect(ds.snapshot().map((b) => b.mean)).toEqual([3, 4, 5]);
+  });
+
+  it('rejects an invalid binSize or maxBins', () => {
+    expect(() => new MinMaxDownsampler(0)).toThrow(/binSize/);
+    expect(() => new MinMaxDownsampler(1, 0)).toThrow(/maxBins/);
+    expect(() => new MinMaxDownsampler(1, -2)).toThrow(/maxBins/);
+    expect(() => new MinMaxDownsampler(1, 2.5)).toThrow(/maxBins/);
+    expect(() => new MinMaxDownsampler(1, Number.NaN)).toThrow(/maxBins/);
+    // The Infinity default and explicit positive integers are accepted.
+    expect(() => new MinMaxDownsampler(1)).not.toThrow();
+    expect(() => new MinMaxDownsampler(1, 5)).not.toThrow();
   });
 });

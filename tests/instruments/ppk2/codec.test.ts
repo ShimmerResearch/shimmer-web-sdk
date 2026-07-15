@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   convertSourceVoltage,
   clampSourceVoltageMv,
@@ -27,8 +26,9 @@ interface Fixture {
   };
 }
 
+// ESM-safe fixture path (no __dirname under "type": "module").
 const fixture: Fixture = JSON.parse(
-  readFileSync(join(__dirname, 'fixtures', 'ppk2-fixtures.json'), 'utf-8'),
+  readFileSync(new URL('fixtures/ppk2-fixtures.json', import.meta.url), 'utf-8'),
 );
 
 describe('convertSourceVoltage', () => {
