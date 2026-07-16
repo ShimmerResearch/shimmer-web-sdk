@@ -144,7 +144,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'LOW_BATT_AUTO_STOP_DISABLED',
     label: 'Low-Power Auto-Stop',
-    desc: 'Stop recording and BLE data transfers when the battery drops below the low-power threshold. Disabling keeps the device recording until the battery is exhausted (DEV-366) at the risk of data loss from brown-out.',
+    desc: 'Stop recording and BLE data transfers when the battery drops below the low-power threshold. Disabling keeps the device recording until the battery is exhausted, at the risk of data loss from brown-out.',
     kind: 'bit',
     index: OP_IDX.GEN_CFG_2,
     shift: 3,
