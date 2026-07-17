@@ -4,11 +4,12 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
-| Device                  | Class                | Transport                            |
-| ----------------------- | -------------------- | ------------------------------------ |
-| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth                        |
-| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP (injected transport only) |
-| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial            |
+| Device                  | Class                | Transport                                |
+| ----------------------- | -------------------- | ---------------------------------------- |
+| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth                            |
+| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP (injected transport only)     |
+| Shimmer in dock/Base    | `WiredShimmerClient` | Dock FTDI UART (injected transport only) |
+| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial                |
 
 ## Quick Start
 
@@ -106,6 +107,82 @@ Unlike the BLE clients, `Shimmer3Client` runs a **byte-stream parser**: inbound
 bytes are accumulated and complete LiteProtocol messages are extracted with a
 length-aware framer, so ACKs and responses are recovered correctly no matter how
 the RFCOMM stream splits or coalesces them.
+
+### Wired / dock UART (`WiredShimmerClient`)
+
+> **Verification status: code-complete, pending hardware.** The protocol is
+> ported byte-for-byte from the Java driver and covered by unit tests with
+> hand-derived fixtures (the CRC is cross-checked against the Java `ShimmerCrc`
+> run directly), but it has **not yet been exercised against a physical dock**.
+> See _Hardware-verify items_ below.
+
+A Shimmer sitting in a **BasicDock / Base** is reachable over the dock's FTDI
+**UART** (host↔device). This is a completely different protocol from the
+Bluetooth LiteProtocol above — `$`-header packets addressed by _component_ +
+_property_, with a length byte, payload and a Shimmer-specific CRC (seed
+`0xB0CA`). `WiredShimmerClient` is phase **D1** of dock support: **identify,
+status, and property-level config** for a single docked device. It does **not**
+cover mass-storage/SD, firmware flashing, or the multi-slot Base state machine
+(later phases), and the dock protocol has no streaming.
+
+Transport injection is **required** (a docked Shimmer is only reachable over the
+wired link, so there is no browser default and `connect()` throws without one).
+Supply a serial `ShimmerTransport` reporting `capabilities.framed = false`;
+configure the port at `UART_DOCK_BAUD_RATE` (115200, 8N1, no flow control).
+
+```ts
+import { WiredShimmerClient, UART_PROP } from '@shimmerresearch/shimmer-web-sdk';
+
+const client = new WiredShimmerClient({ transport: dockSerialTransport }); // required
+client.onStatus = (m) => console.log(m);
+
+await client.connect();
+const id = await client.identify(); // { mac, hardwareVersion, firmwareVersion, expansionBoard }
+const status = await client.getStatus(); // { voltage, percentage, chargingStatus, adcValue }
+
+// Property-level config (READ / WRITE a single component+property):
+const range = await client.getConfig(UART_PROP.GSR.RANGE);
+await client.setConfig(UART_PROP.GSR.RANGE, new Uint8Array([2]));
+
+// Low-level InfoMem escape hatch (raw bytes; layout not interpreted in D1):
+const infomem = await client.readInfoMem(0, 128);
+```
+
+Like `Shimmer3Client`, the dock link is an **unframed byte stream**, so the
+client accumulates inbound bytes and extracts complete packets with a
+length-aware parser (`wiredPacketLength`), robust to packets split, dribbled or
+coalesced arbitrarily. A packet whose CRC fails triggers a single-byte resync,
+and device error responses (`BAD_CMD` / `BAD_ARG` / `BAD_CRC`) reject with their
+reason.
+
+**Config surface.** The wired protocol exposes discrete config commands via the
+Java `mListOfUartCommandsConfig` list (surfaced as `UART_CONFIG_COMMANDS`,
+same order). These are **GQ-oriented** enable/rate/range/divider properties; for
+a Shimmer3/3R the app's real configuration model (enabled sensors, sampling
+rate, sensor ranges) lives in **InfoMem**, not in these per-property commands.
+D1 therefore exposes both: the property-level `getConfig`/`setConfig`/
+`getConfigAll` for the discrete commands the firmware implements, and a raw
+`readInfoMem`/`writeInfoMem` escape hatch for the InfoMem-backed config — but it
+does **not** port the InfoMem layout (that maps InfoMem bytes ↔ the app config
+model and is a later phase).
+
+**Hardware-verify items** (need a real dock to confirm):
+
+- **Init/timing.** The 500 ms per-request response timeout (Java
+  `SERIAL_PORT_TIMEOUT`) and the 2× MAC-read retry are ported as-is; real dock
+  latency may warrant tuning. Whether the FTDI port needs DTR/RTS asserted or a
+  settle delay after open is transport-level and not yet exercised.
+- **VER payload width.** The parser accepts both the 7-byte (1-byte HW version)
+  and 8-byte (2-byte HW version) layouts; which a given docked firmware returns
+  needs confirming on hardware.
+- **Battery semantics.** Voltage (ADC → V via the shared U12 calibration ×1.988
+  divider) and the 4th-order charge-% polynomial are ported exactly, but the
+  charging-status byte values (`0xC0`/`0x40`/`0x80`/`0x00`/`0xFF`) and the
+  percentage curve should be sanity-checked against a docked device across
+  charge states.
+- **Expansion-board / MAC byte order.** MAC is emitted in device byte order
+  (first 6 payload bytes, no reversal, per the Java); the daughter-card ID is
+  read as `[boardId, boardRev, specialRev]`. Confirm against known hardware.
 
 ## Building
 

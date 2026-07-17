@@ -118,6 +118,63 @@ export type {
   Shimmer3FwVersion,
 } from './devices/shimmer3/protocol.js';
 
+// Wired / dock UART (Shimmer docked in a BasicDock/Base)
+export { WiredShimmerClient } from './devices/dock/WiredShimmerClient.js';
+export type {
+  WiredShimmerClientOptions,
+  WiredIdentity,
+} from './devices/dock/WiredShimmerClient.js';
+export {
+  UART_PACKET_HEADER,
+  UART_DOCK_BAUD_RATE,
+  UART_PACKET_CMD,
+  UART_COMPONENT,
+  UART_PROP,
+  UART_CONFIG_COMMANDS,
+  PACKET_OVERHEAD_RESPONSE_DATA,
+  PACKET_OVERHEAD_RESPONSE_OTHER,
+  WIRED_DEFAULTS,
+  CHARGING_STATUS_BYTE,
+} from './devices/dock/constants.js';
+export type {
+  UartPacketCmd,
+  UartComponent,
+  UartPermission,
+  UartComponentProperty,
+  ChargingStatus,
+} from './devices/dock/constants.js';
+export {
+  SHIMMER_UART_CRC_INIT,
+  shimmerUartCrcByte,
+  shimmerUartCrcCalc,
+  shimmerUartCrcCheck,
+} from './devices/dock/crc.js';
+export {
+  buildUartPacket,
+  buildReadPacket,
+  buildWritePacket,
+  buildMemReadPayload,
+  buildMemWritePayload,
+  parseUartPacket,
+  wiredPacketLength,
+  isBadResponse,
+  badResponseReason,
+  parseMacId,
+  parseVersionInfo,
+  parseBatteryStatus,
+  battAdcToVoltage,
+  battVoltageToPercentage,
+  parseExpansionBoard,
+  NEED_MORE as WIRED_NEED_MORE,
+  RESYNC as WIRED_RESYNC,
+} from './devices/dock/protocol.js';
+export type {
+  UartRxPacket,
+  WiredVersionInfo,
+  WiredBatteryStatus,
+  ExpansionBoardInfo,
+} from './devices/dock/protocol.js';
+
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
