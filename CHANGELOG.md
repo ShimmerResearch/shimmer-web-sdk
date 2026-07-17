@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `isVerisenseLipoBatteryHardware` (DEV-809) — hardware models with a permanently attached rechargeable LiPo battery (SR62 any revision, SR61.5+, SR68.9+), mirroring the firmware's `ShimBrd_isLipoPresentForHwVersion`. On these boards the firmware hard-overrides the op-config battery-type bit (GEN_CFG_2 bit 0, Zinc-Air/NiMH) to LiPo, so config editors should disable the Battery Type field. The `BATT_TYPE` schema description now notes this.
+- `isVerisenseLipoBatteryHardware` (DEV-809) — hardware models with a permanently attached rechargeable LiPo battery (SR62 any revision, SR61.5+, SR68.9+), mirroring the firmware's `ShimBrd_isLipoPresentForHwVersion`. On these boards the firmware hard-overrides the op-config battery-type bit (GEN_CFG_2 bit 0, Zinc-Air/NiMH) to LiPo, so config editors should disable the Battery Type field. The `BATT_TYPE` schema description now notes this, and also that Zinc-Air is legacy — new configurations on replaceable-battery models should use NiMH.
 
 - **`LOW_BATT_AUTO_STOP_DISABLED` operational-config field** (DEV-366) — GEN_CFG_2 (byte 3) bit 3, rendered in the General / Sensors group as "Low-Power Auto-Stop". Default `0` = auto-stop enabled (existing behaviour: recording, long-term-flash writes and BLE data transfers stop below the low-battery threshold); `1` = the device keeps recording until the battery is exhausted, at the risk of losing the payload in flight when the supply collapses. Requires matching firmware; older firmware ignores the bit.
 
