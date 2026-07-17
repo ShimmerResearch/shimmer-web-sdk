@@ -103,11 +103,7 @@ function sdTimestampBytes(hw: number, fwId: number, v: FwVersion): 2 | 3 {
  * field is likewise divided by 32768 here — matching the Java driver, whose
  * SD-log sampling-rate math also uses the (non-TCXO) crystal for these logs.
  */
-function samplingClockFreq(
-  tcxo: boolean,
-  hw: number,
-  expBrd: SdLogExpansionBoard | null,
-): number {
+function samplingClockFreq(tcxo: boolean, hw: number, expBrd: SdLogExpansionBoard | null): number {
   if (!tcxo) return SDLOG_CLOCK_FREQ;
   // isTcxoClock20MHz (ShimmerObject.java:10882-10896): Shimmer3/3R + EXG
   // unified board id 47, rev 1, revSpecial 1.
