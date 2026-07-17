@@ -165,6 +165,8 @@ export {
   battAdcToVoltage,
   battVoltageToPercentage,
   parseExpansionBoard,
+  msToRtcBytesLE,
+  isSupportedRtcConfigViaUart,
   NEED_MORE as WIRED_NEED_MORE,
   RESYNC as WIRED_RESYNC,
 } from './devices/dock/protocol.js';

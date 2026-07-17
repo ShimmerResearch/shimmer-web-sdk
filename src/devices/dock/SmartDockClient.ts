@@ -412,13 +412,13 @@ export class SmartDockClient extends BaseShimmerClient {
   /**
    * Select `slotNumber`, then encode + write a configuration to the docked
    * Shimmer's InfoMem, atomically. See
-   * {@link WiredShimmerClient.writeInfoMemConfig} for the device-write and
-   * verify semantics.
+   * {@link WiredShimmerClient.writeInfoMemConfig} for the device-write, RTC
+   * (`opts.setRtc`, default true) and verify semantics.
    */
   async writeInfoMemConfig(
     slotNumber: number,
     config: InfoMemDeviceConfig,
-    opts: { verify?: boolean } = {},
+    opts: { verify?: boolean; setRtc?: boolean } = {},
   ): Promise<{ verified: boolean | null }> {
     return this._serialize(async () => {
       await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);

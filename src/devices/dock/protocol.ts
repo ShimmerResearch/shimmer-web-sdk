@@ -123,6 +123,84 @@ function isDaughterCardId(arg: UartComponentProperty): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// RTC (real-world clock) payload — set from host time
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a UNIX-epoch millisecond value as the 8-byte, LSB-first RTC payload the
+ * Shimmer expects on `MAIN_PROCESSOR.RTC_CFG_TIME`.
+ *
+ * Ported byte-for-byte from `UtilShimmer.convertMilliSecondsToShimmerRtcDataBytesLSB`
+ * (UtilShimmer.java:854-868):
+ *   1. `ticks = (long)((double)milliseconds * 32.768)` — the 32.768 kHz RTC tick
+ *      count; the `(long)` cast truncates toward zero (`Math.trunc` here matches,
+ *      since the IEEE-754 double multiply is identical).
+ *   2. `ByteBuffer.allocate(8).putLong(ticks)` — 8 bytes big-endian (…MSB).
+ *   3. `ArrayUtils.reverse(...)` — reversed to little-endian (LSB first).
+ *
+ * BigInt is used for the 64-bit width so the full 8-byte tick count is exact
+ * (host-time ticks are ~5.6e13 in 2026 — within double range, but BigInt keeps
+ * the byte extraction exact regardless).
+ *
+ * HARDWARE-VERIFY: this exact 8-byte LSB-first tick encoding has not been
+ * exercised against a real dock/Shimmer; it is a faithful port of the Java only.
+ */
+export function msToRtcBytesLE(milliseconds: number): Uint8Array {
+  const ticks = BigInt(Math.trunc(milliseconds * 32.768));
+  const out = new Uint8Array(8);
+  let v = ticks;
+  for (let i = 0; i < 8; i++) {
+    out[i] = Number(v & 0xffn); // LSB first
+    v >>= 8n;
+  }
+  return out;
+}
+
+// HW/FW identity codes referenced by the RTC-config gate below
+// (ShimmerVerDetails.HW_ID / FW_ID). Only the values the gate reads are defined.
+const RTC_HW_ID = Object.freeze({
+  SHIMMER_3: 3,
+  SHIMMER_GQ_BLE: 5,
+  SHIMMER_2R_GQ: 9,
+  SHIMMER_3R: 10,
+  SHIMMER_GQ_802154_LR: 56,
+  SHIMMER_GQ_802154_NR: 57,
+  SHIMMER_4_SDK: 58,
+} as const);
+const RTC_FW_ID = Object.freeze({
+  SDLOG: 2,
+  LOGANDSTREAM: 3,
+  GQ_BLE: 5,
+  STROKARE: 15,
+} as const);
+
+/**
+ * Whether the docked device supports setting its real-world clock over the dock
+ * UART. Faithful port of `ShimmerVerObject.isSupportedRtcConfigViaUart(hwVer, fwId)`
+ * (ShimmerVerObject.java:405-418) — desktop `CallableWriteConfig` only issues the
+ * RTC write when this is true (BasicDock.java:1564), and SKIPS it otherwise. For
+ * the Shimmer3/3R scope: Shimmer3 requires SDLog/LogAndStream/StroKare firmware;
+ * Shimmer3R is supported on any firmware. The GQ/Shimmer4 branches are ported
+ * verbatim for completeness.
+ */
+export function isSupportedRtcConfigViaUart(hwVer: number, fwId: number): boolean {
+  if (
+    (hwVer === RTC_HW_ID.SHIMMER_3 && fwId === RTC_FW_ID.SDLOG) ||
+    (hwVer === RTC_HW_ID.SHIMMER_3 && fwId === RTC_FW_ID.LOGANDSTREAM) ||
+    (hwVer === RTC_HW_ID.SHIMMER_3 && fwId === RTC_FW_ID.STROKARE) ||
+    (hwVer === RTC_HW_ID.SHIMMER_GQ_BLE && fwId === RTC_FW_ID.GQ_BLE) ||
+    hwVer === RTC_HW_ID.SHIMMER_GQ_802154_NR ||
+    hwVer === RTC_HW_ID.SHIMMER_GQ_802154_LR ||
+    hwVer === RTC_HW_ID.SHIMMER_2R_GQ ||
+    hwVer === RTC_HW_ID.SHIMMER_4_SDK ||
+    hwVer === RTC_HW_ID.SHIMMER_3R
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // RX — framing (reassembly length) + single-packet parse
 // ---------------------------------------------------------------------------
 

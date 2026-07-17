@@ -23,6 +23,8 @@ import {
   parseVersionInfo,
   parseBatteryStatus,
   parseExpansionBoard,
+  msToRtcBytesLE,
+  isSupportedRtcConfigViaUart,
   NEED_MORE,
   RESYNC,
   type UartRxPacket,
@@ -418,10 +420,58 @@ export class WiredShimmerClient extends BaseShimmerClient {
   }
 
   /**
+   * Write the docked device's real-world clock from a host timestamp
+   * (`MAIN_PROCESSOR.RTC_CFG_TIME`), resolving on ACK. Port of
+   * `CommsProtocolWiredShimmerViaDock.writeRealWorldClockFromPcTime`
+   * (CommsProtocolWiredShimmerViaDock.java:138-153), which calls
+   * `writeRealWorldClock(System.currentTimeMillis())`.
+   *
+   * `nowMs` (UNIX epoch ms) is injectable for testability; it defaults to
+   * `Date.now()` — captured at call time, matching the Java's use of the current
+   * PC time. The payload is the 8-byte, LSB-first 32.768 kHz tick count
+   * ({@link msToRtcBytesLE}).
+   *
+   * NB the target property is `RTC_CFG_TIME` (0x04): the Java props table marks
+   * it READ_ONLY, yet the driver's SET issues a WRITE against it directly
+   * (line 150), which this mirrors by going through the low-level {@link _write}
+   * rather than the permission-checked {@link setConfig}.
+   *
+   * HARDWARE-VERIFY: the RTC payload format and RTC_CFG_TIME write have not been
+   * exercised against a real dock.
+   */
+  async writeRtcFromHostTime(nowMs?: number): Promise<void> {
+    return this._serialize(() => this._writeRtcFromHostTimeImpl(nowMs ?? Date.now()));
+  }
+
+  /** Non-serialized RTC write — callers must already hold the queue. */
+  private async _writeRtcFromHostTimeImpl(nowMs: number): Promise<void> {
+    const payload = msToRtcBytesLE(nowMs); // HARDWARE-VERIFY: ms × 32.768 ticks, 8 bytes LSB-first
+    await this._write(UART_PROP.MAIN_PROCESSOR.RTC_CFG_TIME, payload);
+    this._emitStatus('RTC set from host time');
+  }
+
+  /**
    * Encode + write a configuration to the docked device. The MAC is forced to
    * all-0xFF and the config-file-creation flag is set (device-write semantics),
    * so the firmware re-reads its MAC from the BT transceiver and regenerates the
    * SD config on undock/power-cycle.
+   *
+   * When `opts.setRtc` (default `true`, matching desktop), the device's
+   * real-world clock is written FIRST from the host time, then the InfoMem — the
+   * exact order of desktop `CallableWriteConfig.call()`
+   * (BasicDock.java:1556-1587): (1) RTC write when `isSupportedRtcConfigViaUart`,
+   * (2) chunked InfoMem write. The RTC write and InfoMem write are one atomic
+   * queued unit. RTC failure ABORTS the config write (the InfoMem write is NOT
+   * attempted) — desktop rethrows the RTC `ExecutionException` before reaching
+   * the InfoMem write (BasicDock.java:1564-1573), so this is deliberately NOT
+   * best-effort. On an identity that does not support RTC-via-UART the RTC write
+   * is SKIPPED (not failed), also matching desktop.
+   *
+   * Finalization (plain config write): there is NO reboot/poll/rewrite here — the
+   * device applies the new config and regenerates its SD config file on the next
+   * undock / power-cycle. This is identical for Shimmer3 and Shimmer3R. The
+   * reboot-then-rewrite dance is a DFU (firmware-update) concern only and is out
+   * of scope for a plain config write (BasicDock.java:1556).
    *
    * With `opts.verify`, the InfoMem is read back and byte-compared against the
    * written bytes, EXCLUDING the intentionally-divergent ranges (the MAC bytes,
@@ -434,10 +484,18 @@ export class WiredShimmerClient extends BaseShimmerClient {
    */
   async writeInfoMemConfig(
     config: InfoMemDeviceConfig,
-    opts: { verify?: boolean } = {},
+    opts: { verify?: boolean; setRtc?: boolean } = {},
   ): Promise<{ verified: boolean | null }> {
     return this._serialize(async () => {
       const ctx = this._infoMemCtx();
+      // (1) RTC write first, exactly as desktop CallableWriteConfig orders it.
+      //     Skipped (not failed) on unsupported identities; a failure here aborts
+      //     before the InfoMem write, matching the Java rethrow semantics.
+      const setRtc = opts.setRtc ?? true;
+      if (setRtc && isSupportedRtcConfigViaUart(ctx.hardwareVersion, ctx.firmwareId)) {
+        await this._writeRtcFromHostTimeImpl(Date.now());
+      }
+      // (2) chunked InfoMem write.
       const bytes = generateInfoMem(config, ctx, { base: config.raw, forDeviceWrite: true });
       await this._writeInfoMemBytesImpl(ctx, bytes);
       if (!opts.verify) return { verified: null };
