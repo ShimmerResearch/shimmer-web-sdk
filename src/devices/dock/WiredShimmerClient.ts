@@ -442,11 +442,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
       await this._writeInfoMemBytesImpl(ctx, bytes);
       if (!opts.verify) return { verified: null };
       const readback = await this._readInfoMemBytesImpl(ctx);
-      const verified = compareInfoMemExcluding(
-        bytes,
-        readback,
-        deviceWriteDivergentRanges(ctx),
-      );
+      const verified = compareInfoMemExcluding(bytes, readback, deviceWriteDivergentRanges(ctx));
       return { verified };
     });
   }
@@ -694,7 +690,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
 function compareInfoMemExcluding(
   written: Uint8Array,
   readback: Uint8Array,
-  ranges: { mac: { start: number; length: number }; configDelayFlag: { start: number; length: number } },
+  ranges: {
+    mac: { start: number; length: number };
+    configDelayFlag: { start: number; length: number };
+  },
 ): boolean {
   if (written.length !== readback.length) return false;
   const excluded = new Set<number>();
