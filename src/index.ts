@@ -155,6 +155,7 @@ export {
   formatVerisenseHardwareRevision,
   isVerisenseSecondGenerationHardware,
   isVerisenseGsrSupportedHardware,
+  isVerisenseLipoBatteryHardware,
   getVerisenseHardwareCapabilities,
   getVerisenseHardwareSensorSupport,
   getVerisenseHardwareRevision,
