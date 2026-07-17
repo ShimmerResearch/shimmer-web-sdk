@@ -205,6 +205,38 @@ export type {
   SmartDockActiveSlot,
 } from './devices/dock/smartDockProtocol.js';
 
+// Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
+export {
+  SDLOG_HW_ID,
+  SDLOG_FW_ID,
+  SDLOG_HEADER_LENGTH,
+  SDLOG_CLOCK_FREQ,
+  SDLOG_SYNC_OFFSET_LENGTH,
+  SDLOG_SYNC_BLOCK_LENGTH,
+  SDLogHeaderBitmask,
+  hasSensorBit,
+  SdLogFormatError,
+  decodeSdLogValue,
+  SDLOG_DATA_TYPE_BYTES,
+  parseSdLogHeader,
+  decodeSdLogFile,
+  decodeSdSession,
+  parseSdSessionName,
+  parseSdTrialFolderName,
+} from './devices/sdlog/index.js';
+export type {
+  SdLogChannel,
+  SdLogHeader,
+  SdLogRecord,
+  SdLogFormatErrorCode,
+  SdLogCalibrationBytes,
+  SdLogExpansionBoard,
+  SdLogDataType,
+  SdLogChannelSpec,
+  SdLogDecodeOptions,
+  SdLogDecodeResult,
+} from './devices/sdlog/index.js';
+
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
