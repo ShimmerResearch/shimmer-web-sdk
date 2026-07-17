@@ -43,6 +43,13 @@ export interface ParsedSdLog {
   syncFraming: boolean;
   /** Packets per 512-byte block when syncFraming (0 otherwise). */
   samplesPerBlock: number;
+  /**
+   * Clock frequency (Hz) for the SD wall-clock (RTC) tick→ms conversion —
+   * 32768 normally, or a TCXO frequency (312500 / 255765.625) when the
+   * TCXO flag is set (ShimmerObject#getSamplingClockFreq). The device-clock
+   * timestamp always uses 32768 (getRtcClockFreq).
+   */
+  wallClockFreqHz: number;
 }
 
 interface FwVersion {
@@ -57,19 +64,60 @@ const atLeast = (v: FwVersion, major: number, minor: number, internal: number): 
 
 /**
  * Whether SD packets carry a 3-byte (u24) timestamp for this firmware.
- * Derived from the ShimmerVerObject firmware-version-code ladder: code >= 6
- * selects 3 bytes (ShimmerObject#updateTimestampByteLength).
+ * Derived from the ShimmerVerObject firmware-version-code ladder
+ * (ShimmerVerObject.java:263-312) fed into
+ * `ShimmerObject#updateTimestampByteLength` (:4725-4736): version code >= 6
+ * selects 3 bytes, otherwise 2. Combinations that match no rule in the ladder
+ * fall through to code -1 (< 6) → 2 bytes.
+ *
+ * Relevant rules for the HW/FW combos this decoder supports (Shimmer3 /
+ * Shimmer3R × SDLog / LogAndStream):
+ *   - Shimmer3R + LogAndStream >= 0.0.1  → code 8 → 3 bytes
+ *   - Shimmer3R + SDLog                  → no rule → code -1 → 2 bytes
+ *   - Shimmer3  + SDLog        >= 0.11.5 → code 6 (or 8 >= 0.20.1) → 3 bytes; else 2
+ *   - Shimmer3  + LogAndStream >= 0.5.4  → code 6 (or higher) → 3 bytes; else 2
  */
 function sdTimestampBytes(hw: number, fwId: number, v: FwVersion): 2 | 3 {
   if (hw === SDLOG_HW_ID.SHIMMER_3R) {
-    // Shimmer3R LogAndStream >= 0.0.1 maps to version code 8 (u24).
-    // HARDWARE-VERIFY: the Java ladder has no explicit Shimmer3R+SDLog rule;
-    // u24 assumed for any Shimmer3R firmware.
-    return 3;
+    // The Java ladder only maps Shimmer3R+LogAndStream (→ code 8, u24). A
+    // Shimmer3R+SDLog file matches no rule → code -1 → 2-byte timestamp.
+    // HARDWARE-VERIFY: a Shimmer3R+SDLog SD log likely does not exist in the
+    // wild; oracle fidelity (ShimmerVerObject.java:270-273) is the tiebreak.
+    if (fwId === SDLOG_FW_ID.LOGANDSTREAM) return atLeast(v, 0, 0, 1) ? 3 : 2;
+    return 2;
   }
   if (fwId === SDLOG_FW_ID.SDLOG) return atLeast(v, 0, 11, 5) ? 3 : 2;
   if (fwId === SDLOG_FW_ID.LOGANDSTREAM) return atLeast(v, 0, 5, 4) ? 3 : 2;
   return 3;
+}
+
+/**
+ * Sampling clock frequency used for the SD wall-clock (RTC) timestamp
+ * (`ShimmerObject#getSamplingClockFreq`, ShimmerObject.java:10868-10896):
+ *   - TCXO + the 20 MHz EXG-unified rev-1.1 board → 20 MHz / 64 = 312500 Hz
+ *   - TCXO otherwise                              → 16.369 MHz / 64 = 255765.625 Hz
+ *   - no TCXO                                     → 32768 Hz (crystal)
+ * NB: only the RTC (wall-clock) conversion uses this frequency. The
+ * device-clock timestamp uses `getRtcClockFreq()` = 32768 Hz always
+ * (ShimmerObject.java:2824, ShimmerDevice.java:4723), and the sampling-rate
+ * field is likewise divided by 32768 here — matching the Java driver, whose
+ * SD-log sampling-rate math also uses the (non-TCXO) crystal for these logs.
+ */
+function samplingClockFreq(
+  tcxo: boolean,
+  hw: number,
+  expBrd: SdLogExpansionBoard | null,
+): number {
+  if (!tcxo) return SDLOG_CLOCK_FREQ;
+  // isTcxoClock20MHz (ShimmerObject.java:10882-10896): Shimmer3/3R + EXG
+  // unified board id 47, rev 1, revSpecial 1.
+  const is20MHz =
+    (hw === SDLOG_HW_ID.SHIMMER_3 || hw === SDLOG_HW_ID.SHIMMER_3R) &&
+    expBrd !== null &&
+    expBrd.id === SDLOG_EXP_BRD_ID.EXG_UNIFIED &&
+    expBrd.rev === 1 &&
+    expBrd.revSpecial === 1;
+  return is20MHz ? 312500.0 : 255765.625;
 }
 
 /**
@@ -222,20 +270,32 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
   }
 
   // Bytes 40-42 (+217-221 on newer firmware): derived sensors, LSB-first.
-  let derivedSensors = bytes[40] + bytes[41] * 2 ** 8 + bytes[42] * 2 ** 16;
+  // Computed with BigInt because bytes 220-221 reach bit 56, beyond the 2^53
+  // exact-integer range of a JS number (Java uses a `long`). `derivedSensors`
+  // (number) stays exact through byte 219 / bit 47; `derivedSensorsBig`
+  // (bigint) carries the full 8-byte fidelity.
+  let derivedBig = BigInt(bytes[40]) + (BigInt(bytes[41]) << 8n) + (BigInt(bytes[42]) << 16n);
   const eightByteDerived =
     (firmwareId === SDLOG_FW_ID.SDLOG && atLeast(fwVersion, 0, 13, 1)) ||
     (firmwareId === SDLOG_FW_ID.LOGANDSTREAM && atLeast(fwVersion, 0, 7, 1));
   if (eightByteDerived) {
     for (let i = 0; i < 5; i++) {
-      derivedSensors += bytes[217 + i] * 2 ** (8 * (3 + i));
+      derivedBig += BigInt(bytes[217 + i]) << BigInt(8 * (3 + i));
     }
   }
+  const derivedSensorsBig = derivedBig;
+  const derivedSensors = Number(derivedBig);
 
   // Byte 16: trial config A.
   const buttonStart = ((bytes[16] >> 5) & 0x01) === 1;
   const syncWhenLogging = ((bytes[16] >> 2) & 0x01) === 1;
   const masterShimmer = ((bytes[16] >> 1) & 0x01) === 1;
+
+  // Byte 17 bit 4: TCXO (temperature-compensated crystal oscillator) flag —
+  // ShimmerSDLog#processSDLogHeader sets it identically on both the Shimmer3
+  // (:303) and Shimmer3R (:233) branches. It only affects the SD wall-clock
+  // (RTC) conversion frequency (see samplingClockFreq).
+  const tcxo = ((bytes[17] >> 4) & 0x01) === 1;
 
   // Byte 11 bits 1-3: GSR range (0-3 fixed, 4 = auto) — same offset on both
   // the Shimmer3 and Shimmer3R header layouts.
@@ -321,6 +381,8 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     );
   }
 
+  const wallClockFreqHz = samplingClockFreq(tcxo, hardwareVersion, expansionBoard);
+
   const header: SdLogHeader = {
     hardwareVersion,
     firmwareId,
@@ -329,6 +391,8 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     macAddress: macFromBytes(bytes),
     enabledSensors,
     derivedSensors,
+    derivedSensorsBig,
+    tcxo,
     configTime,
     rtcDifferenceTicks,
     initialTimestampTicks,
@@ -348,7 +412,7 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     expansionBoard,
   };
 
-  return { header, channels, syncFraming, samplesPerBlock };
+  return { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz };
 }
 
 /**

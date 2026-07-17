@@ -139,6 +139,67 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
     expect(records[1].wallClockMs).toBeCloseTo(ticksToMs(initialTs + 512 + Number(rtc)), 6);
   });
 
+  it('uses the TCXO sampling clock for wallClockMs but 32768 for timestampMs', () => {
+    // TCXO set (byte 17 bit 4) without the 20 MHz EXG-unified rev-1.1 board →
+    // getSamplingClockFreq() = 255765.625 Hz for the RTC conversion only.
+    const rtc = 55605813443136n;
+    const tcxoFreq = 255765.625;
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 11, 5],
+      enabledSensors: enabled,
+      gsrRange: 1,
+      initialTimestampTicks: initialTs,
+      rtcDifferenceTicks: rtc,
+      tcxo: true,
+    });
+    const gsrRaw = 2000;
+    const pkt = (ts: number, ax: number): number[] =>
+      buildPacket(ts, 3, [
+        ...encodeValue('u12', ax),
+        ...encodeValue('u12', 101),
+        ...encodeValue('u12', 102),
+        ...encodeValue('u16', gsrRaw),
+      ]);
+    const file = buildFile(header, pkt(100, 11), pkt(612, 12));
+    const { header: h, records } = decodeSdLogFile(file);
+    expect(h.tcxo).toBe(true);
+    // Device clock still divides by 32768 (getRtcClockFreq).
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(initialTs), 10);
+    // Wall clock divides by the TCXO frequency.
+    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / tcxoFreq) * 1000, 3);
+    expect(records[1].wallClockMs).toBeCloseTo(
+      ((initialTs + 512 + Number(rtc)) / tcxoFreq) * 1000,
+      3,
+    );
+  });
+
+  it('uses the 20 MHz TCXO clock for the EXG-unified rev-1.1 board', () => {
+    const rtc = 55605813443136n;
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 13, 1], // >= 0.12.4 so the expansion board is stored in-header
+      enabledSensors: enabled,
+      gsrRange: 1,
+      initialTimestampTicks: initialTs,
+      rtcDifferenceTicks: rtc,
+      tcxo: true,
+      expansionBoard: [47, 1, 1], // EXG_UNIFIED rev 1 revSpecial 1 → 312500 Hz
+    });
+    const gsrRaw = 2000;
+    const file = buildFile(
+      header,
+      buildPacket(100, 3, [
+        ...encodeValue('u12', 11),
+        ...encodeValue('u12', 101),
+        ...encodeValue('u12', 102),
+        ...encodeValue('u16', gsrRaw),
+      ]),
+    );
+    const { records } = decodeSdLogFile(file);
+    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / 312500.0) * 1000, 3);
+  });
+
   it('drops a trailing partial packet', () => {
     const full = makeFile(0n);
     const truncatedFile = full.slice(0, full.length - 3);

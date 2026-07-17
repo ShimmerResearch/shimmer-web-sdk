@@ -250,3 +250,75 @@ describe('SmartDockClient robustness (unframed base stream)', () => {
     expect(dec(base.lastWrite!.bytes)).toBe('SDD$');
   });
 });
+
+describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=2)', () => {
+  it('re-sends a command whose first reply is missed, then succeeds', async () => {
+    let versionWrites = 0;
+    const base = new LoopbackTransport({ capabilities: { framed: false } });
+    base.setOnWrite((bytes, tr) => {
+      if (dec(bytes) === 'SDV$') {
+        versionWrites += 1;
+        if (versionWrites === 1) return; // swallow the first attempt
+        setTimeout(() => tr.notify(enc('V,2,3,0,5,0\r\n')), 0); // answer the second
+      }
+    });
+    const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
+    await dock.connect();
+    const info = await dock.getDockInfo();
+    expect(info.hardwareType).toBe('base6');
+    expect(versionWrites).toBe(2); // re-sent exactly once
+  });
+
+  it('gives up after exactly 2 attempts when no reply ever arrives', async () => {
+    let versionWrites = 0;
+    const base = new LoopbackTransport({ capabilities: { framed: false } });
+    base.setOnWrite((bytes) => {
+      if (dec(bytes) === 'SDV$') versionWrites += 1; // never answers
+    });
+    const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
+    await dock.connect();
+    await expect(dock.getDockInfo()).rejects.toThrow(/timeout/i);
+    expect(versionWrites).toBe(2);
+  });
+
+  it('does NOT retry on an explicit error response (fails fast)', async () => {
+    let versionWrites = 0;
+    const base = new LoopbackTransport({ capabilities: { framed: false } });
+    base.setOnWrite((bytes, tr) => {
+      if (dec(bytes) === 'SDV$') {
+        versionWrites += 1;
+        setTimeout(() => tr.notify(enc('E\r\n')), 0);
+      }
+    });
+    const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
+    await dock.connect();
+    await expect(dock.getDockInfo()).rejects.toThrow(/error response/i);
+    expect(versionWrites).toBe(1); // no re-send after an error reply
+  });
+});
+
+describe('SmartDockClient serialization (atomic slot-select + read)', () => {
+  it('serializes concurrent identifyDockedShimmer calls so each gets its own slot', async () => {
+    const { dock } = await connectedDock();
+    // Fired concurrently: without serialization both slot selects race on the
+    // shared active-slot state and both reads return the last-selected slot.
+    const [id1, id3] = await Promise.all([
+      dock.identifyDockedShimmer(1),
+      dock.identifyDockedShimmer(3),
+    ]);
+    expect(id1.mac).toBe('000666668001'); // slot 1's device
+    expect(id3.mac).toBe('000666668003'); // slot 3's device
+  });
+
+  it('serializes a slot-select against a concurrent status read', async () => {
+    const { dock } = await connectedDock();
+    const [, st] = await Promise.all([
+      dock.identifyDockedShimmer(2),
+      dock.getDockedShimmerStatus(5),
+    ]);
+    // The status read ran as its own atomic unit → its slot won the race and
+    // its battery payload is intact.
+    expect(dock.activeSlot).toBe(5);
+    expect(st.chargingStatus).toBe('FULLY_CHARGED');
+  });
+});

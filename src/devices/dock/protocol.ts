@@ -265,15 +265,16 @@ export function badResponseReason(command: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Format a MAC-address payload as a 12-char lowercase hex string (no
+ * Format a MAC-address payload as a 12-char UPPERCASE hex string (no
  * separators), taking the first 6 bytes in the order the device sends them.
  * Mirrors `CommsProtocolWiredShimmerViaDock#readMacId` (:40-53) +
- * `UtilShimmer.bytesToHexString`.
+ * `UtilShimmer.bytesToHexString`, whose `hexArray = "0123456789ABCDEF"` renders
+ * uppercase — matching this SDK's Verisense MAC/hex rendering.
  */
 export function parseMacId(payload: Uint8Array): string {
   if (payload.length < 6) throw new Error('MAC payload too short (need 6 bytes)');
   let s = '';
-  for (let i = 0; i < 6; i++) s += payload[i].toString(16).padStart(2, '0');
+  for (let i = 0; i < 6; i++) s += payload[i].toString(16).toUpperCase().padStart(2, '0');
   return s;
 }
 

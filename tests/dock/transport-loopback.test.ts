@@ -254,3 +254,52 @@ describe('WiredShimmerClient robustness (unframed stream)', () => {
     await expect(client.getStatus()).rejects.toThrow(/timeout/i);
   }, 2000);
 });
+
+describe('WiredShimmerClient MAC-read retry (oracle READ_MAC_RETRY_ATTEMPTS=2)', () => {
+  it('reads the MAC exactly twice before failing', async () => {
+    const t = newTransport();
+    let macReads = 0;
+    t.setOnWrite((bytes, tr) => {
+      const req = parseUartPacket(bytes);
+      if (req.command === UART_PACKET_CMD.READ && req.component === 0x01 && req.property === 0x02) {
+        macReads += 1;
+        setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.BAD_ARG_RESPONSE, null)), 0);
+      }
+    });
+    const client = new WiredShimmerClient({ debug: false, transport: t });
+    await client.connect();
+    await expect(client.readMac()).rejects.toThrow();
+    // AbstractDock.java:1153 `for(i=0;i<2;i++)` → 2 total attempts (not 3).
+    expect(macReads).toBe(2);
+  }, 2000);
+});
+
+describe('WiredShimmerClient command serialization (ACK correlation)', () => {
+  it('does not let a silent-failing write steal a later command’s ACK', async () => {
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      const req = parseUartPacket(bytes);
+      if (req.command !== UART_PACKET_CMD.WRITE) return;
+      // Only the GSR.RANGE write is ACKed; the LSM accel write is silently
+      // dropped. Without serialization the (earlier-registered) accel write's
+      // _waitForAck would consume the GSR write's ACK — masking the failure and
+      // starving the good write. Serialization keeps each op self-contained.
+      if (
+        req.component === UART_PROP.GSR.RANGE.component &&
+        req.property === UART_PROP.GSR.RANGE.property
+      ) {
+        setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.ACK_RESPONSE, null)), 0);
+      }
+    });
+    const client = new WiredShimmerClient({ debug: false, transport: t });
+    await client.connect();
+
+    const pSilent = client.setConfig(UART_PROP.LSM303DLHC_ACCEL.RANGE, u8(1)); // never ACKed
+    const pAcked = client.setConfig(UART_PROP.GSR.RANGE, u8(2)); // ACKed
+    const [rSilent, rAcked] = await Promise.allSettled([pSilent, pAcked]);
+
+    expect(rSilent.status).toBe('rejected'); // failed write is surfaced, not masked
+    expect((rSilent as PromiseRejectedResult).reason.message).toMatch(/timeout/i);
+    expect(rAcked.status).toBe('fulfilled'); // good write still succeeds with its own ACK
+  }, 3000);
+});

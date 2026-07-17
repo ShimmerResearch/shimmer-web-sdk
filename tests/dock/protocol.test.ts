@@ -221,8 +221,12 @@ describe('parseUartPacket', () => {
 // ---------------------------------------------------------------------------
 
 describe('response parsers', () => {
-  it('parseMacId: first 6 bytes, device order, 12-char hex', () => {
+  it('parseMacId: first 6 bytes, device order, 12-char UPPERCASE hex', () => {
     expect(parseMacId(u8(0x00, 0x06, 0x66, 0x66, 0x80, 0x01, 0xff))).toBe('000666668001');
+    // A MAC with a-f nibbles must render uppercase (UtilShimmer.bytesToHexString
+    // uses hexArray = "0123456789ABCDEF"), matching the Verisense path.
+    expect(parseMacId(u8(0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe))).toBe('DEADBEEFCAFE');
+    expect(parseMacId(u8(0x0a, 0x0b, 0x0c, 0x1d, 0x2e, 0xff))).toBe('0A0B0C1D2EFF');
     expect(() => parseMacId(u8(0x00, 0x06))).toThrow();
   });
 

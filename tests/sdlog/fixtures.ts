@@ -21,6 +21,8 @@ export interface HeaderFixtureOptions {
   buttonStart?: boolean;
   gsrRange?: number;
   mpuDmp?: boolean;
+  /** TCXO flag — SD header byte 17 bit 4. */
+  tcxo?: boolean;
   rtcDifferenceTicks?: bigint;
   configTime?: number;
   initialTimestampTicks?: number;
@@ -53,6 +55,9 @@ export function buildSdLogHeader(opts: HeaderFixtureOptions = {}): Uint8Array {
     ((opts.buttonStart ? 1 : 0) << 5) |
     ((opts.syncWhenLogging ? 1 : 0) << 2) |
     ((opts.masterShimmer ? 1 : 0) << 1);
+
+  // Byte 17 bit 4: TCXO flag.
+  b[17] = (opts.tcxo ? 1 : 0) << 4;
 
   const mac = opts.mac ?? [0xd0, 0x2b, 0x46, 0x3d, 0xa2, 0xbb];
   for (let i = 0; i < 6; i++) b[24 + i] = mac[i];

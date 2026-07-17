@@ -157,6 +157,37 @@ describe('parseSdLogHeader — modern Shimmer3 (256 B)', () => {
     expect(newer.derivedSensors).toBe(derived);
   });
 
+  it('carries full derived-sensors fidelity above bit 52 in derivedSensorsBig', () => {
+    const h = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 13, 1], // 8-byte derived sensors
+      enabledSensors: BM.ACCEL_LN,
+      derivedSensors: 0,
+    });
+    // Write an 8-byte derived-sensors value whose top bytes reach bit 63,
+    // well beyond a JS number's 2^53 exact range.
+    const lo = [0x01, 0x23, 0x45]; // bytes 40,41,42 → bits 0-23
+    const hi = [0x67, 0x89, 0xab, 0xcd, 0xef]; // bytes 217-221 → bits 24-63
+    h[40] = lo[0];
+    h[41] = lo[1];
+    h[42] = lo[2];
+    for (let i = 0; i < 5; i++) h[217 + i] = hi[i];
+    const parsed = parseSdLogHeader(h);
+    const expected =
+      BigInt(lo[0]) |
+      (BigInt(lo[1]) << 8n) |
+      (BigInt(lo[2]) << 16n) |
+      (BigInt(hi[0]) << 24n) |
+      (BigInt(hi[1]) << 32n) |
+      (BigInt(hi[2]) << 40n) |
+      (BigInt(hi[3]) << 48n) |
+      (BigInt(hi[4]) << 56n);
+    expect(parsed.derivedSensorsBig).toBe(expected);
+    expect(parsed.derivedSensors).toBe(Number(expected));
+    // The narrowed number lost low bits — proving derivedSensorsBig is needed.
+    expect(BigInt(parsed.derivedSensors)).not.toBe(expected);
+  });
+
   it('masks MPL sensor bits for LogAndStream and keeps them for SDLog', () => {
     const enabledWithMpl = BM.ACCEL_LN + BM.MPL_TEMPERATURE + BM.GYRO_MPU_MPL;
     const sdlog = parseSdLogHeader(
@@ -202,6 +233,21 @@ describe('parseSdLogHeader — modern Shimmer3 (256 B)', () => {
       parseSdLogHeader(buildSdLogHeader({ fwId: 3, fwVersion: [0, 5, 4], enabledSensors: BM.GSR }))
         .timestampBytes,
     ).toBe(3);
+  });
+
+  it('follows the ladder for Shimmer3R: LogAndStream → u24, SDLog → u16', () => {
+    const signalIds = [0x00, 0x01, 0x02];
+    // 3R + LogAndStream >= 0.0.1 → version code 8 → 3-byte timestamp.
+    expect(
+      parseSdLogHeader(buildSdLogHeader({ hw: 10, fwId: 3, fwVersion: [0, 1, 0], signalIds }))
+        .timestampBytes,
+    ).toBe(3);
+    // 3R + SDLog matches no rule in the ladder → code -1 → 2-byte timestamp
+    // (ShimmerVerObject.java:270-273 only maps 3R+LogAndStream).
+    expect(
+      parseSdLogHeader(buildSdLogHeader({ hw: 10, fwId: 2, fwVersion: [0, 11, 5], signalIds }))
+        .timestampBytes,
+    ).toBe(2);
   });
 });
 

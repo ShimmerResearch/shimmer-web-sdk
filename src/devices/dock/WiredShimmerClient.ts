@@ -49,7 +49,7 @@ export interface WiredShimmerClientOptions extends ShimmerClientOptions {
 
 /** Result of {@link WiredShimmerClient.identify}. */
 export interface WiredIdentity {
-  /** 12-char lowercase hex MAC, in device byte order. */
+  /** 12-char UPPERCASE hex MAC, in device byte order. */
   mac: string;
   /** Hardware version (from the VER response). */
   hardwareVersion: number;
@@ -104,6 +104,18 @@ export class WiredShimmerClient extends BaseShimmerClient {
 
   private _rxBuf: Uint8Array = new Uint8Array(0);
   private _temps: Set<(pkt: UartRxPacket) => void> = new Set();
+
+  /**
+   * Serialization queue. Every public command method chains onto this so that
+   * only one request/response exchange is in flight at a time — the docked
+   * Shimmer speaks a strictly sequential request/response protocol and the
+   * Java driver clears pending ACKs before each command
+   * (AbstractCommsProtocolWired.java:318,358). Without this, overlapping
+   * commands could cross-resolve on the shared temp-handler set (e.g. one
+   * command's ACK satisfying another's {@link _waitForAck}), masking a failed
+   * write. See {@link _serialize}.
+   */
+  private _queue: Promise<unknown> = Promise.resolve();
 
   // Cached device info
   identity: WiredIdentity | null = null;
@@ -198,12 +210,17 @@ export class WiredShimmerClient extends BaseShimmerClient {
   /**
    * Read the docked device's identity. Follows the order of
    * `BasicDock#internalReadShimmerDetails` (MAC → HW/FW version → daughter-card
-   * ID). Battery is read separately via {@link getStatus}.
+   * ID). Battery is read separately via {@link getStatus}. The three reads run
+   * as one atomic serialized unit (see {@link _serialize}).
    */
   async identify(): Promise<WiredIdentity> {
-    const mac = await this.readMac();
-    const firmwareVersion = await this.readVersion();
-    const expansionBoard = await this.readExpansionBoard().catch(() => null);
+    return this._serialize(() => this._identifyImpl());
+  }
+
+  private async _identifyImpl(): Promise<WiredIdentity> {
+    const mac = await this._readMacImpl();
+    const firmwareVersion = await this._readVersionImpl();
+    const expansionBoard = await this._readExpansionBoardImpl().catch(() => null);
     const id: WiredIdentity = {
       mac,
       hardwareVersion: firmwareVersion.hardwareVersion,
@@ -221,6 +238,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
 
   /** Read battery voltage / % / charging state (BAT.VALUE). */
   async getStatus(): Promise<WiredBatteryStatus> {
+    return this._serialize(() => this._getStatusImpl());
+  }
+
+  private async _getStatusImpl(): Promise<WiredBatteryStatus> {
     const payload = await this._read(UART_PROP.BAT.VALUE);
     const status = parseBatteryStatus(payload);
     this._emitStatus(
@@ -232,13 +253,18 @@ export class WiredShimmerClient extends BaseShimmerClient {
   }
 
   /**
-   * Read the MAC address (MAIN_PROCESSOR.MAC), retrying up to
-   * `WIRED_DEFAULTS.MAC_READ_RETRIES` times as the Java dock does
-   * (`AbstractDock.READ_MAC_RETRY_ATTEMPTS`).
+   * Read the MAC address (MAIN_PROCESSOR.MAC), retrying a total of
+   * `WIRED_DEFAULTS.MAC_READ_RETRIES` (= 2) attempts as the Java dock does
+   * (`AbstractDock.readMacId`, AbstractDock.java:1153 `for(i=0;i<
+   * READ_MAC_RETRY_ATTEMPTS;i++)` → 2 total attempts).
    */
   async readMac(): Promise<string> {
+    return this._serialize(() => this._readMacImpl());
+  }
+
+  private async _readMacImpl(): Promise<string> {
     let lastErr: unknown;
-    for (let attempt = 0; attempt <= WIRED_DEFAULTS.MAC_READ_RETRIES; attempt++) {
+    for (let attempt = 0; attempt < WIRED_DEFAULTS.MAC_READ_RETRIES; attempt++) {
       try {
         const payload = await this._read(UART_PROP.MAIN_PROCESSOR.MAC);
         return parseMacId(payload);
@@ -252,6 +278,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
 
   /** Read the HW/FW version (MAIN_PROCESSOR.VER). */
   async readVersion(): Promise<WiredVersionInfo> {
+    return this._serialize(() => this._readVersionImpl());
+  }
+
+  private async _readVersionImpl(): Promise<WiredVersionInfo> {
     const payload = await this._read(UART_PROP.MAIN_PROCESSOR.VER);
     return parseVersionInfo(payload);
   }
@@ -262,6 +292,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * is fitted. Cheap enough to include in {@link identify}.
    */
   async readExpansionBoard(): Promise<ExpansionBoardInfo | null> {
+    return this._serialize(() => this._readExpansionBoardImpl());
+  }
+
+  private async _readExpansionBoardImpl(): Promise<ExpansionBoardInfo | null> {
     const payload = await this._readMem(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, 16);
     return parseExpansionBoard(payload);
   }
@@ -275,7 +309,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
     if (arg.permission === 'WRITE_ONLY') {
       throw new Error(`Property ${arg.name} is write-only`);
     }
-    return this._read(arg);
+    return this._serialize(() => this._read(arg));
   }
 
   /** Write one config property (WRITE), resolving on ACK. */
@@ -283,8 +317,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
     if (arg.permission === 'READ_ONLY') {
       throw new Error(`Property ${arg.name} is read-only`);
     }
-    await this._write(arg, value);
-    this._emitStatus(`SET ${arg.name} ACKed`);
+    return this._serialize(async () => {
+      await this._write(arg, value);
+      this._emitStatus(`SET ${arg.name} ACKed`);
+    });
   }
 
   /**
@@ -295,6 +331,10 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * Error for that property.
    */
   async getConfigAll(): Promise<Map<UartComponentProperty, Uint8Array | Error>> {
+    return this._serialize(() => this._getConfigAllImpl());
+  }
+
+  private async _getConfigAllImpl(): Promise<Map<UartComponentProperty, Uint8Array | Error>> {
     const out = new Map<UartComponentProperty, Uint8Array | Error>();
     for (const arg of UART_CONFIG_COMMANDS) {
       if (arg.permission === 'WRITE_ONLY') continue;
@@ -317,13 +357,34 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * is a byte-level escape hatch.
    */
   async readInfoMem(address: number, size: number): Promise<Uint8Array> {
-    return this._readMem(UART_PROP.MAIN_PROCESSOR.INFOMEM, address, size);
+    return this._serialize(() => this._readMem(UART_PROP.MAIN_PROCESSOR.INFOMEM, address, size));
   }
 
   /** Raw InfoMem write (`MAIN_PROCESSOR.INFOMEM`), resolving on ACK. */
   async writeInfoMem(address: number, data: Uint8Array): Promise<void> {
-    const payload = buildMemWritePayload(UART_PROP.MAIN_PROCESSOR.INFOMEM, address, data);
-    await this._writeRaw(UART_PROP.MAIN_PROCESSOR.INFOMEM, payload);
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.MAIN_PROCESSOR.INFOMEM, address, data);
+      await this._writeRaw(UART_PROP.MAIN_PROCESSOR.INFOMEM, payload);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Serialization
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run `fn` after every previously-queued operation has settled, so all public
+   * command methods execute strictly one-at-a-time (see {@link _queue}). The
+   * queue itself never rejects — a failed op does not poison later ones — while
+   * the caller still receives `fn`'s own resolution/rejection.
+   */
+  private _serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this._queue.then(() => fn());
+    this._queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   // ---------------------------------------------------------------------------

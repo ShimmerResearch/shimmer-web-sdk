@@ -50,8 +50,24 @@ export interface SdLogHeader {
   macAddress: string;
   /** 40-bit enabled-sensors value (header bytes 3-7, after firmware-specific masking). */
   enabledSensors: number;
-  /** Derived-sensors value (header bytes 40-42, plus 217-221 on newer firmware). */
+  /**
+   * Derived-sensors value (header bytes 40-42, plus 217-221 on newer
+   * firmware). Exact only through byte 219 / bit 47 — bytes 220-221 reach
+   * bit 56, beyond a JS number's 2^53 exact-integer range. For full fidelity
+   * above bit 52 use {@link derivedSensorsBig}.
+   */
   derivedSensors: number;
+  /**
+   * Full-fidelity derived-sensors value as a BigInt (Java uses a `long`),
+   * carrying all 8 bytes exactly. Prefer this when testing bits at or above
+   * byte 220 (bit 56).
+   */
+  derivedSensorsBig: bigint;
+  /**
+   * TCXO (temperature-compensated crystal oscillator) flag — SD header
+   * byte 17 bit 4. Affects only the wall-clock (RTC) tick→ms conversion.
+   */
+  tcxo: boolean;
   /** Config time — Unix seconds, header bytes 52-55 MSB-first. */
   configTime: number;
   /** RTC difference in 32.768 kHz ticks — header bytes 44-51, signed 64-bit MSB-first. */

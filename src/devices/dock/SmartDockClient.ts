@@ -21,6 +21,20 @@ import {
   type SmartDockVersionInfo,
 } from './smartDockProtocol.js';
 
+/**
+ * Thrown by {@link SmartDockClient} when a base command reply does not arrive
+ * within the timeout. Distinguished from an explicit `E` error response so the
+ * retry logic re-sends on timeout only (SmartDockUart.java:526-537: a timeout
+ * from `waitForSmartDockResponse` triggers a re-send, whereas an error response
+ * throws immediately).
+ */
+class SmartDockTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SmartDockTimeoutError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor options
 // ---------------------------------------------------------------------------
@@ -130,6 +144,15 @@ export class SmartDockClient extends BaseShimmerClient {
   private _rxBuf: Uint8Array = new Uint8Array(0);
   private _temps: Set<(line: string) => void> = new Set();
 
+  /**
+   * Serialization queue: all public operations chain onto this so slot
+   * select + per-slot reads run as atomic, non-interleaved units. Concurrent
+   * `selectSlot` / `identifyDockedShimmer` / `getDockedShimmerStatus` otherwise
+   * race on the shared {@link activeSlot} and single {@link _wired} client,
+   * mis-attributing one slot's data to another. See {@link _serialize}.
+   */
+  private _queue: Promise<unknown> = Promise.resolve();
+
   private _shimmerTransport: ShimmerTransport | null;
   private _wired: WiredShimmerClient | null = null;
   private _wiredConnected = false;
@@ -234,6 +257,10 @@ export class SmartDockClient extends BaseShimmerClient {
    * (SmartDockUart.java:148-157, :796-806).
    */
   async getDockInfo(): Promise<SmartDockInfo> {
+    return this._serialize(() => this._getDockInfoImpl());
+  }
+
+  private async _getDockInfoImpl(): Promise<SmartDockInfo> {
     const line = await this._command(
       SMARTDOCK_BASE_CMD.GET_VERSION,
       'version',
@@ -258,6 +285,10 @@ export class SmartDockClient extends BaseShimmerClient {
    * of entries is the base's slot count as reported on the wire.
    */
   async getSlotOccupancy(): Promise<SlotOccupancy[]> {
+    return this._serialize(() => this._getSlotOccupancyImpl());
+  }
+
+  private async _getSlotOccupancyImpl(): Promise<SlotOccupancy[]> {
     const line = await this._command(
       SMARTDOCK_BASE_CMD.QUERY_CONNECTED_SLOTS,
       'occupancy',
@@ -281,11 +312,17 @@ export class SmartDockClient extends BaseShimmerClient {
    * @param slotNumber 1-based slot (1..slotCount).
    */
   async selectSlot(slotNumber: number): Promise<void> {
-    await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
+    return this._serialize(() =>
+      this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD),
+    );
   }
 
   /** Disconnect all slots (`SDD$`); no slot is active afterwards. */
   async disconnectAllSlots(): Promise<void> {
+    return this._serialize(() => this._disconnectAllSlotsImpl());
+  }
+
+  private async _disconnectAllSlotsImpl(): Promise<void> {
     await this._command(
       SMARTDOCK_BASE_CMD.DISCONNECT_ALL,
       'disconnected',
@@ -301,11 +338,11 @@ export class SmartDockClient extends BaseShimmerClient {
   ): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     const cmd = buildSelectSlotCommand(slotNumber, connectionType);
-    await this._transport.write(cmd);
     // The reply is `P,NN` (without SD) or `C,NN` (with SD).
     const wantKind =
       connectionType === SMARTDOCK_CONNECTION_TYPE.WITH_SD_CARD ? 'slotWithSd' : 'slotWithoutSd';
-    const line = await this._waitForResponse(
+    const line = await this._sendWithRetry(
+      cmd,
       [wantKind, 'disconnected'],
       this._slotChangeTimeoutMs,
       `select slot ${slotNumber}`,
@@ -335,9 +372,11 @@ export class SmartDockClient extends BaseShimmerClient {
    * per-Shimmer protocol (MAC/HW/FW/expansion) is NOT re-implemented here.
    */
   async identifyDockedShimmer(slotNumber: number): Promise<WiredIdentity> {
-    await this.selectSlot(slotNumber);
-    const wired = await this._ensureWired();
-    return wired.identify();
+    return this._serialize(async () => {
+      await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
+      const wired = await this._ensureWired();
+      return wired.identify();
+    });
   }
 
   /**
@@ -345,9 +384,11 @@ export class SmartDockClient extends BaseShimmerClient {
    * by delegating to the D1 {@link WiredShimmerClient.getStatus}.
    */
   async getDockedShimmerStatus(slotNumber: number): Promise<WiredBatteryStatus> {
-    await this.selectSlot(slotNumber);
-    const wired = await this._ensureWired();
-    return wired.getStatus();
+    return this._serialize(async () => {
+      await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
+      const wired = await this._ensureWired();
+      return wired.getStatus();
+    });
   }
 
   /** Lazily build + connect the composed D1 client over the per-Shimmer transport. */
@@ -382,9 +423,41 @@ export class SmartDockClient extends BaseShimmerClient {
     kind: Parameters<SmartDockClient['_waitForResponse']>[0][number],
     timeoutMs: number,
   ): Promise<string> {
+    return this._sendWithRetry(buildBaseCommand(cmd), [kind], timeoutMs, cmd);
+  }
+
+  /**
+   * Write `cmdBytes` and await a matching response, re-sending the command on a
+   * missed reply for a total of `SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS` (= 2)
+   * attempts before failing — mirroring SmartDockUart.java:526-537
+   * (`txBytesAndWaitForReply`). Retries on TIMEOUT ONLY; an explicit `E` error
+   * response ({@link SmartDockTimeoutError} is not thrown for it) propagates
+   * immediately, matching the Java path where `waitForSmartDockResponse` throws
+   * on an error instead of returning false.
+   */
+  private async _sendWithRetry(
+    cmdBytes: Uint8Array,
+    kinds: Parameters<SmartDockClient['_waitForResponse']>[0],
+    timeoutMs: number,
+    label: string,
+  ): Promise<string> {
     if (!this._transport) throw new Error('Not connected');
-    await this._transport.write(buildBaseCommand(cmd));
-    return this._waitForResponse([kind], timeoutMs, cmd);
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS; attempt++) {
+      await this._transport.write(cmdBytes);
+      try {
+        return await this._waitForResponse(kinds, timeoutMs, label);
+      } catch (err) {
+        // Only a timeout is retryable; an error response fails fast.
+        if (err instanceof SmartDockTimeoutError) {
+          lastErr = err;
+          this._log(`command "${label}" timed out (attempt ${attempt + 1}); re-sending`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new SmartDockTimeoutError(`timeout (${label})`);
   }
 
   /**
@@ -400,7 +473,7 @@ export class SmartDockClient extends BaseShimmerClient {
     return new Promise<string>((resolve, reject) => {
       const t = setTimeout(() => {
         this._offTemp(handler);
-        reject(new Error(`SmartDock response timeout (${label})`));
+        reject(new SmartDockTimeoutError(`SmartDock response timeout (${label})`));
       }, timeoutMs);
       const handler = (line: string): void => {
         const k = classifyBaseResponse(line);
@@ -423,6 +496,21 @@ export class SmartDockClient extends BaseShimmerClient {
 
   private _delay(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * Run `fn` after every previously-queued operation has settled, so all public
+   * operations execute strictly one-at-a-time (see {@link _queue}). The queue
+   * never rejects — a failed op does not poison later ones — while the caller
+   * still receives `fn`'s own resolution/rejection.
+   */
+  private _serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this._queue.then(() => fn());
+    this._queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   // ---------------------------------------------------------------------------

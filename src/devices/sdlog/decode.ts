@@ -72,7 +72,7 @@ function decodeRecordsFromFile(
   out: SdLogRecord[],
   budget: DecodeBudget,
 ): void {
-  const { header, channels, syncFraming, samplesPerBlock } = parsed;
+  const { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz } = parsed;
   const packetSize = header.packetSizeBytes;
   const tsBytes = header.timestampBytes;
   const maxTicks = 2 ** (8 * tsBytes);
@@ -131,8 +131,11 @@ function decodeRecordsFromFile(
 
     const absoluteTicks = initialTicks + unwrapped - firstRawTicks;
     out.push({
+      // Device-clock timestamp always divides by the 32768 Hz RTC clock
+      // (ShimmerObject#getRtcClockFreq); only the wall-clock (RTC) conversion
+      // below honours the TCXO sampling clock (ShimmerObject#getSamplingClockFreq).
       timestampMs: (absoluteTicks / SDLOG_CLOCK_FREQ) * 1000,
-      wallClockMs: hasRtc ? ((absoluteTicks + rtcTicks) / SDLOG_CLOCK_FREQ) * 1000 : null,
+      wallClockMs: hasRtc ? ((absoluteTicks + rtcTicks) / wallClockFreqHz) * 1000 : null,
       values,
     });
 
