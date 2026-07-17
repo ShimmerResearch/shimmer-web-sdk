@@ -171,6 +171,18 @@ export class WiredShimmerClient extends BaseShimmerClient {
     this._emitStatus('Dock disconnected');
   };
 
+  /**
+   * Discard any buffered inbound bytes, resyncing the byte stream. Used by
+   * {@link SmartDockClient} after a SmartDock slot change: switching the active
+   * slot re-routes the per-Shimmer UART to a different device, so any bytes left
+   * over from the previous slot must be dropped before the next request. (The
+   * `_drain` parser is already tolerant of leading garbage / bad CRC, so this is
+   * belt-and-braces rather than strictly required.)
+   */
+  resyncStream(): void {
+    this._rxBuf = new Uint8Array(0);
+  }
+
   /** Streaming is not part of the dock UART protocol. */
   override async startStreaming(): Promise<void> {
     throw new Error('Streaming is not supported over the dock UART (use the Bluetooth client).');

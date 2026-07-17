@@ -184,6 +184,75 @@ model and is a later phase).
   (first 6 payload bytes, no reversal, per the Java); the daughter-card ID is
   read as `[boardId, boardRev, specialRev]`. Confirm against known hardware.
 
+### SmartDock multi-slot base (`SmartDockClient`)
+
+> **Verification status: code-complete, pending hardware.** The SmartDock base
+> protocol is ported from the Java driver (`SmartDockUart` /
+> `SmartDockUartListener`) and covered by unit tests driving a scripted
+> multi-slot base over `LoopbackTransport`, but it has **not yet been exercised
+> against a physical Base-6 / Base-15.** See _Hardware-verify items_ below.
+
+Phase **D2** adds **SmartDock** multi-slot bases (Base-6 = 6 slots, Base-15 = 15
+slots) on top of D1. A SmartDock has **two** channels over (two) FTDI serial
+ports:
+
+1. a **base control** channel speaking short **ASCII** `SDx$` commands
+   (`\r\n`-terminated replies) — read version, query occupancy, switch the
+   _active_ slot; and
+2. a **per-Shimmer** UART channel onto which the base routes the active slot,
+   spoken with the D1 binary `$`-header protocol.
+
+Multi-slot support is therefore _select a slot on the base channel, then talk to
+the docked Shimmer on the per-Shimmer channel_. `SmartDockClient` **composes**
+(does not duplicate) `WiredShimmerClient` for the per-Shimmer half. **Scope is
+READ-ONLY**: dock info, occupancy, slot select, per-slot identify/status. No
+config writes, no SD/mass-storage (the `SDC` with-SD-access connect exists in the
+oracle but is not driven), no bootloader/flashing.
+
+```ts
+import { SmartDockClient } from '@shimmerresearch/shimmer-web-sdk';
+
+// baseSerial and shimmerSerial are two distinct serial ShimmerTransports
+// (capabilities.framed = false), one per FTDI port the base exposes.
+const dock = new SmartDockClient({ transport: baseSerial, shimmerTransport: shimmerSerial });
+await dock.connect();
+
+const info = await dock.getDockInfo(); // { hardwareType: 'base15', firmwareVersion, slotCount: 15 }
+const slots = await dock.getSlotOccupancy(); // [{ slot: 1, occupied: true }, { slot: 2, occupied: false }, ...]
+
+// Select a slot then reuse the D1 per-Shimmer protocol against it:
+const id = await dock.identifyDockedShimmer(1); // { mac, hardwareVersion, firmwareVersion, expansionBoard }
+const st = await dock.getDockedShimmerStatus(1); // { voltage, percentage, chargingStatus, adcValue }
+```
+
+Slot selection issues `SDP,NN$`, awaits the `P,NN` confirmation with the ported
+**~10 s** slot-change timeout (`SMARTDOCK_RESPONSE_TIMEOUT_SLOT_CHANGE`), verifies
+the returned slot matches, then waits the ported **1500 ms** without-SD settle
+delay (`SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD`) before the per-Shimmer UART is
+usable. Normal base-command reads use the ported **1000 ms** timeout
+(`SMARTDOCK_RESPONSE_TIMEOUT`). Like D1, the base UART is an unframed byte
+stream, so the client accumulates bytes and extracts `\r\n`-terminated lines,
+ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
+
+**Hardware-verify items** (need a real Base-6 / Base-15 to confirm):
+
+- **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
+  settle delay are ported as-is; real base latency (especially how long the
+  per-Shimmer UART takes to become usable after routing) needs measuring.
+- **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
+  reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
+  push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only
+  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented — confirm no
+  production base needs the remap.
+- **Base6-vs-15 detection.** `getDockInfo` derives family + slot count from the
+  version reply's hardware-version field (`BASE_HARDWARE_IDS`: 1 → base15, 2 →
+  base6). In the Java driver the slot count actually comes from the **USB device
+  descriptor**, not the version byte — verify the version byte alone is
+  sufficient, or fall back to the occupancy-bitmap length.
+- **Two-port assumption.** Real hardware presents the base control UART and the
+  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
+  confirm the port enumeration / which is which on the target platform.
+
 ## Building
 
 ```bash

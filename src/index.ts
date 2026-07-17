@@ -175,6 +175,36 @@ export type {
   ExpansionBoardInfo,
 } from './devices/dock/protocol.js';
 
+// SmartDock multi-slot base (Base-6 / Base-15) — phase D2
+export { SmartDockClient } from './devices/dock/SmartDockClient.js';
+export type {
+  SmartDockClientOptions,
+  SmartDockInfo,
+  SlotOccupancy,
+} from './devices/dock/SmartDockClient.js';
+export {
+  SMARTDOCK_LINE_TERMINATOR,
+  SMARTDOCK_CONNECTION_TYPE,
+  SMARTDOCK_BASE_CMD,
+  SMARTDOCK_DEFAULTS,
+  BASE_HARDWARE_IDS,
+  baseHardwareType,
+  buildBaseCommand,
+  buildSelectSlotCommand,
+  extractBaseLine,
+  classifyBaseResponse,
+  parseSmartDockVersion,
+  parseSlotOccupancy,
+  parseActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+export type {
+  SmartDockConnectionType,
+  SmartDockHardwareType,
+  SmartDockResponseKind,
+  SmartDockVersionInfo,
+  SmartDockActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
