@@ -4,6 +4,7 @@ import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.j
 import { concatU8 } from './protocol.js';
 import { WiredShimmerClient, type WiredIdentity } from './WiredShimmerClient.js';
 import type { WiredBatteryStatus } from './protocol.js';
+import type { InfoMemDeviceConfig } from '../infomem/index.js';
 import {
   SMARTDOCK_BASE_CMD,
   SMARTDOCK_CONNECTION_TYPE,
@@ -388,6 +389,42 @@ export class SmartDockClient extends BaseShimmerClient {
       await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
       const wired = await this._ensureWired();
       return wired.getStatus();
+    });
+  }
+
+  /**
+   * Select `slotNumber`, then read + decode the docked Shimmer's InfoMem
+   * configuration (configure-while-docked, phase P2). Slot-select and the
+   * per-Shimmer identify + InfoMem read run as one atomic unit under this
+   * client's queue, so concurrent calls for different slots cannot interleave.
+   * The docked device is (re)identified after the slot change to resolve the
+   * correct InfoMem byte layout for that slot.
+   */
+  async readInfoMemConfig(slotNumber: number): Promise<InfoMemDeviceConfig> {
+    return this._serialize(async () => {
+      await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
+      const wired = await this._ensureWired();
+      await wired.identify();
+      return wired.readInfoMemConfig();
+    });
+  }
+
+  /**
+   * Select `slotNumber`, then encode + write a configuration to the docked
+   * Shimmer's InfoMem, atomically. See
+   * {@link WiredShimmerClient.writeInfoMemConfig} for the device-write and
+   * verify semantics.
+   */
+  async writeInfoMemConfig(
+    slotNumber: number,
+    config: InfoMemDeviceConfig,
+    opts: { verify?: boolean } = {},
+  ): Promise<{ verified: boolean | null }> {
+    return this._serialize(async () => {
+      await this._selectSlotInternal(slotNumber, SMARTDOCK_CONNECTION_TYPE.WITHOUT_SD_CARD);
+      const wired = await this._ensureWired();
+      await wired.identify();
+      return wired.writeInfoMemConfig(config, opts);
     });
   }
 

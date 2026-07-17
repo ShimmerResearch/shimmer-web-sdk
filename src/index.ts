@@ -205,6 +205,36 @@ export type {
   SmartDockActiveSlot,
 } from './devices/dock/smartDockProtocol.js';
 
+// InfoMem configuration-memory codec (Shimmer3 / Shimmer3R) — configure-while-docked (phase P2)
+export {
+  parseInfoMem,
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  resolveInfoMemLayout,
+  checkConfigBytesValid,
+  fwCompare,
+  isSupportedMpl,
+  isSupportedEightByteDerivedSensors,
+  isSupportedSdLogSync,
+  isSdLoggingFirmware,
+  INFOMEM_SIZE,
+  INFOMEM_PAGE_SIZE,
+  INFOMEM_VALIDITY_BYTES,
+  INFOMEM_SAMPLING_CLOCK_FREQ,
+  INFOMEM_ADDR_LEGACY,
+  INFOMEM_ADDR_FLAT,
+  HW_ID as INFOMEM_HW_ID,
+  FW_ID as INFOMEM_FW_ID,
+  ANY_VERSION as INFOMEM_ANY_VERSION,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemContext,
+  InfoMemDeviceConfig,
+  InfoMemLayout,
+  GenerateInfoMemOptions,
+  DeviceWriteDivergentRanges,
+} from './devices/infomem/index.js';
+
 // Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
 export {
   SDLOG_HW_ID,

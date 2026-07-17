@@ -30,6 +30,16 @@ import {
   type WiredBatteryStatus,
   type ExpansionBoardInfo,
 } from './protocol.js';
+import {
+  resolveInfoMemLayout,
+  parseInfoMem,
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  INFOMEM_SIZE,
+  INFOMEM_PAGE_SIZE,
+  type InfoMemContext,
+  type InfoMemDeviceConfig,
+} from '../infomem/index.js';
 
 // ---------------------------------------------------------------------------
 // Constructor options
@@ -369,6 +379,131 @@ export class WiredShimmerClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
+  // InfoMem configuration (configure-while-docked, phase P2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read the full {@link INFOMEM_SIZE}-byte InfoMem in 128-byte page chunks
+   * (D → C → B), reassembled in order. The page addresses sent depend on the
+   * firmware/hardware (legacy MSP430 0x1800/… vs. flat 0/128/256), resolved
+   * from the cached {@link identity} — call {@link identify} (or
+   * {@link readVersion}) first.
+   */
+  async readInfoMemBytes(): Promise<Uint8Array> {
+    return this._serialize(() => this._readInfoMemBytesImpl(this._infoMemCtx()));
+  }
+
+  /**
+   * Write the full {@link INFOMEM_SIZE}-byte InfoMem in 128-byte page chunks,
+   * each resolving on its per-chunk ACK (the write guarantee is per-chunk
+   * CRC + ACK). Requires a cached {@link identity} for the page addressing.
+   */
+  async writeInfoMemBytes(bytes: Uint8Array): Promise<void> {
+    if (bytes.length !== INFOMEM_SIZE) {
+      throw new Error(`writeInfoMemBytes expects ${INFOMEM_SIZE} bytes, got ${bytes.length}`);
+    }
+    return this._serialize(() => this._writeInfoMemBytesImpl(this._infoMemCtx(), bytes));
+  }
+
+  /**
+   * Read + decode the docked device's configuration. Uses the cached
+   * {@link identity} (already-read version info) as the {@link InfoMemContext}.
+   */
+  async readInfoMemConfig(): Promise<InfoMemDeviceConfig> {
+    return this._serialize(async () => {
+      const ctx = this._infoMemCtx();
+      const bytes = await this._readInfoMemBytesImpl(ctx);
+      return parseInfoMem(bytes, ctx);
+    });
+  }
+
+  /**
+   * Encode + write a configuration to the docked device. The MAC is forced to
+   * all-0xFF and the config-file-creation flag is set (device-write semantics),
+   * so the firmware re-reads its MAC from the BT transceiver and regenerates the
+   * SD config on undock/power-cycle.
+   *
+   * With `opts.verify`, the InfoMem is read back and byte-compared against the
+   * written bytes, EXCLUDING the intentionally-divergent ranges (the MAC bytes,
+   * forced to 0xFF, and the config-delay/flag byte). Returns
+   * `{ verified: boolean }` when verify was requested, or `{ verified: null }`
+   * otherwise.
+   *
+   * HARDWARE-VERIFY: whether the device accepts and applies the write (and
+   * regenerates its SD config on undock) can only be confirmed on real hardware.
+   */
+  async writeInfoMemConfig(
+    config: InfoMemDeviceConfig,
+    opts: { verify?: boolean } = {},
+  ): Promise<{ verified: boolean | null }> {
+    return this._serialize(async () => {
+      const ctx = this._infoMemCtx();
+      const bytes = generateInfoMem(config, ctx, { base: config.raw, forDeviceWrite: true });
+      await this._writeInfoMemBytesImpl(ctx, bytes);
+      if (!opts.verify) return { verified: null };
+      const readback = await this._readInfoMemBytesImpl(ctx);
+      const verified = compareInfoMemExcluding(
+        bytes,
+        readback,
+        deviceWriteDivergentRanges(ctx),
+      );
+      return { verified };
+    });
+  }
+
+  /** Build the InfoMem layout context from the cached identity (requires identify/readVersion). */
+  private _infoMemCtx(): InfoMemContext {
+    const id = this.identity;
+    if (!id) {
+      throw new Error(
+        'InfoMem operations need the device version: call identify() (or readVersion()) first.',
+      );
+    }
+    const fv = id.firmwareVersion;
+    return {
+      hardwareVersion: id.hardwareVersion,
+      firmwareId: fv.firmwareIdentifier,
+      firmwareVersion: {
+        major: fv.firmwareVersionMajor,
+        minor: fv.firmwareVersionMinor,
+        internal: fv.firmwareVersionInternal,
+      },
+    };
+  }
+
+  /** Non-serialized chunked read (D/C/B pages) — callers must already hold the queue. */
+  private async _readInfoMemBytesImpl(ctx: InfoMemContext): Promise<Uint8Array> {
+    const layout = resolveInfoMemLayout(ctx);
+    const pageAddrs = [layout.addrD, layout.addrC, layout.addrB];
+    const out = new Uint8Array(INFOMEM_SIZE);
+    for (let i = 0; i < pageAddrs.length; i++) {
+      const chunk = await this._readMem(
+        UART_PROP.MAIN_PROCESSOR.INFOMEM,
+        pageAddrs[i],
+        INFOMEM_PAGE_SIZE,
+      );
+      if (chunk.length < INFOMEM_PAGE_SIZE) {
+        throw new Error(
+          `InfoMem page ${i} short read: expected ${INFOMEM_PAGE_SIZE} bytes, got ${chunk.length}`,
+        );
+      }
+      out.set(chunk.subarray(0, INFOMEM_PAGE_SIZE), i * INFOMEM_PAGE_SIZE);
+    }
+    return out;
+  }
+
+  /** Non-serialized chunked write (D/C/B pages) — callers must already hold the queue. */
+  private async _writeInfoMemBytesImpl(ctx: InfoMemContext, bytes: Uint8Array): Promise<void> {
+    const layout = resolveInfoMemLayout(ctx);
+    const pageAddrs = [layout.addrD, layout.addrC, layout.addrB];
+    for (let i = 0; i < pageAddrs.length; i++) {
+      const page = bytes.subarray(i * INFOMEM_PAGE_SIZE, (i + 1) * INFOMEM_PAGE_SIZE);
+      const payload = buildMemWritePayload(UART_PROP.MAIN_PROCESSOR.INFOMEM, pageAddrs[i], page);
+      await this._writeRaw(UART_PROP.MAIN_PROCESSOR.INFOMEM, payload);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Serialization
   // ---------------------------------------------------------------------------
 
@@ -549,4 +684,26 @@ export class WiredShimmerClient extends BaseShimmerClient {
       }
     });
   }
+}
+
+/**
+ * Byte-compare `written` against `readback` over the full InfoMem, ignoring the
+ * ranges that a device write intentionally leaves diverged (the MAC bytes,
+ * forced to 0xFF, and the config-delay/flag byte the firmware may rewrite).
+ */
+function compareInfoMemExcluding(
+  written: Uint8Array,
+  readback: Uint8Array,
+  ranges: { mac: { start: number; length: number }; configDelayFlag: { start: number; length: number } },
+): boolean {
+  if (written.length !== readback.length) return false;
+  const excluded = new Set<number>();
+  for (const r of [ranges.mac, ranges.configDelayFlag]) {
+    for (let i = 0; i < r.length; i++) excluded.add(r.start + i);
+  }
+  for (let i = 0; i < written.length; i++) {
+    if (excluded.has(i)) continue;
+    if (written[i] !== readback[i]) return false;
+  }
+  return true;
 }
