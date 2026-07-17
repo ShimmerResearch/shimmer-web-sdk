@@ -24,6 +24,7 @@ import {
   nudgeGsrResistance,
 } from '../shimmer3r/calibration.js';
 import { GSR_UNCAL_LIMIT_RANGE3 } from '../shimmer3r/constants.js';
+import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
 export interface SdLogDecodeOptions {
@@ -73,6 +74,12 @@ function decodeRecordsFromFile(
   budget: DecodeBudget,
 ): void {
   const { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz } = parsed;
+  // Build the inertial calibration plan once per file. This also flips the
+  // affected channel specs to calibrated:true / unit and records per-group
+  // metadata on the header (header.calibration), mirroring how GSR is emitted
+  // calibrated. LN accel, WR accel, gyro, mag (+ Shimmer3R alt accel/mag).
+  const calibPlan = buildSdLogCalibPlan(header, channels);
+  header.calibration = calibPlan.info;
   const packetSize = header.packetSizeBytes;
   const tsBytes = header.timestampBytes;
   const maxTicks = 2 ** (8 * tsBytes);
@@ -125,9 +132,13 @@ function decodeRecordsFromFile(
     for (let c = 0; c < channels.length; c++) {
       const spec = channels[c];
       const raw = decodeSdLogValue(bytes, p, spec.dataType);
-      values[c] = spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
+      // GSR is calibrated inline (amplifier equation). Inertial channels are
+      // marked calibrated by the plan but keep their raw value here and are
+      // calibrated together (per triple) by applyCalibPlan below.
+      values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
       p += spec.sizeBytes;
     }
+    if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
 
     const absoluteTicks = initialTicks + unwrapped - firstRawTicks;
     out.push({
@@ -227,6 +238,9 @@ export function decodeSdSession(
   }));
 
   const first = parsedFiles[0].parsed.header;
+  // Populate the returned header's calibration metadata (and calibrated channel
+  // flags) even if the first file turns out to be header-only.
+  first.calibration = buildSdLogCalibPlan(first, parsedFiles[0].parsed.channels).info;
   for (const { name, parsed } of parsedFiles) {
     const h = parsed.header;
     if (

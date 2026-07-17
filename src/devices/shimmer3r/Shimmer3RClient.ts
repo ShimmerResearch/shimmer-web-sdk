@@ -19,6 +19,14 @@ import {
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import {
+  applyStreamingCalibration,
+  parseKinematicCalibBlock,
+  getGroupDefaults,
+  type StreamingImuRanges,
+  type InertialGroup,
+  type KinematicCalibration,
+} from '../calibration/index.js';
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -65,6 +73,11 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * the configured service/characteristic UUIDs, so browser usage is unchanged.
    */
   transport?: ShimmerTransport;
+  /**
+   * Emit calibrated (`'cal'`) inertial channel values alongside the raw ones.
+   * Default true. Set false to keep the pre-calibration behaviour (raw only).
+   */
+  emitCalibratedInertial?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +140,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
   gsrRangeSetting = 0;
   ExpPower = 0;
 
+  /**
+   * Inertial-sensor hardware ranges, refreshed from each inquiry's config word.
+   * Used to select the default calibration for streaming inertial channels.
+   */
+  imuRanges: StreamingImuRanges = {
+    lnAccel: 0,
+    wrAccel: 0,
+    gyro: 0,
+    mag: 0,
+    altAccel: 0,
+    altMag: 0,
+  };
+  /** When false, inertial channels are emitted raw-only (no `'cal'` field). Default true. */
+  emitCalibratedInertial = true;
+  /**
+   * Device calibrations fetched via {@link readCalibration}. These override the
+   * range-selected defaults (calibration source-priority ladder).
+   */
+  private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
+
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
@@ -143,6 +176,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.txUUID = opts.txUUID ?? SHIMMER3R_DEFAULTS.CHAR_TX_UUID;
     this.forceTimestampFmt = opts.timestampFmt ?? 'u24';
     this._injectedTransport = opts.transport ?? null;
+    this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
   }
 
   /** Best-effort label for `ObjectCluster`s and status messages. */
@@ -213,6 +247,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this.schema = null;
       this._streaming = false;
       this.ExpPower = 0;
+      this._deviceCalibrations = {};
       this._emitStatus('Disconnected');
     }
   }
@@ -494,6 +529,95 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Calibration fetch (opt-in)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fetch the device's per-sensor kinematic calibration over the radio and
+   * upgrade the active streaming calibration to use it (overriding the
+   * range-selected defaults). Opt-in and non-fatal: any group that times out or
+   * NACKs is skipped and keeps its default.
+   *
+   * Uses the per-sensor GET calibration commands, each of which answers with
+   * `[responseOpcode][21-byte kinematic block]`
+   * (ShimmerBluetooth: ACCEL/GYRO/MAG/LSM303DLHC_ACCEL_CALIBRATION_RESPONSE are
+   * all 21-byte payloads). Chosen over the 0x9A GET_CALIB_DUMP because the
+   * per-sensor commands + 21-byte responses are unambiguous in the Java oracle,
+   * whereas the chunked dump read sequence is not verifiable for this transport.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3R radio has exercised this path; the
+   * command/response opcodes and 21-byte block layout are ported from the Java
+   * driver but not confirmed end-to-end against hardware.
+   *
+   * @returns the set of groups whose calibration was successfully read.
+   */
+  async readCalibration(timeoutMs = 1500): Promise<InertialGroup[]> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const plan: Array<{ group: InertialGroup; get: number; resp: number }> = [
+      {
+        group: 'lnAccel',
+        get: OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND,
+        resp: OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'gyro',
+        get: OPCODES.GET_GYRO_CALIBRATION_COMMAND,
+        resp: OPCODES.GYRO_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'mag',
+        get: OPCODES.GET_MAG_CALIBRATION_COMMAND,
+        resp: OPCODES.MAG_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'wrAccel',
+        get: OPCODES.GET_WR_ACCEL_CALIBRATION_COMMAND,
+        resp: OPCODES.WR_ACCEL_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'altAccel',
+        get: OPCODES.GET_ALT_ACCEL_CALIBRATION_COMMAND,
+        resp: OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'altMag',
+        get: OPCODES.GET_ALT_MAG_CALIBRATION_COMMAND,
+        resp: OPCODES.ALT_MAG_CALIBRATION_RESPONSE,
+      },
+    ];
+    const done: InertialGroup[] = [];
+    for (const { group, get, resp } of plan) {
+      try {
+        const cal = await this._readOneCalibration(group, get, resp, timeoutMs);
+        if (cal) {
+          this._deviceCalibrations[group] = cal;
+          done.push(group);
+        }
+      } catch (err: unknown) {
+        this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
+      }
+    }
+    return done;
+  }
+
+  private async _readOneCalibration(
+    group: InertialGroup,
+    getOpcode: number,
+    respOpcode: number,
+    timeoutMs: number,
+  ): Promise<KinematicCalibration | null> {
+    const remainder = await this._writeExpectingAck(new Uint8Array([getOpcode]), timeoutMs);
+    const rsp =
+      remainder && remainder[0] === respOpcode
+        ? remainder
+        : await this._waitForResponse(respOpcode, timeoutMs);
+    if (rsp.length < 22) return null; // opcode + 21-byte block
+    const block = rsp.subarray(1, 22);
+    const scale = getGroupDefaults('shimmer3r', group)?.sensitivityScale ?? 1;
+    return parseKinematicCalibBlock(block, { sensitivityScale: scale });
+  }
+
+  // ---------------------------------------------------------------------------
   // Streaming
   // ---------------------------------------------------------------------------
 
@@ -586,6 +710,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const gsrRange = Number((cfg >> 25n) & 0x7n);
     this.ExpPower = internalExpPower;
     this.gsrRangeSetting = gsrRange;
+
+    // Inertial ranges from the config setup bytes (ConfigByteLayoutShimmer3):
+    //   WR accel (LIS2DW12): setup0 bits 2-3  → cfg bits 2-3
+    //   gyro (LSM6DSV): LSB setup2 bits 0-1 (cfg bits 16-17) + MSB setup4 bit 2
+    //     (cfg bit 34) → 6 ranges (0-5)
+    //   LN accel (LSM6DSV): setup3 bits 6-7 → cfg bits 30-31
+    // mag/alt-accel/alt-mag are single-range or not carried here → 0.
+    const gyroLsb = Number((cfg >> 16n) & 0x3n);
+    const gyroMsb = Number((cfg >> 34n) & 0x1n);
+    this.imuRanges = {
+      lnAccel: Number((cfg >> 30n) & 0x3n),
+      wrAccel: Number((cfg >> 2n) & 0x3n),
+      gyro: gyroLsb | (gyroMsb << 2),
+      mag: 0,
+      altAccel: 0,
+      altMag: 0,
+    };
 
     const numCh = u8[base + 9] ?? 0;
     const bufSize = u8[base + 10] ?? 0;
@@ -710,6 +851,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
         const gsrConductanceUSiemens = (1.0 / gsrkOhm) * 1000;
         oc.add(GSR_NAME, gsrConductanceUSiemens, 'uSiemens', 'cal');
       }
+    }
+
+    // Inertial calibration (accel/gyro/mag/alt): device calibration from
+    // readCalibration() when available, else the range-selected default.
+    if (this.emitCalibratedInertial) {
+      applyStreamingCalibration(oc, {
+        family: 'shimmer3r',
+        ranges: this.imuRanges,
+        device: this._deviceCalibrations,
+      });
     }
   }
 

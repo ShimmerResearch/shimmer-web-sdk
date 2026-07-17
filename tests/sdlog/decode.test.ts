@@ -89,6 +89,9 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
       gsrRange: 1,
       initialTimestampTicks: initialTs,
       rtcDifferenceTicks: rtc,
+      // All-0xFF calibration blocks → no per-device calibration, so the LN accel
+      // channels use the range-selected DEFAULT (Kionix KXRB 2g).
+      calibFill: () => 0xff,
     });
     const gsrRaw = 2000;
     const pkt = (ts: number, ax: number): number[] =>
@@ -110,10 +113,24 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
       'LN_ACCEL_Z',
       'GSR',
     ]);
+    // LN accel channels are now emitted calibrated (m/(s^2)).
+    expect(header.channels.slice(0, 3).every((c) => c.calibrated && c.unit === 'm/(s^2)')).toBe(
+      true,
+    );
+    // Default Kionix KXRB 2g calibration (SensorKionixKXRB52042):
+    //   offset = [2047,2047,2047], sens = diag(83),
+    //   align  = [[0,-1,0],[-1,0,0],[0,0,-1]] (an involution → inv(align)=align)
+    //   M = inv(align)·inv(diag(83)) = [[0,-1/83,0],[-1/83,0,0],[0,0,-1/83]]
+    // Packet 0 raw = [11,101,102]; d = raw − offset = [-2036,-1946,-1945].
+    //   Cx = -d1/83 = 1946/83, Cy = -d0/83 = 2036/83, Cz = -d2/83 = 1945/83.
     expect(records).toHaveLength(3);
-    expect(records[0].values.slice(0, 3)).toEqual([11, 101, 102]);
-    expect(records[1].values[0]).toBe(12);
-    expect(records[2].values[0]).toBe(13);
+    expect(records[0].values[0]).toBeCloseTo(1946 / 83, 10);
+    expect(records[0].values[1]).toBeCloseTo(2036 / 83, 10);
+    expect(records[0].values[2]).toBeCloseTo(1945 / 83, 10);
+    // Packet 1 raw X = 12 → d0 = 12-2047 = -2035 → Cy = 2035/83.
+    expect(records[1].values[1]).toBeCloseTo(2035 / 83, 10);
+    // Packet 2 raw X = 13 → d0 = 13-2047 = -2034 → Cy = 2034/83.
+    expect(records[2].values[1]).toBeCloseTo(2034 / 83, 10);
 
     // GSR calibrated through the SDK's amplifier-equation path (range 1).
     const expectedGsr =
@@ -258,9 +275,11 @@ describe('decodeSdLogFile — timestamp rollover unwrapping', () => {
 });
 
 describe('decodeSdLogFile — sync-when-logging block framing', () => {
-  // LN accel only → packet = 3 (ts) + 6 = 9 bytes;
-  // samplesPerBlock = floor((512 - 9) / 9) = 55.
-  const enabled = BM.ACCEL_LN;
+  // Three external-ADC channels (u12, uncalibrated) → packet = 3 (ts) + 6 = 9
+  // bytes; samplesPerBlock = floor((512 - 9) / 9) = 55. Deliberately NOT
+  // inertial channels, so raw values pass through unchanged and these tests
+  // assert framing/alignment rather than calibration.
+  const enabled = BM.EXT_EXP_A7 | BM.EXT_EXP_A6 | BM.EXT_EXP_A15;
   const SAMPLES_PER_BLOCK = 55;
 
   const syncFile = (totalPackets: number): Uint8Array => {
@@ -353,6 +372,8 @@ describe('decodeSdLogFile — Shimmer3R end-to-end', () => {
       signalIds: [0x03, 0x14, 0x15, 0x16, 0x1c],
       gsrRange: 4, // auto-range: range travels in GSR raw bits 14-15
       initialTimestampTicks: 42,
+      // All-0xFF calibration blocks → high-g accel uses the ADXL371 DEFAULT.
+      calibFill: () => 0xff,
     });
     const gsrRaw = (2 << 14) | 1500; // auto-range says range 2, adc 1500
     const file = buildFile(
@@ -368,7 +389,14 @@ describe('decodeSdLogFile — Shimmer3R end-to-end', () => {
     const { header: h, records } = decodeSdLogFile(file);
     expect(h.timestampBytes).toBe(3);
     expect(records).toHaveLength(1);
-    expect(records[0].values.slice(0, 4)).toEqual([-1234, -100, 0, 2047]);
+    // BATTERY (i16, uncalibrated) passes through unchanged: -1234.
+    // High-g accel (ADXL371 default, SensorADXL371): offset=[10,10,10],
+    //   sens=diag(1), align=[[0,1,0],[1,0,0],[0,0,-1]] (involution → inv=align)
+    //   M = align. raw=[-100,0,2047]; d = raw − 10 = [-110,-10,2037].
+    //   Cx = d1 = -10, Cy = d0 = -110, Cz = -d2 = -2037.
+    expect(records[0].values.slice(0, 4)).toEqual([-1234, -10, -110, -2037]);
+    // High-g channels emitted calibrated (m/(s^2)).
+    expect(h.channels.slice(1, 4).every((c) => c.calibrated && c.unit === 'm/(s^2)')).toBe(true);
     const expectedGsr =
       (1.0 / nudgeGsrResistance(calibrateGsrDataToResistanceFromAmplifierEq(1500, 2), 4)) * 1000;
     expect(records[0].values[4]).toBeCloseTo(expectedGsr, 10);

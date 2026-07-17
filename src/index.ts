@@ -235,6 +235,34 @@ export type {
   DeviceWriteDivergentRanges,
 } from './devices/infomem/index.js';
 
+// Inertial (accel/gyro/mag) calibration — phase P3
+export {
+  matrixInverse3x3,
+  matrixMultiply3x3,
+  makeKinematicCalibration,
+  calibrateVector3,
+  parseKinematicCalibBlock,
+  generateKinematicCalibBlock,
+  INERTIAL_UNITS,
+  getGroupDefaults,
+  getDefaultCalibration,
+  parseCalibDump,
+  generateCalibDump,
+  CALIB_READ_SOURCE,
+  shouldOverrideCalibration,
+} from './devices/calibration/index.js';
+export type {
+  KinematicCalibration,
+  ParseKinematicOptions,
+  ImuFamily,
+  InertialGroup,
+  GroupDefaults,
+  CalibDump,
+  CalibDumpRecord,
+  CalibDumpVersion,
+  CalibReadSource,
+} from './devices/calibration/index.js';
+
 // Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
 export {
   SDLOG_HW_ID,
@@ -253,6 +281,7 @@ export {
   decodeSdSession,
   parseSdSessionName,
   parseSdTrialFolderName,
+  isNewImuSensors,
 } from './devices/sdlog/index.js';
 export type {
   SdLogChannel,
@@ -261,6 +290,8 @@ export type {
   SdLogFormatErrorCode,
   SdLogCalibrationBytes,
   SdLogExpansionBoard,
+  SdLogImuRanges,
+  SdLogChannelCalibrationInfo,
   SdLogDataType,
   SdLogChannelSpec,
   SdLogDecodeOptions,

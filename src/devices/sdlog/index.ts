@@ -26,7 +26,10 @@ export type {
   SdLogFormatErrorCode,
   SdLogCalibrationBytes,
   SdLogExpansionBoard,
+  SdLogImuRanges,
+  SdLogChannelCalibrationInfo,
 } from './types.js';
+export { isNewImuSensors } from './header.js';
 export { decodeSdLogValue, SDLOG_DATA_TYPE_BYTES } from './channels.js';
 export type { SdLogDataType, SdLogChannelSpec } from './channels.js';
 export { parseSdLogHeader } from './header.js';

@@ -99,6 +99,49 @@ export interface SdLogHeader {
   gsrRange: number;
   /** Expansion-board identity, when the firmware stores it in the header. */
   expansionBoard: SdLogExpansionBoard | null;
+  /**
+   * Inertial-sensor hardware ranges decoded from the SD config setup bytes,
+   * used to select the correct default calibration when the header carries no
+   * per-device calibration block for a channel group. Values are the raw
+   * config-value indices (see the per-sensor range tables in the Java driver).
+   */
+  imuRanges: SdLogImuRanges;
+  /**
+   * Per-group inertial calibration metadata, one entry per calibrated channel
+   * group present in this file. Additive: absent groups (or non-inertial
+   * files) yield an empty array.
+   */
+  calibration: SdLogChannelCalibrationInfo[];
+}
+
+/** Inertial-sensor hardware ranges from the SD config setup bytes. */
+export interface SdLogImuRanges {
+  /** Low-noise (analog) accel range. Shimmer3 LN accel (Kionix) is fixed → 0. */
+  lnAccel: number;
+  /** Wide-range (digital) accel range. */
+  wrAccel: number;
+  /** Gyroscope range. */
+  gyro: number;
+  /** Magnetometer range (LSM303DLHC uses 1-7; single-range sensors use 0). */
+  mag: number;
+  /** Shimmer3R alternative (high-g) accel range. */
+  altAccel: number;
+  /** Shimmer3R alternative magnetometer range. */
+  altMag: number;
+}
+
+/** Calibration metadata for one inertial channel group in an SD-log file. */
+export interface SdLogChannelCalibrationInfo {
+  /** Channel group: lnAccel | wrAccel | gyro | mag | altAccel | altMag. */
+  group: string;
+  /** Emitted unit for the group's channels ('m/(s^2)' | 'deg/s' | 'local_flux'). */
+  unit: string;
+  /** True when the range-selected default was used (no valid device block). */
+  usingDefaultCalibration: boolean;
+  /** Where the applied calibration came from. */
+  source: 'sd-header' | 'default';
+  /** The hardware range value used to select the calibration. */
+  range: number;
 }
 
 /** Machine-readable reasons for rejecting an SD-log input. */

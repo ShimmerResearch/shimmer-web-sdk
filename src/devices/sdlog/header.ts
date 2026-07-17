@@ -29,6 +29,7 @@ import {
   type SdLogCalibrationBytes,
   type SdLogExpansionBoard,
   type SdLogHeader,
+  type SdLogImuRanges,
 } from './types.js';
 
 /** Internal parse result: the public header plus decode-time layout details. */
@@ -161,6 +162,42 @@ function usesSyncBlockFraming(
     return atLeast(v, 0, 16, 11);
   }
   return false;
+}
+
+/**
+ * Decode the inertial-sensor hardware ranges from the SD config setup bytes.
+ *
+ * The four config setup bytes live at SD header bytes 8-11 (setup0-3): the
+ * existing GSR-range read from byte 11 (setup3) fixes this mapping. Bit
+ * positions are ported from ConfigByteLayoutShimmer3
+ * (com.shimmerresearch.driver.shimmer2r3):
+ *   - WR accel range : setup0 (byte 8) bits 2-3, mask 0x03
+ *       (SensorLSM303.configByteArrayParse / SensorLIS2DW12 both use
+ *        bitShiftLSM303DLHCAccelRange = 2)
+ *   - gyro range LSB : setup2 (byte 10) bits 0-1, mask 0x03
+ *       (bitShiftMPU9150GyroRange = 0; SensorLSM6DSV reuses the same LSB field)
+ *   - mag range      : setup2 (byte 10) bits 5-7, mask 0x07
+ *       (bitShiftLSM303DLHCMagRange = 5)
+ *   - LN accel range : setup3 (byte 11) bits 6-7, mask 0x03 — Shimmer3R
+ *       (SensorLSM6DSV LN accel, bitShiftMPU9150AccelRange = 6). On Shimmer3 the
+ *       LN accel is the fixed-range Kionix KXRB, so this is forced to 0 there.
+ *
+ * HARDWARE-VERIFY: the Shimmer3R 6-value gyro range needs an MSB bit that lives
+ * in config setup byte 4, whose SD-header offset is not verified here, so only
+ * the low 2 bits (ranges 0-3) are decoded — the 2000/4000 dps ranges (4/5)
+ * would read as 0/1. The alt-accel (high-g) and alt-mag ranges are likewise not
+ * decoded from the SD header (defaulted to 0); their per-device calibration
+ * blocks, when present, override the default anyway.
+ */
+function parseImuRanges(bytes: Uint8Array, hw: number): SdLogImuRanges {
+  const setup0 = bytes[8] ?? 0;
+  const setup2 = bytes[10] ?? 0;
+  const setup3 = bytes[11] ?? 0;
+  const wrAccel = (setup0 >> 2) & 0x03;
+  const gyro = setup2 & 0x03;
+  const mag = (setup2 >> 5) & 0x07;
+  const lnAccel = hw === SDLOG_HW_ID.SHIMMER_3R ? (setup3 >> 6) & 0x03 : 0;
+  return { lnAccel, wrAccel, gyro, mag, altAccel: 0, altMag: 0 };
 }
 
 function macFromBytes(b: Uint8Array): string {
@@ -406,6 +443,8 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     calibrationBytes,
     gsrRange,
     expansionBoard,
+    imuRanges: parseImuRanges(bytes, hardwareVersion),
+    calibration: [],
   };
 
   return { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz };

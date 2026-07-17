@@ -9,6 +9,15 @@ import {
   nudgeGsrResistance,
 } from '../shimmer3r/calibration.js';
 import {
+  applyStreamingCalibration,
+  parseKinematicCalibBlock,
+  getGroupDefaults,
+  type ImuFamily,
+  type StreamingImuRanges,
+  type InertialGroup,
+  type KinematicCalibration,
+} from '../calibration/index.js';
+import {
   ACK,
   NACK,
   NEED_MORE,
@@ -54,6 +63,21 @@ export interface Shimmer3ClientOptions extends ShimmerClientOptions {
    * connect, so reconnecting to a device left mid-stream is clean. Default true.
    */
   stopStreamingOnConnect?: boolean;
+  /**
+   * IMU generation for default inertial calibration selection. `'old'` =
+   * LSM303DLHC accel/mag + MPU9x50 gyro (Shimmer3 SR<6); `'new'` = LSM303AHTR
+   * accel/mag (new-IMU boards). Default `'old'`.
+   *
+   * HARDWARE-VERIFY: the streaming protocol does not expose the daughter-card
+   * revision, so the generation cannot be auto-detected here; set this to match
+   * the device when using the new-IMU boards.
+   */
+  imuGeneration?: 'old' | 'new';
+  /**
+   * Emit calibrated (`'cal'`) inertial channel values alongside the raw ones.
+   * Default true. Set false to keep the pre-calibration behaviour (raw only).
+   */
+  emitCalibratedInertial?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +142,20 @@ export class Shimmer3Client extends BaseShimmerClient {
   gsrRangeSetting = 0;
   ExpPower = 0;
 
+  /** Inertial-sensor hardware ranges, refreshed from each inquiry's config word. */
+  imuRanges: StreamingImuRanges = {
+    lnAccel: 0, // Kionix KXRB LN accel is fixed-range on Shimmer3
+    wrAccel: 0,
+    gyro: 0,
+    mag: 0,
+    altAccel: 0,
+    altMag: 0,
+  };
+  /** When false, inertial channels are emitted raw-only (no `'cal'` field). Default true. */
+  emitCalibratedInertial = true;
+  private _imuFamily: ImuFamily;
+  private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
+
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
@@ -131,6 +169,8 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._forceTimestampFmt = opts.timestampFmt;
     this._timestampFmt = opts.timestampFmt ?? SHIMMER3_DEFAULTS.TIMESTAMP_FMT;
     this._stopStreamingOnConnect = opts.stopStreamingOnConnect ?? true;
+    this._imuFamily = opts.imuGeneration === 'new' ? 'shimmer3-new' : 'shimmer3-old';
+    this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
   }
 
   protected override _log(...args: unknown[]): void {
@@ -252,6 +292,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._streaming = false;
       this._streamStarting = false;
       this.ExpPower = 0;
+      this._deviceCalibrations = {};
       this._emitStatus('Disconnected');
     }
   }
@@ -436,6 +477,17 @@ export class Shimmer3Client extends BaseShimmerClient {
     this.enabledSensors = info.schema.enabledSensors;
     this.gsrRangeSetting = info.gsrRange;
     this.ExpPower = info.internalExpPower;
+    // Inertial ranges from the config word (interpretShimmer3InquiryResponse):
+    // accelRange = WR accel (LSM303), gyroRange = MPU gyro, magRange = LSM303 mag.
+    // LN accel (Kionix) is fixed-range → 0.
+    this.imuRanges = {
+      lnAccel: 0,
+      wrAccel: info.accelRange,
+      gyro: info.gyroRange,
+      mag: info.magRange,
+      altAccel: 0,
+      altMag: 0,
+    };
     this._emitStatus(
       `Inquiry: ${info.numChannels} ch, ${info.samplingRateHz.toFixed(2)} Hz, ` +
         `sensors=0x${info.schema.enabledSensors.toString(16).toUpperCase()}`,
@@ -574,6 +626,74 @@ export class Shimmer3Client extends BaseShimmerClient {
       gsrkOhm = nudgeGsrResistance(gsrkOhm, this.gsrRangeSetting);
       oc.add(GSR_NAME, (1.0 / gsrkOhm) * 1000, 'uSiemens', 'cal');
     }
+
+    // Inertial calibration (LN/WR accel, gyro, mag): device calibration from
+    // readCalibration() when available, else the range-selected default.
+    if (this.emitCalibratedInertial) {
+      applyStreamingCalibration(oc, {
+        family: this._imuFamily,
+        ranges: this.imuRanges,
+        device: this._deviceCalibrations,
+      });
+    }
+  }
+
+  /**
+   * Fetch the device's per-sensor kinematic calibration over RFCOMM and upgrade
+   * the active streaming calibration (overriding the range-selected defaults).
+   * Opt-in and non-fatal: a group that times out or NACKs keeps its default.
+   *
+   * Uses the per-sensor GET calibration commands (each answers with
+   * `[responseOpcode][21-byte block]`), chosen over the 0x9A GET_CALIB_DUMP
+   * because the per-sensor path is unambiguous in the Java oracle.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3 radio has exercised this path.
+   *
+   * @returns the groups whose calibration was successfully read.
+   */
+  async readCalibration(
+    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<InertialGroup[]> {
+    if (!this._transport) throw new Error('Not connected');
+    const plan: Array<{ group: InertialGroup; get: number; resp: number }> = [
+      {
+        group: 'lnAccel',
+        get: OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND,
+        resp: OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'gyro',
+        get: OPCODES.GET_GYRO_CALIBRATION_COMMAND,
+        resp: OPCODES.GYRO_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'mag',
+        get: OPCODES.GET_MAG_CALIBRATION_COMMAND,
+        resp: OPCODES.MAG_CALIBRATION_RESPONSE,
+      },
+      {
+        group: 'wrAccel',
+        get: OPCODES.GET_WR_ACCEL_CALIBRATION_COMMAND,
+        resp: OPCODES.WR_ACCEL_CALIBRATION_RESPONSE,
+      },
+    ];
+    const done: InertialGroup[] = [];
+    for (const { group, get, resp } of plan) {
+      try {
+        await this._write(new Uint8Array([get]));
+        const rsp = await this._waitForResponse(resp, timeoutMs);
+        if (rsp.length < 22) continue; // opcode + 21-byte block
+        const scale = getGroupDefaults(this._imuFamily, group)?.sensitivityScale ?? 1;
+        const cal = parseKinematicCalibBlock(rsp.subarray(1, 22), { sensitivityScale: scale });
+        if (cal) {
+          this._deviceCalibrations[group] = cal;
+          done.push(group);
+        }
+      } catch (err: unknown) {
+        this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
+      }
+    }
+    return done;
   }
 
   // ---------------------------------------------------------------------------
