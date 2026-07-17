@@ -157,7 +157,7 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'BATT_TYPE',
     label: 'Battery Type',
-    desc: 'Battery chemistry',
+    desc: 'Battery chemistry (replaceable-battery models only). Models with a permanently attached LiPo (SR62, SR61.5+, SR68.9+) ignore this setting — the firmware forces LiPo (see isVerisenseLipoBatteryHardware).',
     kind: 'bit',
     index: OP_IDX.GEN_CFG_2,
     shift: 0,

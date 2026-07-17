@@ -9,6 +9,7 @@ import {
   getVerisenseSupportedOperationalFieldGroupIds,
   getVerisenseStreamingBatteryVoltageMultiplier,
   isVerisenseGsrSupportedHardware,
+  isVerisenseLipoBatteryHardware,
   parseEventLogPayload,
   parsePayloadCrcErrorBankIndexes,
   parseProductionConfigPayloadFull,
@@ -62,6 +63,25 @@ describe('Hardware model helpers', () => {
     expect(isVerisenseGsrSupportedHardware(63, 3)).toBe(false);
     expect(isVerisenseGsrSupportedHardware(64, 0)).toBe(false);
     expect(isVerisenseGsrSupportedHardware(NaN, 5)).toBe(false);
+  });
+
+  it('mirrors the firmware fixed-LiPo rule (ShimBrd_isLipoPresentForHwVersion)', () => {
+    // SR62: any revision.
+    expect(isVerisenseLipoBatteryHardware(62, 0)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(62, 3)).toBe(true);
+    // SR61: minor >= 5.
+    expect(isVerisenseLipoBatteryHardware(61, 4)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(61, 5)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(61, 6)).toBe(true);
+    // SR68: minor >= 9 (the second-generation threshold, NOT the GSR one at 5).
+    expect(isVerisenseLipoBatteryHardware(68, 5)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(68, 8)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(68, 9)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(68, 10)).toBe(true);
+    // Replaceable-battery / other models.
+    expect(isVerisenseLipoBatteryHardware(63, 3)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(64, 0)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(NaN, 5)).toBe(false);
   });
 
   it('resolves sensor support per model from the IC matrix', () => {
