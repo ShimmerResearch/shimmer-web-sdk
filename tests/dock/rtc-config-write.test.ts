@@ -78,7 +78,10 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
         const addr = req.payload[1] | (req.payload[2] << 8);
         const off = addr >= 0x1800 ? addr - 0x1800 : addr;
         const data = store.slice(off, off + size);
-        setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(0x01, 0x06), data)), 0);
+        setTimeout(
+          () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(0x01, 0x06), data)),
+          0,
+        );
       }
       return;
     }
@@ -96,7 +99,10 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
     }
 
     function reply(payload: Uint8Array): void {
-      setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(c!, p!), payload)), 0);
+      setTimeout(
+        () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(c!, p!), payload)),
+        0,
+      );
     }
   });
   return { store };
@@ -121,7 +127,9 @@ async function connected(opts?: DockOpts): Promise<{
 
 /** Parsed host→device WRITE frames, in order. */
 function writeFrames(t: LoopbackTransport): UartRxPacket[] {
-  return t.writes.map((w) => parseUartPacket(w.bytes)).filter((r) => r.command === UART_PACKET_CMD.WRITE);
+  return t.writes
+    .map((w) => parseUartPacket(w.bytes))
+    .filter((r) => r.command === UART_PACKET_CMD.WRITE);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +141,9 @@ describe('msToRtcBytesLE — RTC tick payload (UtilShimmer parity)', () => {
   });
 
   it('encodes 1_000_000 ms as 32_768_000 ticks (0x01F40000) LSB-first', () => {
-    expect([...msToRtcBytesLE(1_000_000)]).toEqual([0x00, 0x00, 0xf4, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    expect([...msToRtcBytesLE(1_000_000)]).toEqual([
+      0x00, 0x00, 0xf4, 0x01, 0x00, 0x00, 0x00, 0x00,
+    ]);
   });
 
   it('encodes 0 ms as all-zero', () => {
@@ -215,7 +225,10 @@ describe('WiredShimmerClient.writeInfoMemConfig — RTC ordering + gating', () =
 
 describe('SmartDockClient.writeInfoMemConfig — RTC in the per-slot flow', () => {
   it('selects the slot then writes RTC before InfoMem over the per-Shimmer UART', async () => {
-    const base = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'SmartDock' });
+    const base = new LoopbackTransport({
+      capabilities: { framed: false },
+      deviceName: 'SmartDock',
+    });
     const shimmer = newTransport();
     const { store } = scriptDock(shimmer, { ver: VER_S3_LOGANDSTREAM });
     let activeSlot = -1;
