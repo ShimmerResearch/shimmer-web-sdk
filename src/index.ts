@@ -166,6 +166,8 @@ export {
   parseHexByteString,
   formatPendingEventProperties,
   formatVerisenseUnixAndHuman,
+  utcToLocalCivilMillis,
+  localCivilUnixSecondsNow,
   inferVerisenseChargerChipFamily,
   describeVerisenseChargerStatus,
   formatVerisenseChargerStatus,
