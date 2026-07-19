@@ -181,20 +181,32 @@ function usesSyncBlockFraming(
  *   - LN accel range : setup3 (byte 11) bits 6-7, mask 0x03 — Shimmer3R
  *       (SensorLSM6DSV LN accel, bitShiftMPU9150AccelRange = 6). On Shimmer3 the
  *       LN accel is the fixed-range Kionix KXRB, so this is forced to 0 there.
+ *   - gyro range MSB : setup4 (byte 12) bit 2, mask 0x01 — Shimmer3R only.
+ *       The LSM6DSV has 6 gyro ranges (0-5); the MSB lives in config setup byte 4
+ *       and is combined with the 2-bit LSB as `lsb | (msb << 2)`. Ported from
+ *       ShimmerSDLog.processSDLogHeader 3R branch:
+ *         int gyroRange    = (byteArrayInfo[10]) & 03;      // LSB (byte 10)
+ *         int msbGyroRange = (byteArrayInfo[12] >> 2) & 01; // MSB (byte 12 bit 2)
+ *         setGyroRange(gyroRange + (msbGyroRange << 2));
+ *       This matches the streaming path (Shimmer3RClient.ts, gyroLsb | gyroMsb<<2,
+ *       cfg bit 34 == setup4 bit 2) and ShimmerObject.interpretInqResponse.
  *
- * HARDWARE-VERIFY: the Shimmer3R 6-value gyro range needs an MSB bit that lives
- * in config setup byte 4, whose SD-header offset is not verified here, so only
- * the low 2 bits (ranges 0-3) are decoded — the 2000/4000 dps ranges (4/5)
- * would read as 0/1. The alt-accel (high-g) and alt-mag ranges are likewise not
- * decoded from the SD header (defaulted to 0); their per-device calibration
- * blocks, when present, override the default anyway.
+ * HARDWARE-VERIFY: no real Shimmer3R SD card has been available to confirm the
+ * byte-12 MSB placement; the offset is taken from the Java oracle only. The
+ * alt-accel (high-g) and alt-mag ranges are likewise not decoded from the SD
+ * header (defaulted to 0); their per-device calibration blocks, when present,
+ * override the default anyway.
  */
 function parseImuRanges(bytes: Uint8Array, hw: number): SdLogImuRanges {
   const setup0 = bytes[8] ?? 0;
   const setup2 = bytes[10] ?? 0;
   const setup3 = bytes[11] ?? 0;
+  const setup4 = bytes[12] ?? 0;
   const wrAccel = (setup0 >> 2) & 0x03;
-  const gyro = setup2 & 0x03;
+  const gyroLsb = setup2 & 0x03;
+  // Shimmer3R gyro (LSM6DSV) has 6 ranges (0-5); the MSB rides in setup4 bit 2.
+  // Shimmer3 gyro (MPU9x50) has only 4 ranges (0-3), so no MSB there.
+  const gyro = hw === SDLOG_HW_ID.SHIMMER_3R ? gyroLsb | (((setup4 >> 2) & 0x01) << 2) : gyroLsb;
   const mag = (setup2 >> 5) & 0x07;
   const lnAccel = hw === SDLOG_HW_ID.SHIMMER_3R ? (setup3 >> 6) & 0x03 : 0;
   return { lnAccel, wrAccel, gyro, mag, altAccel: 0, altMag: 0 };

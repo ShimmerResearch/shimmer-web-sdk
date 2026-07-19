@@ -183,6 +183,18 @@ describe('parseKinematicCalibBlock — 21-byte block codec', () => {
     expect(cal.alignment).toEqual(align);
   });
 
+  it('truncates a fractional offset toward zero (Java (int) cast, not Math.round)', () => {
+    // Java stores offset as `(int)offsetVector[i][0]` — truncation toward zero.
+    // Math.round would give 3 / -3 for these; truncation must give 2 / -2.
+    const bytes = generateKinematicCalibBlock(
+      [2.9, -2.9, 100.4],
+      [1, 1, 1],
+      [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    );
+    const cal = parseKinematicCalibBlock(bytes)!;
+    expect(cal.offset).toEqual([2, -2, 100]);
+  });
+
   it('round-trips gyro sensitivity through the ×100 scale', () => {
     const bytes = generateKinematicCalibBlock(
       [0, 0, 0],

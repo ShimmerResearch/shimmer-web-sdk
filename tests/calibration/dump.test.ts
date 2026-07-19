@@ -111,4 +111,37 @@ describe('calibration source-priority ladder', () => {
       shouldOverrideCalibration(CALIB_READ_SOURCE.USER_MODIFIED, CALIB_READ_SOURCE.SD_HEADER),
     ).toBe(false);
   });
+
+  it('overrides on a strictly-newer timestamp even when the source priority is lower', () => {
+    // Java: `calibTimeMs > getCalibTimeMs() || ordinal >= ordinal`. A fresher
+    // incoming timestamp wins on the first disjunct regardless of source.
+    expect(
+      shouldOverrideCalibration(
+        CALIB_READ_SOURCE.USER_MODIFIED, // current (higher priority)
+        CALIB_READ_SOURCE.SD_HEADER, // incoming (lower priority)
+        1000, // currentTimeMs
+        2000, // incomingTimeMs — strictly newer
+      ),
+    ).toBe(true);
+  });
+
+  it('falls back to the ordinal guard when the incoming timestamp is not newer', () => {
+    // Not-newer timestamp (equal or older) → decided by source ordinal alone.
+    expect(
+      shouldOverrideCalibration(
+        CALIB_READ_SOURCE.USER_MODIFIED,
+        CALIB_READ_SOURCE.SD_HEADER,
+        2000, // currentTimeMs
+        2000, // incomingTimeMs — not strictly newer
+      ),
+    ).toBe(false); // lower-priority source, no timestamp advantage
+    expect(
+      shouldOverrideCalibration(
+        CALIB_READ_SOURCE.SD_HEADER,
+        CALIB_READ_SOURCE.RADIO_DUMP,
+        5000, // currentTimeMs
+        1000, // incomingTimeMs — older, but higher-priority source still wins
+      ),
+    ).toBe(true);
+  });
 });

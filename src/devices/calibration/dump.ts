@@ -156,12 +156,28 @@ export type CalibReadSource = (typeof CALIB_READ_SOURCE)[keyof typeof CALIB_READ
 
 /**
  * Whether a new calibration from `incoming` should replace one currently held
- * from `current`. Mirrors the Java guard
- * `if(calibReadSource.ordinal() >= getCalibReadSource().ordinal())`.
+ * from `current`. Mirrors the Java guard in CalibDetails.parseCalibDump:
+ *   `if (calibTimeMs > getCalibTimeMs()
+ *        || calibReadSource.ordinal() >= getCalibReadSource().ordinal())`
+ *
+ * The timestamp arguments are optional and additive: when both are supplied a
+ * strictly-newer incoming calibration timestamp wins regardless of source
+ * priority (a fresher on-device calibration overrides a stale higher-priority
+ * one). Omitting them falls back to the source-ordinal comparison alone, which
+ * preserves the previous behaviour.
  */
 export function shouldOverrideCalibration(
   current: CalibReadSource,
   incoming: CalibReadSource,
+  currentTimeMs?: number,
+  incomingTimeMs?: number,
 ): boolean {
+  if (
+    currentTimeMs !== undefined &&
+    incomingTimeMs !== undefined &&
+    incomingTimeMs > currentTimeMs
+  ) {
+    return true;
+  }
   return incoming >= current;
 }

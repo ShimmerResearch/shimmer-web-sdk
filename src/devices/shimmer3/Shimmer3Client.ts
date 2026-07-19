@@ -137,6 +137,12 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _drainingResidual = false;
   /** Number of {@link _waitForResponse} calls currently awaiting an INQUIRY_RESPONSE. */
   private _awaitInq = 0;
+  /**
+   * Number of command handlers ({@link _waitForAck} / {@link _waitForResponse})
+   * currently awaiting a response. Gates NACK framing in {@link _drainControl}
+   * so a stray 0xFE arriving with no command in flight cannot fabricate a NACK.
+   */
+  private _awaitCmd = 0;
 
   // Cached device info from the connect handshake
   deviceVersion: Shimmer3DeviceVersion | null = null;
@@ -349,6 +355,22 @@ export class Shimmer3Client extends BaseShimmerClient {
       // swallow real control bytes. Drop it instead.
       if (buf[0] === OPCODES.INQUIRY_RESPONSE && this._awaitInq <= 0) {
         this._log('drainControl: dropping 0x02 — no INQUIRY awaited');
+        buf = buf.subarray(1);
+        continue;
+      }
+
+      // Same guard for NACK (0xFE): only frame it as a control message while a
+      // command is genuinely awaiting a response (_awaitCmd > 0). A stray 0xFE —
+      // e.g. a late residual byte arriving after the stop-drain returned early —
+      // is dropped instead of framed. This diverges from the Java driver
+      // (ShimmerObject processes every 0xFE unconditionally) but strictly reduces
+      // the risk of a leaked stream byte being mistaken for a NACK, mirroring the
+      // 0x02 gate above. Defence-in-depth: today _onTemp handlers are added only
+      // while _awaitCmd > 0, so an ungated stray 0xFE would emit to no listener;
+      // this guard keeps that invariant explicit and survives refactors that add
+      // a longer-lived control listener.
+      if (buf[0] === NACK && this._awaitCmd <= 0) {
+        this._log('drainControl: dropping 0xFE — no command awaited');
         buf = buf.subarray(1);
         continue;
       }
@@ -591,6 +613,14 @@ export class Shimmer3Client extends BaseShimmerClient {
   /**
    * Resolve once no bytes have arrived for `quietMs` (checked every 50 ms via
    * the `_rxSeq` counter bumped in {@link _handleNotify}), or `maxMs` overall.
+   *
+   * HEURISTIC (hardware QA, please probe): the Shimmer3 streaming protocol has
+   * no end-of-stream handshake — STOP_STREAMING is ACKed but the firmware does
+   * not signal when the last data frame has been flushed over RFCOMM. Draining
+   * "until quiet" is therefore best-effort: the 300 ms quiet window / 3 s cap
+   * are tuned guesses, not protocol guarantees. Too short and a late residual
+   * frame leaks into the next command's control parsing; too long and stop()
+   * stalls. Values may need adjusting against real BT latency/buffering.
    */
   private async _drainQuiescent(quietMs: number, maxMs: number): Promise<void> {
     const start = Date.now();
@@ -785,7 +815,14 @@ export class Shimmer3Client extends BaseShimmerClient {
   /** Resolve on the next ACK control message; reject on NACK or timeout. */
   private _waitForAck(timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // Mark a command in flight so _drainControl frames NACK (0xFE) only while
+      // this window is open; balanced on every settle path below.
+      this._awaitCmd += 1;
+      const settle = (): void => {
+        this._awaitCmd = Math.max(0, this._awaitCmd - 1);
+      };
       const t = setTimeout(() => {
+        settle();
         this._offTemp(handler);
         reject(new Error('ACK timeout'));
       }, timeoutMs);
@@ -793,10 +830,12 @@ export class Shimmer3Client extends BaseShimmerClient {
         if (msg.length === 0) return;
         if (msg[0] === ACK) {
           clearTimeout(t);
+          settle();
           this._offTemp(handler);
           resolve();
         } else if (msg[0] === NACK) {
           clearTimeout(t);
+          settle();
           this._offTemp(handler);
           reject(new Error('NACK received'));
         }
@@ -813,12 +852,15 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _waitForResponse(expectedOpcode: number, timeoutMs: number): Promise<Uint8Array> {
     return new Promise<Uint8Array>((resolve, reject) => {
       // Track that an INQUIRY_RESPONSE is genuinely awaited so _drainControl
-      // only frames 0x02 while this window is open.
+      // only frames 0x02 while this window is open. _awaitCmd (bumped for every
+      // command) gates NACK framing the same way.
       if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) this._awaitInq += 1;
+      this._awaitCmd += 1;
       const settleInq = (): void => {
         if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) {
           this._awaitInq = Math.max(0, this._awaitInq - 1);
         }
+        this._awaitCmd = Math.max(0, this._awaitCmd - 1);
       };
       const t = setTimeout(() => {
         settleInq();

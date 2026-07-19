@@ -189,6 +189,12 @@ export function parseKinematicCalibBlock(
  * CalibDetailsKinematic.generateCalParamByteArray (:292-327): sensitivity is
  * rounded after ×sensitivityScale, alignment rounded after ×100, offset stored
  * as-is; all as big-endian i16 (offset, sensitivity) and i8 (alignment).
+ *
+ * Java truncates the offset with an `(int)` cast (`(int)offsetVector[i][0]`),
+ * NOT Math.round — a fractional offset drops its fractional part toward zero.
+ * We use Math.trunc to match that oracle behaviour exactly. Sensitivity and
+ * alignment are Math.round'd before their `(int)` cast in Java, so they keep
+ * Math.round here.
  */
 export function generateKinematicCalibBlock(
   offset: readonly [number, number, number],
@@ -199,7 +205,7 @@ export function generateKinematicCalibBlock(
   const sensScale = opts.sensitivityScale ?? 1;
   const out = new Uint8Array(21);
   for (let i = 0; i < 3; i++) {
-    const v = Math.round(offset[i]) & 0xffff;
+    const v = Math.trunc(offset[i]) & 0xffff; // Java (int) cast truncates toward zero
     out[i * 2] = (v >> 8) & 0xff;
     out[i * 2 + 1] = v & 0xff;
   }

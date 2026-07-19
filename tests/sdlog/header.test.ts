@@ -4,6 +4,7 @@ import {
   SdLogFormatError,
   SDLogHeaderBitmask as BM,
 } from '../../src/devices/sdlog/index.js';
+import { getDefaultCalibration } from '../../src/devices/calibration/index.js';
 import { buildSdLogHeader } from './fixtures.js';
 
 const expectCode = (fn: () => unknown, code: string): void => {
@@ -303,6 +304,30 @@ describe('parseSdLogHeader — Shimmer3R (384 B)', () => {
     );
     expect(h.channels[1].name).toBe('127');
     expect(h.channels[1].calibrated).toBe(false);
+  });
+
+  // Regression: the LSM6DSV gyro has 6 ranges (0-5); the MSB rides in config
+  // setup byte 4 (header byte 12, bit 2). Reading only the 2-bit LSB collapsed
+  // range 4→0 and 5→1, picking the wrong default sensitivity (229/114 dps).
+  it('decodes the full 3-bit gyro range from config setup byte 4 (MSB)', () => {
+    const r4 = parseSdLogHeader(
+      buildSdLogHeader({ hw: 10, fwId: 3, fwVersion: [0, 1, 0], signalIds, gyroRange: 4 }),
+    );
+    expect(r4.imuRanges.gyro).toBe(4);
+    // Range 4 (2000 dps) → default sensitivity diag(14). The 2-bit truncation bug
+    // would have collapsed this to range 0 (diag(229)); prove they differ.
+    const cal4 = getDefaultCalibration('shimmer3r', 'gyro', r4.imuRanges.gyro)!.calibration;
+    expect(cal4).not.toEqual(getDefaultCalibration('shimmer3r', 'gyro', 0)!.calibration);
+    expect(cal4).toEqual(getDefaultCalibration('shimmer3r', 'gyro', 4)!.calibration);
+
+    const r5 = parseSdLogHeader(
+      buildSdLogHeader({ hw: 10, fwId: 3, fwVersion: [0, 1, 0], signalIds, gyroRange: 5 }),
+    );
+    expect(r5.imuRanges.gyro).toBe(5);
+    // Range 5 (4000 dps) → default sensitivity diag(7), not diag(114) for range 1.
+    const cal5 = getDefaultCalibration('shimmer3r', 'gyro', r5.imuRanges.gyro)!.calibration;
+    expect(cal5).not.toEqual(getDefaultCalibration('shimmer3r', 'gyro', 1)!.calibration);
+    expect(cal5).toEqual(getDefaultCalibration('shimmer3r', 'gyro', 5)!.calibration);
   });
 });
 

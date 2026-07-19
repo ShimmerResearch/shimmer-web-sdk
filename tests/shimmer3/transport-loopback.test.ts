@@ -364,6 +364,33 @@ describe('Shimmer3Client post-STOP residual drain', () => {
     });
     await expect(client.setGSRRange(2)).resolves.toEqual({ gsrRange: 2 });
   });
+
+  it('gates NACK framing: a stray 0xFE with no command awaited is dropped, next command still ACKs', async () => {
+    const { t, client } = await connected(); // not streaming, no command pending
+    const statuses: string[] = [];
+    client.onStatus = (m) => statuses.push(m);
+
+    // A leaked residual 0xFE arrives while the control plane is idle
+    // (_awaitCmd === 0). Pre-fix it was framed as a NACK control message; the
+    // gate drops it. Either way it must not poison the *next* command: issue a
+    // SET_GSR_RANGE whose genuine ACK follows and confirm it still resolves.
+    t.notify([NACK]);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_GSR_RANGE_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await expect(client.setGSRRange(2)).resolves.toEqual({ gsrRange: 2 });
+    expect(statuses.some((m) => /NACK/i.test(m))).toBe(false);
+  });
+
+  it('still surfaces a NACK that arrives while a command IS awaiting a response', async () => {
+    const { t, client } = await connected();
+    // While SET_GSR_RANGE is in flight (_awaitCmd > 0) a 0xFE is a genuine NACK
+    // and must reject the command — the gate must not suppress this.
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_GSR_RANGE_COMMAND) setTimeout(() => tr.notify([NACK]), 0);
+    });
+    await expect(client.setGSRRange(2)).rejects.toThrow(/NACK/i);
+  });
 });
 
 describe('Shimmer3Client drain quiescence timing (fake timers)', () => {

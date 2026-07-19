@@ -20,6 +20,11 @@ export interface HeaderFixtureOptions {
   masterShimmer?: boolean;
   buttonStart?: boolean;
   gsrRange?: number;
+  /**
+   * Gyro range (0-5). LSB (bits 0-1) → config setup byte 2 (header byte 10);
+   * MSB (bit 2) → config setup byte 4 (header byte 12) bit 2, Shimmer3R only.
+   */
+  gyroRange?: number;
   mpuDmp?: boolean;
   /** TCXO flag — SD header byte 17 bit 4. */
   tcxo?: boolean;
@@ -49,6 +54,10 @@ export function buildSdLogHeader(opts: HeaderFixtureOptions = {}): Uint8Array {
   for (let i = 0; i < 5; i++) b[3 + i] = Math.floor(enabled / 2 ** (8 * i)) % 256;
 
   b[11] = ((opts.gsrRange ?? 0) & 0x07) << 1;
+  if (opts.gyroRange !== undefined) {
+    b[10] = (b[10] & ~0x03) | (opts.gyroRange & 0x03); // LSB in setup2 bits 0-1
+    b[12] = (b[12] & ~0x04) | (((opts.gyroRange >> 2) & 0x01) << 2); // MSB in setup4 bit 2
+  }
   if (opts.mpuDmp) b[12] |= 0x80;
 
   b[16] =
