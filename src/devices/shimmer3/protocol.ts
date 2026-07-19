@@ -387,6 +387,12 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
   if (opcode === OPCODES.INQUIRY_RESPONSE) {
     if (buf.length <= SHIMMER3_INQ_NUM_CHANNELS_OFFSET) return NEED_MORE; // need index 7 present
     const numChannels = buf[SHIMMER3_INQ_NUM_CHANNELS_OFFSET];
+    // Sanity bound: a stray stream-data byte 0x02 can masquerade as an
+    // INQUIRY_RESPONSE whose "numChannels" comes from garbage, swallowing up to
+    // 264 bytes of real control traffic (including ACK/NACK). No real Shimmer3
+    // has anywhere near 32 channels — treat implausible values as garbage and
+    // resync instead.
+    if (numChannels > 32) return RESYNC;
     return SHIMMER3_INQ_CHANNELS_OFFSET + numChannels; // 9 + numChannels
   }
 

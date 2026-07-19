@@ -131,6 +131,12 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _streaming = false;
   private _streamStarting = false;
   private _lastTs = 0;
+  /** Bumped once per inbound transport chunk — used for quiescence detection. */
+  private _rxSeq = 0;
+  /** While true, {@link _handleNotify} only accumulates; a drain loop owns `_rxBuf`. */
+  private _drainingResidual = false;
+  /** Number of {@link _waitForResponse} calls currently awaiting an INQUIRY_RESPONSE. */
+  private _awaitInq = 0;
 
   // Cached device info from the connect handshake
   deviceVersion: Shimmer3DeviceVersion | null = null;
@@ -310,7 +316,12 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _handleNotify = (chunk: Uint8Array): void => {
     if (!chunk || chunk.length === 0) return;
     this._log('Notify len=', chunk.length, 'data=', chunk);
+    this._rxSeq += 1; // for quiescence detection
     this._rxBuf = concatU8(this._rxBuf, chunk);
+
+    // While a residual-drain is in progress the drain loop owns the buffer:
+    // just accumulate, so stale stream bytes never reach the control parser.
+    if (this._drainingResidual) return;
 
     if (this._streaming) {
       this._parseStream();
@@ -332,6 +343,15 @@ export class Shimmer3Client extends BaseShimmerClient {
       // While a stream is (about to be) live, DATA_PACKET (0x00) bytes belong to
       // the stream parser, not the control plane — leave them buffered.
       if ((this._streaming || this._streamStarting) && buf[0] === OPCODES.DATA_PACKET) break;
+
+      // Only frame 0x02 as an INQUIRY_RESPONSE when an inquiry is actually
+      // awaited; an unexpected 0x02 is a stray/stream byte and framing it would
+      // swallow real control bytes. Drop it instead.
+      if (buf[0] === OPCODES.INQUIRY_RESPONSE && this._awaitInq <= 0) {
+        this._log('drainControl: dropping 0x02 — no INQUIRY awaited');
+        buf = buf.subarray(1);
+        continue;
+      }
 
       const len = shimmer3ControlMessageLength(buf);
       if (len === NEED_MORE) break;
@@ -507,6 +527,19 @@ export class Shimmer3Client extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    // Stale buffered bytes (e.g. residual post-stop stream data) would desync
+    // the ACK wait for START — drain to quiescence and discard them first. A
+    // clean state (empty buffer) skips this entirely.
+    if (this._rxBuf.length > 0) {
+      this._drainingResidual = true;
+      try {
+        await this._drainQuiescent(300, 2000);
+      } finally {
+        this._drainingResidual = false;
+      }
+      this._log('start: discarded', this._rxBuf.length, 'stale byte(s) pre-START');
+      this._rxBuf = new Uint8Array(0);
+    }
     this._streamStarting = true;
     this._lastTs = 0;
     this._emitStatus('START_STREAMING → waiting for ACK…');
@@ -527,16 +560,54 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   override async stopStreaming(): Promise<void> {
-    this._emitStatus('STOP_STREAMING → sending (best-effort, no ACK wait)…');
+    this._emitStatus('STOP_STREAMING → sending, then draining residual stream…');
     try {
       await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]));
     } catch (err: unknown) {
       this._emitStatus(`STOP_STREAMING write failed: ${(err as Error).message}`);
     }
-    this._streaming = false;
+    // In-flight stream packets keep arriving for hundreds of ms after STOP.
+    // Flipping to control mode instantly would let residual data hit
+    // _drainControl, where a stray 0xFE fabricates a NACK and a stray 0x02
+    // swallows real bytes (including ACKs). Keep the stream parser active while
+    // draining (or accumulate-only if we weren't in streaming mode — e.g.
+    // quiescing a device left streaming unattended), and only re-enable the
+    // control plane once the pipe has been quiet for ~300 ms.
     this._streamStarting = false;
+    if (!this._streaming) this._drainingResidual = true;
+    try {
+      await this._drainQuiescent(300, 3000);
+    } finally {
+      this._drainingResidual = false;
+    }
+    if (this._rxBuf.length) {
+      this._log('stop drain: discarding', this._rxBuf.length, 'residual byte(s)');
+    }
+    this._streaming = false;
     this._rxBuf = new Uint8Array(0);
     this._emitStatus('Streaming stopped.');
+  }
+
+  /**
+   * Resolve once no bytes have arrived for `quietMs` (checked every 50 ms via
+   * the `_rxSeq` counter bumped in {@link _handleNotify}), or `maxMs` overall.
+   */
+  private async _drainQuiescent(quietMs: number, maxMs: number): Promise<void> {
+    const start = Date.now();
+    let lastSeq = this._rxSeq;
+    let quietSince = Date.now();
+    for (;;) {
+      await new Promise<void>((r) => setTimeout(r, 50));
+      if (this._rxSeq !== lastSeq) {
+        lastSeq = this._rxSeq;
+        quietSince = Date.now();
+      }
+      if (Date.now() - quietSince >= quietMs) return;
+      if (Date.now() - start >= maxMs) {
+        this._log('drainQuiescent: max wait reached with pipe still active');
+        return;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -741,7 +812,16 @@ export class Shimmer3Client extends BaseShimmerClient {
    */
   private _waitForResponse(expectedOpcode: number, timeoutMs: number): Promise<Uint8Array> {
     return new Promise<Uint8Array>((resolve, reject) => {
+      // Track that an INQUIRY_RESPONSE is genuinely awaited so _drainControl
+      // only frames 0x02 while this window is open.
+      if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) this._awaitInq += 1;
+      const settleInq = (): void => {
+        if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) {
+          this._awaitInq = Math.max(0, this._awaitInq - 1);
+        }
+      };
       const t = setTimeout(() => {
+        settleInq();
         this._offTemp(handler);
         reject(new Error(`Response timeout (opcode 0x${expectedOpcode.toString(16)})`));
       }, timeoutMs);
@@ -750,12 +830,14 @@ export class Shimmer3Client extends BaseShimmerClient {
         if (msg[0] === ACK) return; // tolerate optional ACK prefix
         if (msg[0] === NACK) {
           clearTimeout(t);
+          settleInq();
           this._offTemp(handler);
           reject(new Error('NACK received'));
           return;
         }
         if (msg[0] === expectedOpcode) {
           clearTimeout(t);
+          settleInq();
           this._offTemp(handler);
           resolve(msg);
         }

@@ -160,6 +160,20 @@ describe('shimmer3ControlMessageLength (unframed-stream framing primitive)', () 
     expect(shimmer3ControlMessageLength(new Uint8Array([0xde]))).toBe(RESYNC);
   });
 
+  it('INQUIRY_RESPONSE with an implausible numChannels resyncs (stray 0x02 guard)', () => {
+    // A stray stream-data byte 0x02 mid-buffer would otherwise be framed as an
+    // INQUIRY_RESPONSE whose numChannels comes from garbage, swallowing real
+    // control bytes. numChannels=129 (the live-capture value) → 138-byte frame
+    // pre-fix; now bounded to resync.
+    const bogus = new Uint8Array([INQ_RSP, 0, 0, 0, 0, 0, 0, 129, 0, 0]);
+    expect(shimmer3ControlMessageLength(bogus)).toBe(RESYNC);
+    // The boundary: 32 channels is accepted (9 + 32 = 41); 33 resyncs.
+    const at32 = new Uint8Array([INQ_RSP, 0, 0, 0, 0, 0, 0, 32, 0, 0]);
+    expect(shimmer3ControlMessageLength(at32)).toBe(41);
+    const at33 = new Uint8Array([INQ_RSP, 0, 0, 0, 0, 0, 0, 33, 0, 0]);
+    expect(shimmer3ControlMessageLength(at33)).toBe(RESYNC);
+  });
+
   it('empty buffer needs more', () => {
     expect(shimmer3ControlMessageLength(new Uint8Array([]))).toBe(NEED_MORE);
   });

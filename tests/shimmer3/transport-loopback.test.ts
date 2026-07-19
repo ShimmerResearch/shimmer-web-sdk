@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
@@ -249,5 +249,161 @@ describe('Shimmer3Client disconnect', () => {
     expect(t.connected).toBe(true);
     await client.disconnect();
     expect(t.connected).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post-STOP residual-stream drain (hardware-QA regression)
+// ---------------------------------------------------------------------------
+//
+// Firmware keeps delivering ~800 ms of in-flight stream data after STOP. The old
+// client flipped to control-frame parsing instantly, so those stray data bytes
+// were mis-framed: a 0xFE sample byte fabricated "NACK received" and a 0x02
+// sample byte framed a bogus INQUIRY_RESPONSE that swallowed real ACKs
+// ("ACK timeout"). The fix keeps the stream parser active while draining to RX
+// quiescence before re-enabling the control plane.
+
+/** 10-byte gyro frame [0x00 preamble][u24 ts][i16 x][i16 y][i16 z]. */
+function gyroFrame(ts: number, x: number, y: number, z: number): number[] {
+  const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
+  return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...le16(x), ...le16(y), ...le16(z)];
+}
+
+/** Bring a connected client to a live streaming state with the gyro/u24 schema. */
+async function streaming(): Promise<{ t: LoopbackTransport; client: Shimmer3Client }> {
+  const { t, client } = await connected();
+  t.setOnWrite((bytes, tr) => {
+    if (bytes[0] === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+  });
+  await client.inquiry();
+  t.setOnWrite((bytes, tr) => {
+    if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+  });
+  await client.startStreaming();
+  return { t, client };
+}
+
+describe('Shimmer3Client post-STOP residual drain', () => {
+  it('drains trailing stream bytes (incl. 0xFE/0x02) without fabricating NACK/inquiry; next cmds succeed', async () => {
+    const { t, client } = await streaming();
+
+    // A master responder for the whole stop → reconfigure → restart cycle.
+    // On STOP: dribble ~150 ms of residual stream data whose payload bytes
+    // deliberately include 0xFE (would fabricate a NACK) and 0x02 (would frame a
+    // bogus inquiry), split across awkward chunk boundaries, with the genuine
+    // stop ACK 0xFF mixed into the tail. The device then goes quiet.
+    const residual = [
+      ...gyroFrame(400, 0x00fe, 0x0002, 0x02fe), // sample bytes 0xFE and 0x02
+      0xfe,
+      0x02,
+      ...gyroFrame(500, 0x02fe, 0x00fe, 0x0002),
+      ACK, // stop ACK arriving mixed into the residual tail
+    ];
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.STOP_STREAMING_COMMAND) {
+        // dribble the residual in 4 chunks over the first few ms, then silence
+        const chunks = [residual.slice(0, 5), residual.slice(5, 11), residual.slice(11, 18), residual.slice(18)];
+        chunks.forEach((c, i) => setTimeout(() => tr.notify(c), i));
+      } else if (op === OPCODES.SET_SENSORS_COMMAND || op === OPCODES.SET_SAMPLING_RATE_COMMAND) {
+        setTimeout(() => tr.notify([ACK]), 0);
+      } else if (op === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+      } else if (op === OPCODES.START_STREAMING_COMMAND) {
+        setTimeout(() => tr.notify([ACK]), 0);
+      }
+    });
+
+    const statuses: string[] = [];
+    client.onStatus = (m) => statuses.push(m);
+
+    // Two full stop → reconfigure → restart cycles (per the QA repro).
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await expect(client.stopStreaming()).resolves.toBeUndefined();
+
+      // The stray 0xFE must NOT have surfaced as a protocol NACK, and the stray
+      // 0x02 must NOT have framed a bogus inquiry that swallows ACKs.
+      const res = await client.setSensors(SensorBitmapShimmer3.SENSOR_GYRO);
+      expect(res.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+      await expect(client.setSamplingRate(51.2)).resolves.toMatchObject({ divisor: 640 });
+
+      const frames: ObjectCluster[] = [];
+      client.onStreamFrame = (oc) => frames.push(oc);
+      await expect(client.startStreaming()).resolves.toBeUndefined();
+
+      // Streaming works again after the restart.
+      const s = [...gyroFrame(600, 11, 22, 33), ...gyroFrame(700, 44, 55, 66), ...gyroFrame(800, 77, 88, 99)];
+      t.notify(s);
+      expect(frames.length).toBeGreaterThanOrEqual(2);
+      expect(frames[0].get('GYRO_X', 'raw')?.value).toBe(11);
+    }
+
+    expect(statuses.some((m) => /NACK/i.test(m))).toBe(false);
+    expect(statuses.some((m) => /timeout/i.test(m))).toBe(false);
+  }, 10000);
+
+  it('gates INQUIRY_RESPONSE framing: a stray 0x02 with no inquiry awaited never swallows a real ACK', async () => {
+    const { t, client } = await connected(); // not streaming, no inquiry pending
+    // Device replies to SET_GSR_RANGE with a stray 0x02 (a leaked stream byte)
+    // immediately ahead of the genuine ACK. Pre-fix, 0x02 framed an
+    // INQUIRY_RESPONSE that swallowed the ACK → "ACK timeout". With the
+    // _awaitInq gate the 0x02 is dropped and the ACK resolves the command.
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_GSR_RANGE_COMMAND) {
+        setTimeout(() => tr.notify([INQ_RSP, ACK]), 0);
+      }
+    });
+    await expect(client.setGSRRange(2)).resolves.toEqual({ gsrRange: 2 });
+  });
+});
+
+describe('Shimmer3Client drain quiescence timing (fake timers)', () => {
+  it('resolves after the 300ms quiet window; a late byte re-arms it', async () => {
+    const { t, client } = await connected(); // not streaming → accumulate-only drain
+    t.setOnWrite(() => {
+      /* STOP: no reply */
+    });
+    vi.useFakeTimers();
+    try {
+      let resolved = false;
+      const p = client.stopStreaming().then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(250);
+      expect(resolved).toBe(false);
+      t.notify([0x11]); // a late byte re-arms the quiet window
+      await vi.advanceTimersByTimeAsync(250); // 250 ms since the late byte (< 300)
+      expect(resolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(120); // now > 300 ms quiet → resolves
+      expect(resolved).toBe(true);
+      await p;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honours the 3s cap when the pipe never goes quiet', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite(() => {
+      /* STOP: no reply */
+    });
+    vi.useFakeTimers();
+    try {
+      let resolved = false;
+      const p = client.stopStreaming().then(() => {
+        resolved = true;
+      });
+      // A byte every 100 ms keeps the 300 ms quiet window from ever closing.
+      for (let elapsed = 0; elapsed < 2900; elapsed += 100) {
+        await vi.advanceTimersByTimeAsync(100);
+        t.notify([0x11]);
+      }
+      expect(resolved).toBe(false); // still draining just before the cap
+      await vi.advanceTimersByTimeAsync(300); // cross the 3s cap
+      expect(resolved).toBe(true);
+      await p;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
