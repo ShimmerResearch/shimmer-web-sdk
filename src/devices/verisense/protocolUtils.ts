@@ -133,6 +133,31 @@ export function nowMillis(): number {
 }
 
 /**
+ * Convert a UTC unix-ms instant to the "local civil" timestamp domain used by
+ * the Verisense real-world clock: unix ms with the host's local timezone
+ * offset baked in, so that hour-of-day of the raw value equals the wall-clock
+ * hour where the base station is.
+ *
+ * This is the documented time-sync contract ("synchronises the sensor's
+ * real-world clock with the Base Station's local time" - Verisense
+ * communication protocol) and what the downstream file parser assumes: it
+ * evaluates midnight/midday CSV-split boundaries on the raw RWC value in a
+ * pinned GMT+0 calendar, and labels CSV timestamp columns
+ * "Unix_ms_plus_local_time_zone_offset".
+ *
+ * Note `getTimezoneOffset()` is evaluated at `utcMillis` itself, so the DST
+ * rule in effect at that instant is applied.
+ */
+export function utcToLocalCivilMillis(utcMillis: number = Date.now()): number {
+  return utcMillis - new Date(utcMillis).getTimezoneOffset() * 60_000;
+}
+
+/** Current time in the Verisense local-civil RWC domain, in whole unix seconds. */
+export function localCivilUnixSecondsNow(): number {
+  return Math.floor(utcToLocalCivilMillis() / 1000);
+}
+
+/**
  * Compute CRC-16/CCITT-FALSE over `bytes`.
  *
  * Parameters: poly=0x1021, init=0xFFFF, xorOut=0x0000.
@@ -514,7 +539,16 @@ export interface VerisenseEventLogEntry {
  * seconds). Values beyond this are uninitialised/garbage bytes, not dates. */
 export const VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS = 4102444800;
 
-/** Format unix seconds as raw + human-readable local datetime for logging. */
+/**
+ * Format a device-RWC timestamp (unix seconds) as raw + human-readable datetime.
+ *
+ * The device RWC lives in the "local civil" domain (unix seconds with the
+ * base station's timezone offset already baked in - see
+ * {@link utcToLocalCivilMillis}), so the value is rendered VERBATIM via the
+ * Date UTC accessors: the wall-clock time shown is exactly what the device's
+ * clock reads. Rendering with the local-time accessors would apply the
+ * browser's timezone offset a second time.
+ */
 export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixAndHumanTimestamp {
   const unix = Number(unixSeconds);
   if (!Number.isFinite(unix)) {
@@ -527,12 +561,12 @@ export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixA
     return { unix, human: 'not-valid' };
   }
   const d = new Date(unix * 1000);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const HH = String(d.getHours()).padStart(2, '0');
-  const MM = String(d.getMinutes()).padStart(2, '0');
-  const SS = String(d.getSeconds()).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const HH = String(d.getUTCHours()).padStart(2, '0');
+  const MM = String(d.getUTCMinutes()).padStart(2, '0');
+  const SS = String(d.getUTCSeconds()).padStart(2, '0');
   return {
     unix,
     human: `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`,
