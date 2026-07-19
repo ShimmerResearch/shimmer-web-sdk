@@ -393,6 +393,29 @@ describe('SensorPPG', () => {
     expect(sensor.calibrateValue(1024)).toBeGreaterThanOrEqual(0);
   });
 
+  it('live stream decodes a channel little-endian with a 19-bit mask (default)', () => {
+    const sensor = new SensorPPG();
+    sensor.setChannels({ RED: true });
+    // Bytes [0x11,0x22,0x83]: LE = 0x832211, masked to 19 bits = 0x032211.
+    const out = sensor.parsePayload(new Uint8Array([0x11, 0x22, 0x83]));
+    expect(out[0].RED?.raw).toBe(0x032211);
+  });
+
+  it('flash-logged mode decodes a channel big-endian at full 24-bit width', () => {
+    // Java flash oracle (SensorMAX86916 / SensorMAX86150): UINT24, MSB.
+    const sensor = new SensorPPG();
+    sensor.setFlashLoggedMode(true);
+    sensor.setChannels({ RED: true, IR: true });
+    // Two channels, one sample. RED bytes [0x12,0x34,0x56] → BE 0x123456.
+    // IR bytes [0xFF,0x00,0x01] → BE 0xFF0001 (full 24-bit, would be masked away
+    // to 0x7ffff in the live path).
+    const body = new Uint8Array([0x12, 0x34, 0x56, 0xff, 0x00, 0x01]);
+    const out = sensor.parsePayload(body);
+    expect(out).toHaveLength(1);
+    expect(out[0].RED?.raw).toBe(0x123456);
+    expect(out[0].IR?.raw).toBe(0xff0001);
+  });
+
   it('sets samplingRateHz from PPG_SR divided by the sample-averaging factor', () => {
     const sensor = new SensorPPG();
     expect(sensor.samplingRateHz).toBe(50); // constructor default

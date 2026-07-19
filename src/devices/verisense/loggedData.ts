@@ -60,9 +60,15 @@
  *     an explicit `blockSizes[id]` is supplied; otherwise the page is reported,
  *     not guessed.
  *  3. **PPG sample endianness**: the Java flash reference decodes MAX869xx PPG
- *     as 24-bit BIG-endian, whereas the SDK's live `SensorPPG` (MAX86176) uses
- *     little-endian. This decoder reuses the SDK decoder (little-endian) as the
- *     authority for SDK hardware; verify against a capture.
+ *     as 24-bit BIG-endian (SensorMAX86916 / SensorMAX86150 channel details:
+ *     UINT24, MSB), whereas the SDK's live `SensorPPG` uses little-endian with a
+ *     19-bit mask. This logged decoder now matches the Java oracle: it enables
+ *     `SensorPPG.setFlashLoggedMode(true)` so logged PPG blocks are read
+ *     big-endian at full 24-bit width, while the live stream keeps its
+ *     little-endian/19-bit decode. PPG blocks are still only decoded when an
+ *     explicit `blockSizes[4]` is supplied (see seam 1). HARDWARE-VERIFY — no
+ *     real flash dump has confirmed either endianness/width; verify against a
+ *     capture.
  *  4. **Payload-config length and footer length depend on the firmware payload-
  *     design version.** Defaults target design v8+ with the extended config
  *     present and footer design v9 (RTC minutes+ticks+temp+batt); override with
@@ -319,6 +325,17 @@ export function resolveLoggedBlockSize(
       // Java: SensorLSM6DS3.getFifoByteSizeInChip() = getFifoSizeInChip()*2,
       // where fifoSizeInChip = FTH_LSB | ((FTH_MSB & 0x0f) << 8) from the op
       // config. @remarks HARDWARE-VERIFY.
+      //
+      // SOURCE DIFFERENCE vs the Java SD path: the Java driver can also derive
+      // fifoSizeInChip by *recomputing* it from the enabled channels + sampling
+      // rate (SensorLSM6DS3.calculateFifoThreshold / updateFifoSizeInChip) and
+      // falls back to a hard-coded DEFAULT_FIFO_BYTE_SIZE_IN_CHIP (8112) when it
+      // has no better information. We deliberately do NOT recompute or apply a
+      // default here: we read only the persisted FTH threshold field that the
+      // firmware actually wrote into this trial's config. If that field is
+      // absent (no op config) or zero, we FAIL SAFE by returning null so the
+      // caller reports the page as un-sized rather than mis-sizing the block
+      // against a guessed/default FIFO length and mis-attributing the tail.
       if (!opConfig) return null;
       const lsb = opConfig[OP_IDX.GYRO_ACCEL2_CFG_0] ?? 0;
       const msb = (opConfig[OP_IDX.GYRO_ACCEL2_CFG_1] ?? 0) & 0x0f;
@@ -406,10 +423,18 @@ export interface LoggedPayloadIndexGap {
   missing: number;
 }
 
+/** Largest value the 2-byte (u16) payload-index field can hold before wrapping. */
+const LOGGED_PAYLOAD_INDEX_MAX = 0xffff;
+
 /**
  * Report gaps in the payload-index sequence of split pages. Payload indices are
  * expected to increase by exactly 1 per page; any larger step is a gap (dropped
  * pages) and any non-increasing step is flagged as a reset/wrap (`missing: 0`).
+ *
+ * The payload index is a 16-bit field, so the natural transition 65535 → 0 is a
+ * normal counter wraparound (not a device reset) and is treated as continuity —
+ * exactly like any other +1 step. Any other non-increasing step is still flagged
+ * as a reset.
  */
 export function findLoggedPayloadIndexGaps(
   pages: ReadonlyArray<Pick<LoggedPageSpan, 'payloadIndex'>>,
@@ -418,6 +443,8 @@ export function findLoggedPayloadIndexGaps(
   for (let i = 1; i < pages.length; i++) {
     const prev = pages[i - 1].payloadIndex;
     const cur = pages[i].payloadIndex;
+    // u16 wraparound: 65535 → 0 is the expected next index, not a reset.
+    if (prev === LOGGED_PAYLOAD_INDEX_MAX && cur === 0) continue;
     if (cur > prev + 1) {
       gaps.push({ afterPayloadIndex: prev, nextPayloadIndex: cur, missing: cur - prev - 1 });
     } else if (cur <= prev) {
@@ -443,11 +470,16 @@ export function verifyLoggedPageCrc(page: Uint8Array): boolean {
 function buildSensorBank(opts: DecodeVerisenseLoggedDataOptions): Record<number, SensorBase> {
   const adc = new SensorADC();
   adc.setHardwareIdentifier(opts.hardwareIdentifier ?? 'VERISENSE_PULSE_PLUS');
+  const ppg = new SensorPPG();
+  // Logged/flash PPG uses the Java oracle's big-endian, full-24-bit decode
+  // (SensorMAX86916 / SensorMAX86150: UINT24, MSB) rather than the live stream's
+  // little-endian 19-bit form. HARDWARE-VERIFY — see module-header seam (3).
+  ppg.setFlashLoggedMode(true);
   const bank: Record<number, SensorBase> = {
     1: adc,
     2: new SensorLIS2DW12(),
     3: new SensorLSM6DS3(),
-    4: new SensorPPG(),
+    4: ppg,
     6: new SensorLSM6DSV(),
     7: new SensorVD6283(),
     8: new SensorMAX32674(),

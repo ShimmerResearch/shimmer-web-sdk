@@ -69,6 +69,24 @@ export class SensorPPG extends SensorBase {
     this.hubMode = enabled;
   }
 
+  /**
+   * Flash/SD logged-data decode mode for the 1st-gen (non-hub) named-channel
+   * layout. When enabled, each 24-bit LED channel is read BIG-endian and kept at
+   * full 24-bit width (no 19-bit mask), matching the Java flash oracle
+   * (SensorMAX86916 / SensorMAX86150 channel details: CHANNEL_DATA_TYPE.UINT24,
+   * CHANNEL_DATA_ENDIAN.MSB). The live BLE stream keeps its little-endian,
+   * 19-bit-masked decode (default false), so this only affects logged pages.
+   *
+   * HARDWARE-VERIFY: no real Verisense flash dump has confirmed either the
+   * endianness or the bit width for a captured PPG block; the big-endian/24-bit
+   * form is taken from the Java oracle only.
+   */
+  flashLoggedMode = false;
+
+  setFlashLoggedMode(enabled: boolean): void {
+    this.flashLoggedMode = enabled;
+  }
+
   setAdcResolutionIndex(i: number): void {
     if (i >= 0 && i <= 3) this.adcResolutionIndex = i;
   }
@@ -128,8 +146,14 @@ export class SensorPPG extends SensorBase {
         const b2 = sensorPayloadBytes[base + off + 2];
         off += 3;
 
-        let uncal = (b0 | (b1 << 8) | (b2 << 16)) >>> 0;
-        uncal &= 0x7ffff;
+        let uncal: number;
+        if (this.flashLoggedMode) {
+          // Flash/SD oracle: UINT24, MSB (big-endian), full 24-bit width.
+          uncal = ((b0 << 16) | (b1 << 8) | b2) >>> 0;
+        } else {
+          // Live BLE stream: little-endian, 19-bit-masked (HARDWARE-VERIFY).
+          uncal = ((b0 | (b1 << 8) | (b2 << 16)) >>> 0) & 0x7ffff;
+        }
 
         sample[ch] = {
           raw: uncal,

@@ -405,6 +405,22 @@ describe('findLoggedPayloadIndexGaps', () => {
     ]);
   });
 
+  it('treats the u16 wraparound 65535 → 0 as continuity, not a reset', () => {
+    const gaps = findLoggedPayloadIndexGaps([
+      { payloadIndex: 65534 },
+      { payloadIndex: 65535 },
+      { payloadIndex: 0 }, // natural u16 wrap — must NOT be flagged
+      { payloadIndex: 1 },
+    ]);
+    expect(gaps).toEqual([]);
+  });
+
+  it('still flags a non-wrap reset that happens to land on 0', () => {
+    // 6 → 0 is not the 65535→0 wrap, so it is a genuine reset.
+    const gaps = findLoggedPayloadIndexGaps([{ payloadIndex: 6 }, { payloadIndex: 0 }]);
+    expect(gaps).toEqual([{ afterPayloadIndex: 6, nextPayloadIndex: 0, missing: 0 }]);
+  });
+
   it('is surfaced on the decode result', () => {
     const mkPage = (idx: number): Uint8Array =>
       buildPage({
