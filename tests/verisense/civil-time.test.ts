@@ -11,8 +11,10 @@ import {
 describe('utcToLocalCivilMillis', () => {
   it('applies the timezone offset in effect at the given instant', () => {
     const utc = Date.UTC(2026, 6, 18, 23, 54, 23); // 2026-07-18 23:54:23 UTC
-    const expectedOffsetMin = -new Date(utc).getTimezoneOffset();
-    expect(utcToLocalCivilMillis(utc) - utc).toBe(expectedOffsetMin * 60_000);
+    // Compare absolute values, not the delta: on a UTC-timezone runner the
+    // expected delta computes as -0, and Object.is(+0, -0) is false.
+    const offsetMin = new Date(utc).getTimezoneOffset();
+    expect(utcToLocalCivilMillis(utc)).toBe(utc - offsetMin * 60_000);
   });
 
   it('round-trips hour-of-day to the host wall clock', () => {
