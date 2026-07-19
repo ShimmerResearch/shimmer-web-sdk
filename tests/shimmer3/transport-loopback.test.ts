@@ -303,7 +303,12 @@ describe('Shimmer3Client post-STOP residual drain', () => {
       const op = bytes[0];
       if (op === OPCODES.STOP_STREAMING_COMMAND) {
         // dribble the residual in 4 chunks over the first few ms, then silence
-        const chunks = [residual.slice(0, 5), residual.slice(5, 11), residual.slice(11, 18), residual.slice(18)];
+        const chunks = [
+          residual.slice(0, 5),
+          residual.slice(5, 11),
+          residual.slice(11, 18),
+          residual.slice(18),
+        ];
         chunks.forEach((c, i) => setTimeout(() => tr.notify(c), i));
       } else if (op === OPCODES.SET_SENSORS_COMMAND || op === OPCODES.SET_SAMPLING_RATE_COMMAND) {
         setTimeout(() => tr.notify([ACK]), 0);
@@ -332,7 +337,11 @@ describe('Shimmer3Client post-STOP residual drain', () => {
       await expect(client.startStreaming()).resolves.toBeUndefined();
 
       // Streaming works again after the restart.
-      const s = [...gyroFrame(600, 11, 22, 33), ...gyroFrame(700, 44, 55, 66), ...gyroFrame(800, 77, 88, 99)];
+      const s = [
+        ...gyroFrame(600, 11, 22, 33),
+        ...gyroFrame(700, 44, 55, 66),
+        ...gyroFrame(800, 77, 88, 99),
+      ];
       t.notify(s);
       expect(frames.length).toBeGreaterThanOrEqual(2);
       expect(frames[0].get('GYRO_X', 'raw')?.value).toBe(11);
