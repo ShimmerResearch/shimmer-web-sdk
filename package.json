@@ -59,7 +59,7 @@
     "@typescript-eslint/parser": "^8.63.0",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
-    "prettier": "^3.9.4",
+    "prettier": "^3.9.6",
     "rollup": "^4.62.2",
     "rollup-plugin-dts": "^6.1.0",
     "tslib": "^2.6.2",
