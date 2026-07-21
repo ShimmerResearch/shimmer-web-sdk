@@ -237,6 +237,48 @@ export type {
   DeviceWriteDivergentRanges,
 } from './devices/infomem/index.js';
 
+// ADS1292R (EXG / ECG-EMG-respiration) register codec — phase EX1
+export {
+  EXG_BANK_LENGTH,
+  decodeExgRegisters,
+  encodeExgRegisters,
+  applyExgMustBeBits,
+  CONVERSION_MODE_LABELS,
+  DATA_RATE_LABELS,
+  VOLTAGE_REFERENCE_LABELS,
+  TEST_SIGNAL_FREQUENCY_LABELS,
+  COMPARATOR_THRESHOLD_LABELS,
+  LEAD_OFF_CURRENT_LABELS,
+  LEAD_OFF_FREQUENCY_LABELS,
+  GAIN_LABELS,
+  GAIN_VALUES,
+  POWER_DOWN_LABELS,
+  INPUT_SELECTION_LABELS,
+  CHOP_FREQUENCY_LABELS,
+  RESPIRATION_PHASE_32KHZ_LABELS,
+  RESPIRATION_PHASE_64KHZ_LABELS,
+  RESPIRATION_FREQUENCY_LABELS,
+  RLD_REFERENCE_SIGNAL_LABELS,
+  RESPIRATION_CONTROL_LABELS,
+  EXG_PRESET_ARRAYS,
+  exgResolutionFromSensors,
+  detectExgPreset,
+  exgPresetLabel,
+} from './devices/exg/index.js';
+export type {
+  ExgFieldValue,
+  ExgGainValue,
+  ExgChannelSettings,
+  ExgLeadOffSettings,
+  ExgRespirationSettings,
+  ExgRldSettings,
+  ExgTestSignalSettings,
+  ExgStatusBits,
+  DecodedExgRegisters,
+  ExgPreset,
+  ExgResolution,
+} from './devices/exg/index.js';
+
 // Inertial (accel/gyro/mag) calibration — phase P3
 export {
   matrixInverse3x3,
