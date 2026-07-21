@@ -141,7 +141,12 @@ export class SensorLSM6DSV extends SensorBase {
   private calibrateGyro(raw: [number, number, number]): [number, number, number] {
     const dev = this.calibration?.getImu(CalibSensorId.LSM6DSV_GYRO, this.fsGCode);
     if (dev) return applyImuCalibration(raw, dev);
-    const scale = this.gyroFsDps / 32768;
+    // ST angular-rate sensitivity: 4.375 mdps/LSB at ±125 dps, doubling per
+    // range (LSM6DSV datasheet §4.3; same spec as the gen-1 LSM6DS3 and the
+    // device calibration seed / calibrationDefaults GYRO_RANGES). Unlike the
+    // accel, the gyro does NOT span the full 16-bit range at nominal full
+    // scale, so a FS/32768 derivation reads ~12.8% low (DEV-874).
+    const scale = 0.004375 * (this.gyroFsDps / 125);
     return [raw[0] * scale, raw[1] * scale, raw[2] * scale];
   }
 

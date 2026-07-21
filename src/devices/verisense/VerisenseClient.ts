@@ -37,6 +37,7 @@ import {
   u16le_at,
   u24le,
   nowMillis,
+  localCivilUnixSecondsNow,
   computeCrcLikeCSharp,
   getOriginalCrcLE,
   parseStatusPayload,
@@ -1043,8 +1044,29 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.writeProperty(ASM_PROPERTY.TIME, payload);
   }
 
+  /**
+   * Write a raw timestamp to the device RWC. NOTE: the Verisense time-sync
+   * contract is that the RWC holds the base station's LOCAL civil time (unix
+   * seconds with the local timezone offset baked in), not UTC - callers
+   * syncing "now" should use {@link writeTimeLocalNow} rather than passing
+   * `Date.now()/1000` here.
+   */
   async writeTimeUnixSeconds(unixSeconds: number): Promise<void> {
     await this.writeTime(unixSecondsToAsmRtcBytes(unixSeconds));
+  }
+
+  /**
+   * Synchronise the device RWC to the host's current LOCAL civil time - the
+   * documented Verisense time-sync semantics ("the Base Station's local
+   * time"). The downstream file parser relies on this domain for its
+   * midnight/midday CSV splits and "Local =" header times.
+   *
+   * @returns the unix-seconds value written (local-civil domain).
+   */
+  async writeTimeLocalNow(): Promise<number> {
+    const civilUnixSeconds = localCivilUnixSecondsNow();
+    await this.writeTimeUnixSeconds(civilUnixSeconds);
+    return civilUnixSeconds;
   }
 
   /**

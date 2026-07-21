@@ -142,9 +142,22 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     ],
   },
   {
+    key: 'LOW_BATT_AUTO_STOP_DISABLED',
+    label: 'Low-Power Auto-Stop',
+    desc: 'Stop recording and BLE data transfers when the battery drops below the low-power threshold. Disabling keeps the device recording until the battery is exhausted, at the risk of data loss from brown-out.',
+    kind: 'bit',
+    index: OP_IDX.GEN_CFG_2,
+    shift: 3,
+    width: 1,
+    options: [
+      [0, 'Enabled'],
+      [1, 'Disabled'],
+    ],
+  },
+  {
     key: 'BATT_TYPE',
     label: 'Battery Type',
-    desc: 'Battery chemistry',
+    desc: 'Battery chemistry (replaceable-battery models only; Zinc-Air is legacy — new configurations should use NiMH). Models with a permanently attached LiPo (SR62, SR61.5+, SR68.9+) ignore this setting — the firmware forces LiPo (see isVerisenseLipoBatteryHardware).',
     kind: 'bit',
     index: OP_IDX.GEN_CFG_2,
     shift: 0,
@@ -796,8 +809,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'INACTIVE_TIMEOUT_MINUTES',
-    label: 'Inactive Timeout (minutes)',
-    desc: 'Minutes of no activity before the device stops recording and sleeps. 0 disables inactivity detection.',
+    label: 'Inactive Timeout (minutes, 0 = off)',
+    desc:
+      'Minutes the device must be completely stationary before it stops recording (1-63; 0 = stationary detection off, record regardless of movement). ' +
+      'CAUTION: with "Resume Rec On Activity" disabled, hitting this timeout also turns Logging OFF in the stored config - the device will not record again until it is reconfigured.',
     kind: 'inactiveMinutes',
     index: OP_IDX.INACTIVE_TIMEOUT,
     min: 0,
@@ -806,7 +821,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'RESUME_REC_ON_ACTIVITY',
     label: 'Resume Rec On Activity',
-    desc: 'Automatically resume recording when activity is detected after an inactivity sleep. Only has an effect when Logging is enabled and the inactive timeout is above 0.',
+    desc:
+      'Enabled: recording pauses at the inactive timeout and automatically resumes when movement is detected. ' +
+      'Disabled: hitting the timeout stops recording permanently and turns Logging off in the stored config. ' +
+      'Only has an effect when Logging is enabled and the inactive timeout is above 0.',
     kind: 'inactiveResume',
     index: OP_IDX.INACTIVE_TIMEOUT,
     options: [
@@ -1767,6 +1785,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'DATA_COMPRESSION_MODE',
         'HR_PPG_CHANNEL',
         'STEP_COUNT_EN',
+        'LOW_BATT_AUTO_STOP_DISABLED',
         'BATT_TYPE',
         'MAG_EN',
         'LED_MODE',

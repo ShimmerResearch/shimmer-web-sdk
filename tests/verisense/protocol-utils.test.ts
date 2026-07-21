@@ -8,6 +8,8 @@ import {
   getVerisenseHardwareSensorSupport,
   getVerisenseSupportedOperationalFieldGroupIds,
   getVerisenseStreamingBatteryVoltageMultiplier,
+  isVerisenseGsrSupportedHardware,
+  isVerisenseLipoBatteryHardware,
   parseEventLogPayload,
   parsePayloadCrcErrorBankIndexes,
   parseProductionConfigPayloadFull,
@@ -45,6 +47,43 @@ describe('Hardware model helpers', () => {
     expect(getVerisenseStreamingBatteryVoltageMultiplier(69, 0)).toBe(2.469);
   });
 
+  it('mirrors the firmware GSR-support rule (ShimBrd_isGsrSupportedForHwVersion)', () => {
+    // SR62: any revision.
+    expect(isVerisenseGsrSupportedHardware(62, 0)).toBe(true);
+    expect(isVerisenseGsrSupportedHardware(62, 3)).toBe(true);
+    // SR61: minor >= 5 (second-generation IMU carries GSR).
+    expect(isVerisenseGsrSupportedHardware(61, 4)).toBe(false);
+    expect(isVerisenseGsrSupportedHardware(61, 5)).toBe(true);
+    expect(isVerisenseGsrSupportedHardware(61, 6)).toBe(true);
+    // SR68: minor >= 5 — NOT the second-generation threshold (9).
+    expect(isVerisenseGsrSupportedHardware(68, 4)).toBe(false);
+    expect(isVerisenseGsrSupportedHardware(68, 5)).toBe(true);
+    expect(isVerisenseGsrSupportedHardware(68, 9)).toBe(true);
+    // Other models carry no GSR front end.
+    expect(isVerisenseGsrSupportedHardware(63, 3)).toBe(false);
+    expect(isVerisenseGsrSupportedHardware(64, 0)).toBe(false);
+    expect(isVerisenseGsrSupportedHardware(NaN, 5)).toBe(false);
+  });
+
+  it('mirrors the firmware fixed-LiPo rule (ShimBrd_isLipoPresentForHwVersion)', () => {
+    // SR62: any revision.
+    expect(isVerisenseLipoBatteryHardware(62, 0)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(62, 3)).toBe(true);
+    // SR61: minor >= 5.
+    expect(isVerisenseLipoBatteryHardware(61, 4)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(61, 5)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(61, 6)).toBe(true);
+    // SR68: minor >= 9 (the second-generation threshold, NOT the GSR one at 5).
+    expect(isVerisenseLipoBatteryHardware(68, 5)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(68, 8)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(68, 9)).toBe(true);
+    expect(isVerisenseLipoBatteryHardware(68, 10)).toBe(true);
+    // Replaceable-battery / other models.
+    expect(isVerisenseLipoBatteryHardware(63, 3)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(64, 0)).toBe(false);
+    expect(isVerisenseLipoBatteryHardware(NaN, 5)).toBe(false);
+  });
+
   it('resolves sensor support per model from the IC matrix', () => {
     // SR61.1 (1st-gen IMU): LIS2DW12 + LSM6DS3 only.
     expect(getVerisenseHardwareSensorSupport(61, 1)).toMatchObject({
@@ -72,17 +111,20 @@ describe('Hardware model helpers', () => {
       ppg: true,
       imuGen2: false,
     });
-    // SR68.8 (1st-gen Pulse+): accel1 + PPG + skin temp; no GSR, no gyro/accel2.
+    // SR68.8 (1st-gen Pulse+): accel1 + PPG + skin temp + GSR (GSR from SR68.5
+    // per the IC matrix / firmware ShimBrd_isGsrSupportedForHwVersion).
     expect(getVerisenseHardwareSensorSupport(68, 8)).toMatchObject({
       accel1: true,
       gyroAccel2: false,
-      gsr: false,
+      gsr: true,
       ppg: true,
       skinTemperature: true,
       imuGen2: false,
     });
     // SR68.6 (1st-gen Pulse+, pre skin temp): no skin temp.
     expect(getVerisenseHardwareSensorSupport(68, 6).skinTemperature).toBe(false);
+    // SR68.4: pre-GSR.
+    expect(getVerisenseHardwareSensorSupport(68, 4).gsr).toBe(false);
     // SR68.9 (2nd-gen Pulse+): full stack, except accel1 (LIS2DW12) which is
     // routed to the algo hub and not recorded from.
     expect(getVerisenseHardwareSensorSupport(68, 9)).toMatchObject({
