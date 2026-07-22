@@ -123,6 +123,14 @@ export const RLD_REFERENCE_SIGNAL_LABELS = ['Fed externally', '(AVDD - AVSS) / 2
 /** REG9 respiration control clock (ExGConfigBytesDetails.java:342-343). */
 export const RESPIRATION_CONTROL_LABELS = ['Internal clock', 'External Clock'] as const;
 
+/**
+ * Lead-off detection mode (the "Lead-Off Detection" GUI knob). The GUI exposes
+ * only Off / DC Current (SensorEXG.ListOfExGLeadOffDetection, SensorEXG.java:132);
+ * the setter also supports an AC-current mode (value 2) which the GUI does not
+ * offer (see the knob helpers in ./knobs.ts).
+ */
+export const LEAD_OFF_DETECTION_LABELS = ['Off', 'DC Current'] as const;
+
 const ON_OFF = ['Off', 'On'] as const;
 
 /**
@@ -136,6 +144,23 @@ const REFERENCE_ELECTRODE_LABELS: Record<number, string> = {
   13: 'Inverse Wilson CT',
   7: '3-Ch Single-ended',
 };
+
+/**
+ * Reference-electrode options as `{ value, label }`, verbatim from the Java
+ * "All" list ListOfExGReferenceElectrodeAll / …ConfigValuesAll
+ * (SensorEXG.java:123-124): Fixed Potential (0), Inverse of Ch1 (3), Inverse
+ * Wilson CT (13), 3-Ch Single-ended (7). The value is the REG6 low-nibble RLD
+ * input-routing code, NOT an index — see setEXGReferenceElectrode
+ * (SensorEXG.java:2483-2489). The 3-Ch single-ended entry is kept for data
+ * fidelity but EX4 builds no special UI for it (docs/handoff/13 EX4 descope).
+ */
+export const REFERENCE_ELECTRODE_OPTIONS: ReadonlyArray<{ value: number; label: string }> =
+  Object.freeze([
+    { value: 0, label: 'Fixed Potential' },
+    { value: 3, label: 'Inverse of Ch1' },
+    { value: 13, label: 'Inverse Wilson CT' },
+    { value: 7, label: '3-Ch Single-ended' },
+  ]);
 
 // --------------------------------------------------------------------------
 // Field bit-layout table — the sole source of truth for both decode and
@@ -205,6 +230,37 @@ const FIELDS = {
 } as const satisfies Record<string, FieldSpec>;
 
 type FieldName = keyof typeof FIELDS;
+
+/**
+ * The stable name of a single ADS1292R register field (the keys of the internal
+ * bit-layout table). Exported so the per-knob edit layer (./knobs.ts) can
+ * address individual fields by name and reuse this module's bit-layout as the
+ * single source of truth, rather than duplicating byteIndex/shift/mask.
+ */
+export type ExgFieldName = FieldName;
+
+/**
+ * Read one register field's raw config value out of a 10-byte bank. Companion
+ * to {@link setExgFieldPreserving}; both consult the internal bit-layout table.
+ */
+export function readExgField(bank: Uint8Array, name: ExgFieldName): number {
+  return readField(bank, name);
+}
+
+/**
+ * Write one register field's value into a 10-byte bank IN PLACE, clearing that
+ * field's bits first so every OTHER bit in the byte is preserved (unlike the
+ * encode-time {@link writeField}, which assumes a freshly zeroed bank and only
+ * ORs bits in). This is the primitive the per-knob edit layer builds on: it lets
+ * a single knob change exactly its field and leave the rest of the populated
+ * bank untouched. Does NOT re-apply the must-be bits — callers do that once
+ * after all field writes (see ./knobs.ts).
+ */
+export function setExgFieldPreserving(bank: Uint8Array, name: ExgFieldName, value: number): void {
+  const f = FIELDS[name];
+  const fieldMask = (f.mask << f.bitShift) & 0xff;
+  bank[f.byteIndex] = ((bank[f.byteIndex] & ~fieldMask) | ((value & f.mask) << f.bitShift)) & 0xff;
+}
 
 /** A decoded register field: raw config value plus a human-readable label. */
 export interface ExgFieldValue {

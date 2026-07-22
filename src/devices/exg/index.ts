@@ -16,6 +16,8 @@ export {
   decodeExgRegisters,
   encodeExgRegisters,
   applyExgMustBeBits,
+  readExgField,
+  setExgFieldPreserving,
   // option label lists (verbatim from SensorEXG.java:116-149)
   CONVERSION_MODE_LABELS,
   DATA_RATE_LABELS,
@@ -34,6 +36,8 @@ export {
   RESPIRATION_FREQUENCY_LABELS,
   RLD_REFERENCE_SIGNAL_LABELS,
   RESPIRATION_CONTROL_LABELS,
+  LEAD_OFF_DETECTION_LABELS,
+  REFERENCE_ELECTRODE_OPTIONS,
 } from './registers.js';
 
 export type {
@@ -46,7 +50,30 @@ export type {
   ExgTestSignalSettings,
   ExgStatusBits,
   DecodedExgRegisters,
+  ExgFieldName,
 } from './registers.js';
+
+export {
+  EXG_KNOBS,
+  GAIN_OPTIONS,
+  DATA_RATE_OPTIONS,
+  LEAD_OFF_CURRENT_OPTIONS,
+  LEAD_OFF_COMPARATOR_OPTIONS,
+  LEAD_OFF_DETECTION_OPTIONS,
+  RESPIRATION_FREQUENCY_OPTIONS,
+  respirationPhaseOptions,
+  exgKnobOptions,
+  isExgRespirationEnabled,
+  updateExgSetting,
+  applyExgKnobEdits,
+  readExgKnobs,
+  ExgKnobError,
+  UnknownExgKnobError,
+  ExgKnobValueError,
+  ExgRespirationLockedError,
+} from './knobs.js';
+
+export type { ExgBanks, ExgKnobOption, ExgKnobField, ExgKnobEdit } from './knobs.js';
 
 export {
   EXG_PRESET_ARRAYS,
