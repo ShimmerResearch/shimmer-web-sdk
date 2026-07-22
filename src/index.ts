@@ -264,6 +264,10 @@ export {
   exgResolutionFromSensors,
   detectExgPreset,
   exgPresetLabel,
+  applyExgPreset,
+  exgConflictingSensors,
+  exgRateSettingFromFreq,
+  EXG_CONFLICTING_SENSORS,
 } from './devices/exg/index.js';
 export type {
   ExgFieldValue,
@@ -277,6 +281,9 @@ export type {
   DecodedExgRegisters,
   ExgPreset,
   ExgResolution,
+  ExgApplyInput,
+  ExgApplyResult,
+  ApplicableExgPreset,
 } from './devices/exg/index.js';
 
 // Inertial (accel/gyro/mag) calibration — phase P3

@@ -56,3 +56,12 @@ export {
 } from './presets.js';
 
 export type { ExgPreset, ExgResolution } from './presets.js';
+
+export {
+  applyExgPreset,
+  exgConflictingSensors,
+  exgRateSettingFromFreq,
+  EXG_CONFLICTING_SENSORS,
+} from './apply.js';
+
+export type { ExgApplyInput, ExgApplyResult, ApplicableExgPreset } from './apply.js';
