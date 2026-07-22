@@ -109,6 +109,8 @@ export {
   parseShimmer3FwVersionResponse,
   shimmer3UsesThreeByteTimestamp,
   shimmer3ControlMessageLength,
+  deriveShimmer3FirmwareVersionCode,
+  shimmer3SupportsExg,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
