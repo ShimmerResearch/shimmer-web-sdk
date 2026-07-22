@@ -39,6 +39,20 @@ import {
   type Shimmer3DeviceVersion,
   type Shimmer3FwVersion,
 } from './protocol.js';
+import {
+  EXG_BANK_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  EXG_REGS_RESPONSE,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  decodeExgRegsResponse,
+  exgBanksEqualIgnoringStatus,
+  applyExgPreset,
+  type ExgChipIndex,
+  type ApplicableExgPreset,
+  type ExgResolution,
+} from '../exg/index.js';
 
 // ---------------------------------------------------------------------------
 // Constructor options
@@ -495,6 +509,134 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._log('onExpPowerChanged handler error', e);
     }
     return { expPower };
+  }
+
+  // ---------------------------------------------------------------------------
+  // ExG (ADS1292R) live configuration — GET / SET / preset apply
+  //
+  // Same LiteProtocol EXG command flow as Shimmer3R, ported from
+  // ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration (:4010-4227).
+  // Classic Shimmer3 differs from the 3R in one respect: it writes the register
+  // banks VERBATIM — there is NO oversampling-ratio injection into REG1 (that is
+  // a Shimmer3R-only step; ShimmerBluetooth.writeEXGConfiguration writes reg[0]
+  // unchanged, :4220).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Whether this device's firmware supports the EXG GET/SET commands. The Java
+   * driver gates both on `(internal>=8 && code==2) || code>2`
+   * (ShimmerBluetooth.java:4011,4022,4201,4219). We do not port the full
+   * ShimmerVerObject firmware-version-code ladder (HARDWARE-VERIFY: the precise
+   * code mapping is unverified here); instead we require a completed connect
+   * handshake (firmwareVersion known), which every EXG-capable LogAndStream /
+   * BtStream firmware satisfies. The read-back-verify in {@link writeExgConfig}
+   * is the real failsafe against a silent no-op on unexpectedly old firmware.
+   */
+  private _assertExgSupported(): void {
+    if (!this._transport) throw new Error('Not connected');
+    if (this.firmwareVersion == null) {
+      throw new Error('EXG requires a completed connect handshake (firmware version unknown)');
+    }
+  }
+
+  /**
+   * Read both EXG chips' 10-byte register banks (GET_EXG_REGS ×2 →
+   * EXG_REGS_RESPONSE decode). Ported from ShimmerBluetooth.readEXGConfigurations
+   * (:4010-4014): CHIP1 then CHIP2.
+   *
+   * @throws Error when unsupported/not connected or while streaming.
+   */
+  async readExgConfig(
+    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
+    this._assertExgSupported();
+    if (this._streaming) throw new Error('Cannot read EXG registers while streaming');
+    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
+    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    return { exg1, exg2 };
+  }
+
+  private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
+    // GET is ACK-then-response; _waitForResponse tolerates the optional leading
+    // ACK (like inquiry()), so register it directly rather than awaiting the ACK
+    // separately — avoids a race if the device coalesces ACK + response.
+    await this._write(buildGetExgRegsCommand(chip));
+    const frame = await this._waitForResponse(EXG_REGS_RESPONSE, timeoutMs);
+    return decodeExgRegsResponse(frame);
+  }
+
+  /**
+   * Write both EXG chips' 10-byte register banks (SET_EXG_REGS ×2), then read
+   * back and verify. Classic Shimmer3 writes the banks verbatim (no oversampling
+   * injection — that is Shimmer3R-only).
+   *
+   * WRITE-SAFETY DEVIATION FROM JAVA: Java applies SET_EXG_REGS immediately and
+   * does not verify, relying on a timeout→disconnect failsafe
+   * (ShimmerBluetooth.java:4028-4034 doc comment). We port the safer flow: SET →
+   * await ACK → GET read-back → compare (ignoring the read-only REG8 status byte)
+   * → throw on mismatch.
+   *
+   * @throws Error when unsupported/not connected, while streaming, or on mismatch.
+   * @throws RangeError when either bank is not exactly 10 bytes.
+   */
+  async writeExgConfig(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
+    this._assertExgSupported();
+    if (this._streaming) throw new Error('Cannot write EXG registers while streaming');
+    if (exg1.length !== EXG_BANK_LENGTH || exg2.length !== EXG_BANK_LENGTH) {
+      throw new RangeError(
+        `EXG register banks must be exactly ${EXG_BANK_LENGTH} bytes each, got ${exg1.length}/${exg2.length}.`,
+      );
+    }
+
+    const b1 = new Uint8Array(exg1);
+    const b2 = new Uint8Array(exg2);
+    await this._writeExpectingAck(
+      buildSetExgRegsCommand(EXG_CHIP1, b1),
+      SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+    );
+    await this._writeExpectingAck(
+      buildSetExgRegsCommand(EXG_CHIP2, b2),
+      SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+    );
+
+    const readBack = await this.readExgConfig();
+    if (
+      !exgBanksEqualIgnoringStatus(b1, readBack.exg1) ||
+      !exgBanksEqualIgnoringStatus(b2, readBack.exg2)
+    ) {
+      throw new Error(
+        'EXG write read-back mismatch: device registers do not match what was written',
+      );
+    }
+    this._emitStatus('EXG registers written and verified.');
+  }
+
+  /**
+   * Apply an EXG preset live: build the banks + sensor bitmap from the current
+   * inquiry state via EX2's `applyExgPreset`, write the registers, then set the
+   * enabled sensors LAST (ShimmerBluetooth.java:2732,2735 — enabled sensors are
+   * always the last write; `writeEXGConfiguration()` runs earlier, :2670).
+   */
+  async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
+    this._assertExgSupported();
+    if (this._streaming) throw new Error('Cannot configure EXG while streaming');
+
+    const current = await this.readExgConfig();
+    const result = applyExgPreset(
+      {
+        exg1: current.exg1,
+        exg2: current.exg2,
+        enabledSensors: this.enabledSensors,
+        samplingRateHz: this.samplingRateHz,
+        hardwareVersion: this.deviceVersion?.hardwareVersion,
+      },
+      preset,
+      resolution,
+    );
+
+    await this.writeExgConfig(result.exg1, result.exg2);
+    await this.setSensors(result.enabledSensors);
+    this._emitStatus(`EXG preset '${preset}' (${resolution}) applied. Schema updated.`);
   }
 
   // ---------------------------------------------------------------------------

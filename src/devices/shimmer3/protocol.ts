@@ -352,6 +352,9 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
   [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
   [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
   [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
+  // EXG_REGS_RESPONSE (0x62): 11 payload bytes after the opcode = [echo][reg0..reg9]
+  // (ShimmerBluetooth.java:468 declares length 11; :1641 reads 11).
+  [OPCODES.EXG_REGS_RESPONSE]: 11, // 0x62
 });
 
 /** Sentinel: need more bytes before the message length can be determined. */

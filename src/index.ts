@@ -268,6 +268,18 @@ export {
   exgConflictingSensors,
   exgRateSettingFromFreq,
   EXG_CONFLICTING_SENSORS,
+  // Live BT/BLE GET/SET framing — phase EX3
+  SET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE,
+  GET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE_PAYLOAD_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  EXG_REG8_STATUS_INDEX,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  decodeExgRegsResponse,
+  exgBanksEqualIgnoringStatus,
 } from './devices/exg/index.js';
 export type {
   ExgFieldValue,
@@ -284,6 +296,7 @@ export type {
   ExgApplyInput,
   ExgApplyResult,
   ApplicableExgPreset,
+  ExgChipIndex,
 } from './devices/exg/index.js';
 
 // Inertial (accel/gyro/mag) calibration — phase P3

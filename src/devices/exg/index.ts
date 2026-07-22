@@ -65,3 +65,19 @@ export {
 } from './apply.js';
 
 export type { ExgApplyInput, ExgApplyResult, ApplicableExgPreset } from './apply.js';
+
+export {
+  SET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE,
+  GET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE_PAYLOAD_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  EXG_REG8_STATUS_INDEX,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  decodeExgRegsResponse,
+  exgBanksEqualIgnoringStatus,
+} from './live.js';
+
+export type { ExgChipIndex } from './live.js';
