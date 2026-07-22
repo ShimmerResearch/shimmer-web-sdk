@@ -143,7 +143,12 @@ describe('applyExgPreset — sensor-bitmap coherence', () => {
   it('switching resolution clears the previous resolution flags', () => {
     const first = applyExgPreset(freshInput(500, HW3), 'ecg', '24bit');
     const second = applyExgPreset(
-      { ...freshInput(500, HW3), enabledSensors: first.enabledSensors, exg1: first.exg1, exg2: first.exg2 },
+      {
+        ...freshInput(500, HW3),
+        enabledSensors: first.enabledSensors,
+        exg1: first.exg1,
+        exg2: first.exg2,
+      },
       'ecg',
       '16bit',
     );
@@ -197,7 +202,13 @@ describe('applyExgPreset — idempotence + detection round-trip', () => {
         it(`is idempotent for ${preset}/${resolution} (HW ${hw})`, () => {
           const first = applyExgPreset(freshInput(500, hw), preset, resolution);
           const second = applyExgPreset(
-            { exg1: first.exg1, exg2: first.exg2, enabledSensors: first.enabledSensors, samplingRateHz: 500, hardwareVersion: hw },
+            {
+              exg1: first.exg1,
+              exg2: first.exg2,
+              enabledSensors: first.enabledSensors,
+              samplingRateHz: 500,
+              hardwareVersion: hw,
+            },
             preset,
             resolution,
           );
@@ -218,7 +229,11 @@ describe('applyExgPreset — idempotence + detection round-trip', () => {
 describe('applyExgPreset — input validation', () => {
   it('rejects malformed bank lengths', () => {
     expect(() =>
-      applyExgPreset({ exg1: new Uint8Array(9), exg2: zeros(), enabledSensors: 0, samplingRateHz: 500 }, 'ecg', '24bit'),
+      applyExgPreset(
+        { exg1: new Uint8Array(9), exg2: zeros(), enabledSensors: 0, samplingRateHz: 500 },
+        'ecg',
+        '24bit',
+      ),
     ).toThrow(RangeError);
   });
 });
