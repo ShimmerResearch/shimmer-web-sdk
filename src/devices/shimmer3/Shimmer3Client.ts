@@ -34,6 +34,8 @@ import {
   parseShimmer3FwVersionResponse,
   shimmer3UsesThreeByteTimestamp,
   shimmer3ControlMessageLength,
+  shimmer3SupportsExg,
+  deriveShimmer3FirmwareVersionCode,
   type Shimmer3InquiryResult,
   type Shimmer3StreamSchema,
   type Shimmer3DeviceVersion,
@@ -49,6 +51,7 @@ import {
   decodeExgRegsResponse,
   exgBanksEqualIgnoringStatus,
   applyExgPreset,
+  clearExgResolutionFlags,
   type ExgChipIndex,
   type ApplicableExgPreset,
   type ExgResolution,
@@ -523,19 +526,34 @@ export class Shimmer3Client extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * Whether this device's firmware supports the EXG GET/SET commands. The Java
-   * driver gates both on `(internal>=8 && code==2) || code>2`
-   * (ShimmerBluetooth.java:4011,4022,4201,4219). We do not port the full
-   * ShimmerVerObject firmware-version-code ladder (HARDWARE-VERIFY: the precise
-   * code mapping is unverified here); instead we require a completed connect
-   * handshake (firmwareVersion known), which every EXG-capable LogAndStream /
-   * BtStream firmware satisfies. The read-back-verify in {@link writeExgConfig}
-   * is the real failsafe against a silent no-op on unexpectedly old firmware.
+   * Assert this device's firmware supports the live EXG GET/SET commands, failing
+   * fast rather than letting an EXG command hang to timeout on EXG-incapable
+   * firmware. Ports the Java gate `(getFirmwareVersionInternal() >= 8 &&
+   * getFirmwareVersionCode() == 2) || getFirmwareVersionCode() > 2`
+   * (ShimmerBluetooth.java:4011,4022,4201,4219) via {@link shimmer3SupportsExg},
+   * which derives the firmware-version code from the parsed FW version + hardware
+   * id exactly as ShimmerVerObject does (ShimmerVerObject.java:266-311). Old
+   * BtStream (code 1, or code 2 below internal 8) is rejected up front.
+   *
+   * @throws Error when not connected, before the connect handshake completes, or
+   *   on firmware without the EXG command set.
    */
   private _assertExgSupported(): void {
     if (!this._transport) throw new Error('Not connected');
-    if (this.firmwareVersion == null) {
+    if (this.firmwareVersion == null || this.deviceVersion == null) {
       throw new Error('EXG requires a completed connect handshake (firmware version unknown)');
+    }
+    if (!shimmer3SupportsExg(this.firmwareVersion, this.deviceVersion.hardwareVersion)) {
+      const { major, minor, internal } = this.firmwareVersion;
+      const code = deriveShimmer3FirmwareVersionCode(
+        this.firmwareVersion,
+        this.deviceVersion.hardwareVersion,
+      );
+      throw new Error(
+        `EXG register commands are not supported by this firmware ` +
+          `(v${major}.${minor}.${internal}, firmware code ${code}); ` +
+          `EXG requires LogAndStream (any), BtStream >= 0.2.8, or firmware code >= 3.`,
+      );
     }
   }
 
@@ -620,6 +638,22 @@ export class Shimmer3Client extends BaseShimmerClient {
   async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
     this._assertExgSupported();
     if (this._streaming) throw new Error('Cannot configure EXG while streaming');
+
+    // 'off' — LIVE disable. Java never pushes zeroed register banks to the chip;
+    // the ADS1292R forces its must-be bits on write (CONFIG2 bit7=1 etc.,
+    // ExGConfigBytesDetails.java:507-525), so a zeroed SET would fail the
+    // read-back-verify in writeExgConfig. The disable is done purely by dropping
+    // the EXG bits from the enabled-sensors bitmap (writeEnabledSensors is the
+    // last command, ShimmerBluetooth.java:2732,2735; readEXGConfigurations /
+    // writeEXGConfiguration only run while EXG stays enabled, :2670,4010-4014).
+    // The DOCKED path (`applyExgPreset('off')`) still zeroes the InfoMem banks —
+    // InfoMem is passive storage and EX1's detectExgPreset keys 'off' off them.
+    if (preset === 'off') {
+      const cleared = clearExgResolutionFlags(this.enabledSensors);
+      await this.setSensors(cleared);
+      this._emitStatus("EXG preset 'off' applied (EXG chips disabled). Schema updated.");
+      return;
+    }
 
     const current = await this.readExgConfig();
     const result = applyExgPreset(

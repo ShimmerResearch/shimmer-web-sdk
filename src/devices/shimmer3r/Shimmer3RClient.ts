@@ -29,6 +29,7 @@ import {
   decodeExgRegsResponse,
   exgBanksEqualIgnoringStatus,
   applyExgPreset,
+  clearExgResolutionFlags,
   type ExgChipIndex,
   type ApplicableExgPreset,
   type ExgResolution,
@@ -601,6 +602,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Cannot configure EXG while streaming');
+
+    // 'off' — LIVE disable. Java never pushes zeroed register banks to the chip;
+    // the ADS1292R forces its must-be bits on write (CONFIG2 bit7=1 etc.,
+    // ExGConfigBytesDetails.java:507-525), so a zeroed SET would fail the
+    // read-back-verify in writeExgConfig. The disable is done purely by dropping
+    // the EXG bits from the enabled-sensors bitmap (writeEnabledSensors is the
+    // last command, ShimmerBluetooth.java:2732,2735; readEXGConfigurations /
+    // writeEXGConfiguration only run while EXG stays enabled, :2670,4010-4014).
+    // The DOCKED path (`applyExgPreset('off')`) still zeroes the InfoMem banks —
+    // InfoMem is passive storage and EX1's detectExgPreset keys 'off' off them.
+    if (preset === 'off') {
+      const cleared = clearExgResolutionFlags(this.enabledSensors);
+      await this.setSensors(cleared);
+      this._emitStatus("EXG preset 'off' applied (EXG chips disabled). Schema updated.");
+      return;
+    }
 
     // Seed the apply from the device's current banks so the oscillator-clock
     // preserve path (classic rev>=4) is honoured; on 3R the banks are fully

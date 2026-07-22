@@ -265,6 +265,7 @@ export {
   detectExgPreset,
   exgPresetLabel,
   applyExgPreset,
+  clearExgResolutionFlags,
   exgConflictingSensors,
   exgRateSettingFromFreq,
   EXG_CONFLICTING_SENSORS,

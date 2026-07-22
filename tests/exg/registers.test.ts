@@ -145,6 +145,26 @@ describe('applyExgMustBeBits (ExGConfigBytesDetails.java:507-525)', () => {
     expect(encoded[8] & 0x02).toBe(0x02);
     expect(encoded[9] & 0x01).toBe(0x01);
   });
+
+  it('encode(decode(bank)) clears the read-only LOFF_STAT bits even when they were set', () => {
+    // REG8 (LOFF_STAT, byte 7) is the read-only lead-off status register: the
+    // chip reports live electrode state there, and setExgByteArrayConstants
+    // clears every bit except bit6 (clock divider) on generate
+    // (ExGConfigBytesDetails.java:507-525). Start from a valid ECG bank, set ALL
+    // the status bits (as a live chip would echo them), and confirm the encode
+    // round-trip strips them back down to just the clock-divider bit. This is why
+    // read-back verification excludes REG8 (exgBanksEqualIgnoringStatus).
+    const bank = u8(EXG_PRESET_ARRAYS.ecg.exg1);
+    bank[7] = 0xff; // all status bits high, incl. clock-divider bit6
+    const out = encodeExgRegisters(decodeExgRegisters(bank));
+    expect(out[7]).toBe(0x40); // only bit6 (clock divider) survives; status bits cleared
+
+    // With the clock-divider bit low it must clear to 0.
+    const bank2 = u8(EXG_PRESET_ARRAYS.ecg.exg1);
+    bank2[7] = 0xbf; // every status bit high EXCEPT clock-divider (bit6)
+    const out2 = encodeExgRegisters(decodeExgRegisters(bank2));
+    expect(out2[7]).toBe(0x00);
+  });
 });
 
 describe('detectExgPreset (tolerant, SensorEXG.java:2680-2763)', () => {
@@ -204,6 +224,29 @@ describe('detectExgPreset (tolerant, SensorEXG.java:2680-2763)', () => {
         es.both16,
       ),
     ).toBe('respiration');
+  });
+
+  it('does NOT report respiration when only chip 1 is enabled (both-chips gate)', () => {
+    // Respiration mod/demod bits ARE set on chip 2, but respiration needs BOTH
+    // chips enabled (SensorEXG.isEXGUsingDefaultRespirationConfiguration checks
+    // both banks + the both-chips resolution flags, SensorEXG.java:2733-2734).
+    // With only the chip-1 flag set the respiration gate must fail — it falls
+    // through past ECG (also both-chips) and past the chip1-only EMG selections
+    // (respiration uses ECG's, not EMG's) to 'custom'.
+    expect(
+      detectExgPreset(
+        u8(EXG_PRESET_ARRAYS.respiration.exg1),
+        u8(EXG_PRESET_ARRAYS.respiration.exg2),
+        es.chip1_16,
+      ),
+    ).toBe('custom');
+    expect(
+      detectExgPreset(
+        u8(EXG_PRESET_ARRAYS.respiration.exg1),
+        u8(EXG_PRESET_ARRAYS.respiration.exg2),
+        es.chip1_24,
+      ),
+    ).toBe('custom');
   });
 
   it('tolerates the 16-bit hardcoded 3R preset arrays (differ in byte1/rate bits)', () => {

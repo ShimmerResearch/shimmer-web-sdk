@@ -4,7 +4,11 @@ import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { getOversamplingRatioADS1292R } from '../../src/devices/shimmer3r/calibration.js';
-import { EXG_PRESET_ARRAYS, detectExgPreset } from '../../src/devices/exg/index.js';
+import {
+  EXG_PRESET_ARRAYS,
+  detectExgPreset,
+  applyExgMustBeBits,
+} from '../../src/devices/exg/index.js';
 
 // EX3: live EXG GET/SET over the radio for Shimmer3R, exercised against a
 // stateful in-memory device that stores the register banks on SET and echoes
@@ -28,7 +32,13 @@ interface ExgDevice {
   corruptChip?: 0 | 1;
 }
 
-function exgDevice(init?: { banks?: [number[], number[]]; piggyback?: boolean }): ExgDevice {
+function exgDevice(init?: {
+  banks?: [number[], number[]];
+  piggyback?: boolean;
+  /** When true, the chip forces the ADS1292R must-be bits on every SET (as real
+   *  firmware does) — so a zeroed write reads back non-zero. */
+  enforceMustBe?: boolean;
+}): ExgDevice {
   const dev: ExgDevice = {
     banks: [
       new Uint8Array(init?.banks?.[0] ?? new Array(10).fill(0)),
@@ -55,7 +65,8 @@ function exgDevice(init?: { banks?: [number[], number[]]; piggyback?: boolean })
       }
     } else if (op === SET_EXG) {
       const chip = bytes[1] as 0 | 1;
-      dev.banks[chip] = bytes.slice(4, 4 + 10);
+      const written = bytes.slice(4, 4 + 10);
+      dev.banks[chip] = init?.enforceMustBe ? applyExgMustBeBits(new Uint8Array(written)) : written;
       setTimeout(() => tr.notify([ACK]), 0);
     } else if (op === OPCODES.SET_SENSORS_COMMAND) {
       inquiry = EXG_INQ; // reflect the EXG enable on the next inquiry
@@ -193,5 +204,38 @@ describe('Shimmer3RClient EXG live GET/SET', () => {
       /streaming/i,
     );
     await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(/streaming/i);
+  });
+
+  it("applyExgPresetLive('off') writes NO EXG registers and only clears the EXG bitmap", async () => {
+    // The chip enforces must-be bits on write, so the old off-path (writing
+    // zeroed banks) would fail read-back-verify. The correct disable never writes.
+    const dev = exgDevice({ enforceMustBe: true });
+    const { t, client } = await connected(dev);
+    client.enabledSensors =
+      SensorBitmapShimmer3.SENSOR_GYRO |
+      SensorBitmapShimmer3.SENSOR_EXG1_16BIT |
+      SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
+
+    const setExgBefore = t.writes.filter((w) => w.bytes[0] === SET_EXG).length;
+    await expect(client.applyExgPresetLive('off', '16bit')).resolves.toBeUndefined();
+
+    // No SET_EXG (0x61) traffic during the disable.
+    expect(t.writes.filter((w) => w.bytes[0] === SET_EXG).length).toBe(setExgBefore);
+
+    // SET_SENSORS carried the EXG bits cleared but GYRO retained.
+    const setSensors = t.writes.filter((w) => w.bytes[0] === OPCODES.SET_SENSORS_COMMAND).pop()!;
+    const mask = setSensors.bytes[1] | (setSensors.bytes[2] << 8) | (setSensors.bytes[3] << 16);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG1_16BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG2_16BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_GYRO).toBeTruthy();
+  });
+
+  it('writeExgConfig of zeroed banks against a must-be-enforcing chip throws (proves the old off-path would fail)', async () => {
+    const dev = exgDevice({ enforceMustBe: true });
+    const { client } = await connected(dev);
+    client.samplingRateHz = 512;
+    await expect(client.writeExgConfig(new Uint8Array(10), new Uint8Array(10))).rejects.toThrow(
+      /read-back mismatch/i,
+    );
   });
 });

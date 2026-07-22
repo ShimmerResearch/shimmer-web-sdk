@@ -144,6 +144,24 @@ export interface ExgApplyResult {
 export type ApplicableExgPreset = 'ecg' | 'emg' | 'test-signal' | 'respiration' | 'off';
 
 /**
+ * Clear the four EXG resolution flags (the bits that enable the ADS1292R chips
+ * in the Shimmer3 streaming bitmap) from an enabled-sensors mask, leaving every
+ * non-EXG sensor untouched. This is how the Java driver DISABLES EXG live: it
+ * never pushes zeroed register banks to the chip — the ADS1292R forces the
+ * must-be bits (CONFIG2 bit7=1 etc., ExGConfigBytesDetails.java:507-525) so an
+ * all-zero write would fail read-back — it simply drops the EXG bits from the
+ * enabled-sensors bitmap and re-writes that (writeEnabledSensors is "always the
+ * last command", ShimmerBluetooth.java:2732,2735; readEXGConfigurations /
+ * writeEXGConfiguration only run while EXG stays enabled, :2670,4010-4014). The
+ * live `applyExgPresetLive('off')` path uses this instead of {@link applyExgPreset}
+ * so it never writes — nor read-back-verifies — a zeroed bank. See the docked-vs-
+ * live asymmetry note on {@link applyExgPreset} step (2).
+ */
+export function clearExgResolutionFlags(enabledSensors: number): number {
+  return ((enabledSensors >>> 0) & ~MASK_ALL_EXG_RESOLUTION) >>> 0;
+}
+
+/**
  * Apply an EXG preset + resolution to a device configuration, returning the two
  * register banks and the updated enabled-sensors bitmap to write. Pure — does
  * not mutate the input.
@@ -184,6 +202,20 @@ export function applyExgPreset(
 
   // (2) 'off' — no EXG chips enabled; zero the banks so the read-back summary
   // reads 'off' rather than a stale preset.
+  //
+  // DOCKED vs LIVE ASYMMETRY. This function is the DOCKED (InfoMem) path: InfoMem
+  // is passive storage with no chip enforcement, so zeroed banks are fine and are
+  // in fact what EX1's detectExgPreset keys 'off' off (all-zero banks + no
+  // resolution flags → 'off', presets.ts). Keeping the zeroed banks here preserves
+  // that detection contract on the docked read-back.
+  //
+  // The LIVE (over-the-radio) path must NOT reuse this: the ADS1292R forces its
+  // must-be bits on write (CONFIG2 bit7=1 etc., ExGConfigBytesDetails.java:507-525),
+  // so a zeroed SET would read back non-zero and the read-back-verify would throw.
+  // Java disables EXG live by clearing only the sensor bitmap, never by writing
+  // zeroed registers (writeEnabledSensors is the disable path,
+  // ShimmerBluetooth.java:2732,2735) — so `applyExgPresetLive('off')` calls
+  // {@link clearExgResolutionFlags} and skips the register write entirely.
   if (preset === 'off') {
     return {
       exg1: new Uint8Array(EXG_BANK_LENGTH),

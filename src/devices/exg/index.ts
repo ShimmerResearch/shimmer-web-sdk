@@ -59,6 +59,7 @@ export type { ExgPreset, ExgResolution } from './presets.js';
 
 export {
   applyExgPreset,
+  clearExgResolutionFlags,
   exgConflictingSensors,
   exgRateSettingFromFreq,
   EXG_CONFLICTING_SENSORS,

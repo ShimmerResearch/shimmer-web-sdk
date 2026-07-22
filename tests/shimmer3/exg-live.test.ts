@@ -3,7 +3,11 @@ import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
-import { EXG_PRESET_ARRAYS, detectExgPreset } from '../../src/devices/exg/index.js';
+import {
+  EXG_PRESET_ARRAYS,
+  detectExgPreset,
+  applyExgMustBeBits,
+} from '../../src/devices/exg/index.js';
 
 // EX3: live EXG GET/SET over the (unframed) RFCOMM byte stream for classic
 // Shimmer3. Same LiteProtocol command flow as Shimmer3R, but the classic client
@@ -25,22 +29,36 @@ interface ExgDevice {
   banks: [Uint8Array, Uint8Array];
   handler: (bytes: Uint8Array, tr: LoopbackTransport) => void;
   corruptChip?: 0 | 1;
+  /** Firmware version response payload (after the FWVER opcode). */
+  fw: number[];
 }
 
-function exgDevice(init?: { banks?: [number[], number[]] }): ExgDevice {
+function exgDevice(init?: {
+  banks?: [number[], number[]];
+  /** When true, the chip forces the ADS1292R must-be bits on every SET (as real
+   *  firmware does) instead of echoing the written bytes verbatim — so a zeroed
+   *  write reads back non-zero and read-back-verify would reject it. */
+  enforceMustBe?: boolean;
+  /** HW id reported by GET_DEVICE_VERSION (default 3 = Shimmer3). */
+  hw?: number;
+  /** FW payload after the opcode (default LogAndStream 0.15.0 = EXG-capable). */
+  fw?: number[];
+}): ExgDevice {
+  const hw = init?.hw ?? 3;
   const dev: ExgDevice = {
     banks: [
       new Uint8Array(init?.banks?.[0] ?? new Array(10).fill(0)),
       new Uint8Array(init?.banks?.[1] ?? new Array(10).fill(0)),
     ],
     handler: () => {},
+    fw: init?.fw ?? [3, 0, 0, 0, 15, 0],
   };
   let inquiry = GYRO_INQ;
   dev.handler = (bytes, tr) => {
     const op = bytes[0];
-    if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+    if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, hw]), 0);
     else if (op === OPCODES.GET_FW_VERSION_COMMAND)
-      setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+      setTimeout(() => tr.notify([FWVER, ...dev.fw]), 0);
     else if (op === GET_EXG) {
       const chip = bytes[1] as 0 | 1;
       let bank = dev.banks[chip];
@@ -52,7 +70,8 @@ function exgDevice(init?: { banks?: [number[], number[]] }): ExgDevice {
       setTimeout(() => tr.notify([ACK, EXG_RSP, 10, ...bank]), 0);
     } else if (op === SET_EXG) {
       const chip = bytes[1] as 0 | 1;
-      dev.banks[chip] = bytes.slice(4, 4 + 10);
+      const written = bytes.slice(4, 4 + 10);
+      dev.banks[chip] = init?.enforceMustBe ? applyExgMustBeBits(new Uint8Array(written)) : written;
       setTimeout(() => tr.notify([ACK]), 0);
     } else if (op === OPCODES.SET_SENSORS_COMMAND) {
       inquiry = EXG_INQ;
@@ -157,5 +176,75 @@ describe('Shimmer3Client EXG live GET/SET', () => {
       /streaming/i,
     );
     await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(/streaming/i);
+  });
+
+  it("applyExgPresetLive('off') writes NO EXG registers and only clears the EXG bitmap", async () => {
+    // The chip ENFORCES the must-be bits on write, so the old off-path (writing
+    // zeroed banks) would fail read-back-verify. The correct disable never writes.
+    const dev = exgDevice({ enforceMustBe: true });
+    const { t, client } = await connected(dev);
+    client.enabledSensors =
+      SensorBitmapShimmer3.SENSOR_GYRO |
+      SensorBitmapShimmer3.SENSOR_EXG1_16BIT |
+      SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
+
+    const setExgBefore = t.writes.filter((w) => w.bytes[0] === SET_EXG).length;
+    await expect(client.applyExgPresetLive('off', '16bit')).resolves.toBeUndefined();
+
+    // No SET_EXG (0x61) traffic at all during the disable.
+    const setExgAfter = t.writes.filter((w) => w.bytes[0] === SET_EXG).length;
+    expect(setExgAfter).toBe(setExgBefore);
+
+    // SET_SENSORS carried the EXG bits cleared but GYRO retained.
+    const setSensors = t.writes.filter((w) => w.bytes[0] === OPCODES.SET_SENSORS_COMMAND).pop()!;
+    const mask = setSensors.bytes[1] | (setSensors.bytes[2] << 8) | (setSensors.bytes[3] << 16);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG1_16BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG2_16BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG1_24BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_EXG2_24BIT).toBe(0);
+    expect(mask & SensorBitmapShimmer3.SENSOR_GYRO).toBeTruthy();
+  });
+
+  it('writeExgConfig of zeroed banks against a must-be-enforcing chip throws (proves the old off-path would fail)', async () => {
+    const dev = exgDevice({ enforceMustBe: true });
+    const { client } = await connected(dev);
+    // What the old applyExgPreset('off') banks would have been: all zeroes.
+    await expect(client.writeExgConfig(new Uint8Array(10), new Uint8Array(10))).rejects.toThrow(
+      /read-back mismatch/i,
+    );
+  });
+
+  it('rejects EXG on old BtStream firmware (code 1) with a clear error, before any radio traffic', async () => {
+    // BtStream (id 1) 0.1.0 → firmware code 1 → EXG commands unsupported.
+    const dev = exgDevice({ fw: [1, 0, 0, 0, 1, 0] });
+    const { t, client } = await connected(dev);
+    const writesBefore = t.writes.length;
+    await expect(client.readExgConfig()).rejects.toThrow(/not supported by this firmware/i);
+    await expect(client.writeExgConfig(new Uint8Array(10), new Uint8Array(10))).rejects.toThrow(
+      /not supported by this firmware/i,
+    );
+    await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(
+      /not supported by this firmware/i,
+    );
+    // Failed fast — no GET/SET went out on the wire.
+    expect(t.writes.filter((w) => w.bytes[0] === GET_EXG || w.bytes[0] === SET_EXG).length).toBe(0);
+    expect(t.writes.length).toBe(writesBefore);
+  });
+
+  it('rejects EXG on old BtStream 0.2.x below internal 8 (code 2, internal<8)', async () => {
+    // BtStream 0.2.5 → code 2 but internal 5 < 8 → the (internal>=8 && code==2) leg fails.
+    const dev = exgDevice({ fw: [1, 0, 0, 0, 2, 5] });
+    const { client } = await connected(dev);
+    await expect(client.readExgConfig()).rejects.toThrow(/not supported by this firmware/i);
+  });
+
+  it('accepts EXG on BtStream 0.2.8 (code 2, internal>=8) and on new LogAndStream (code >2)', async () => {
+    const btstream = exgDevice({ fw: [1, 0, 0, 0, 2, 8] });
+    const { client: c1 } = await connected(btstream);
+    await expect(c1.readExgConfig()).resolves.toBeDefined();
+
+    const logAndStream = exgDevice({ fw: [3, 0, 0, 0, 15, 0] }); // LogAndStream 0.15.0 → code 8
+    const { client: c2 } = await connected(logAndStream);
+    await expect(c2.readExgConfig()).resolves.toBeDefined();
   });
 });
