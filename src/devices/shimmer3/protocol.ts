@@ -333,6 +333,88 @@ export function shimmer3UsesThreeByteTimestamp(v: Shimmer3FwVersion): boolean {
   }
 }
 
+/** Hardware-version codes referenced by the firmware-version-code ladder (ShimmerVerDetails.HW_ID). */
+const HW_ID = Object.freeze({
+  SHIMMER_2R: 2,
+  SHIMMER_3: 3,
+  SHIMMER_3R: 10,
+} as const);
+
+/**
+ * Derive the ShimmerVerObject "firmware version code" from a parsed FW version +
+ * hardware id, a verbatim port of the ladder in
+ * `ShimmerVerObject` (ShimmerVerObject.java:266-311). The code is a single
+ * monotonically-increasing capability number derived from the (HW id, FW id,
+ * major.minor.internal) tuple — the Java driver gates several protocol features
+ * on it rather than on the raw version. Returns `-1` when no rung matches
+ * (firmware older than every known threshold), exactly as Java initialises it.
+ *
+ * Only the rungs reachable by the hardware this SDK talks to (Shimmer3 /
+ * Shimmer3R / Shimmer2R) are ported; the desktop driver's Shimmer4-SDK / Arduino
+ * / SWEATCH / ShimmerGQ / StroKare rungs are out of scope for these clients and
+ * omitted (they would never match a Shimmer3/3R device anyway).
+ *
+ * `compareVersions` semantics (UtilShimmer.java:534-628): same HW id AND same FW
+ * id AND `this` version ≥ target version (major, then minor, then internal, with
+ * internal compared `>=`).
+ */
+export function deriveShimmer3FirmwareVersionCode(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): number {
+  const { firmwareIdentifier: id, major, minor, internal } = fw;
+  // compareVersions(thisHwIdent, thisFwIdent, thisVer..., compHwIdent, compFwIdent, compVer...).
+  const ge = (tHw: number, tId: number, tMaj: number, tMin: number, tInt: number): boolean => {
+    if (hardwareVersion !== tHw || id !== tId) return false;
+    return (
+      major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)))
+    );
+  };
+  const L = FW_ID.LOGANDSTREAM;
+  const B = FW_ID.BTSTREAM;
+  const S = FW_ID.SDLOG;
+  if (ge(HW_ID.SHIMMER_3, L, 0, 16, 6)) return 9;
+  if (
+    ge(HW_ID.SHIMMER_3R, L, 0, 0, 1) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 13, 7) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 20, 1)
+  ) {
+    return 8;
+  }
+  if (ge(HW_ID.SHIMMER_3, L, 0, 6, 5)) return 7;
+  if (
+    ge(HW_ID.SHIMMER_3, B, 0, 7, 3) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 5, 4) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 11, 5)
+  ) {
+    return 6;
+  }
+  if (ge(HW_ID.SHIMMER_3, B, 0, 5, 0) || ge(HW_ID.SHIMMER_3, L, 0, 3, 0)) return 5;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 4, 0) || ge(HW_ID.SHIMMER_3, L, 0, 2, 0)) return 4;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 3, 0) || ge(HW_ID.SHIMMER_3, L, 0, 1, 0)) return 3;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 2, 0)) return 2;
+  if (ge(HW_ID.SHIMMER_2R, B, 1, 2, 0) || ge(HW_ID.SHIMMER_3, B, 0, 1, 0)) return 1;
+  return -1;
+}
+
+/**
+ * Whether this firmware supports the live EXG GET/SET register commands. Verbatim
+ * port of the gate the Java driver applies before every EXG read/write —
+ * `(getFirmwareVersionInternal() >= 8 && getFirmwareVersionCode() == 2) ||
+ * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4011,4022,4201,4219).
+ *
+ * `firmwareVersionCode == 2` is exactly classic-Shimmer3 BtStream in [0.2.0,
+ * 0.3.0); that ancient BtStream only gained the EXG commands at internal 8, hence
+ * the extra `internal >= 8` guard. Every newer firmware (code > 2 — all
+ * LogAndStream, BtStream ≥ 0.3.0, SDLog, and all Shimmer3R) supports them
+ * unconditionally. BtStream 0.1.x (code 1) and anything below every rung (code
+ * -1) are rejected.
+ */
+export function shimmer3SupportsExg(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  const code = deriveShimmer3FirmwareVersionCode(fw, hardwareVersion);
+  return (fw.internal >= 8 && code === 2) || code > 2;
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -352,6 +434,9 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
   [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
   [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
   [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
+  // EXG_REGS_RESPONSE (0x62): 11 payload bytes after the opcode = [echo][reg0..reg9]
+  // (ShimmerBluetooth.java:468 declares length 11; :1641 reads 11).
+  [OPCODES.EXG_REGS_RESPONSE]: 11, // 0x62
 });
 
 /** Sentinel: need more bytes before the message length can be determined. */

@@ -36,6 +36,10 @@ export interface HeaderFixtureOptions {
   signalIds?: number[];
   /** Optional per-block fill for the calibration areas (default pattern). */
   calibFill?: (offset: number) => number;
+  /** ADS1292R chip-1 register bank → SD header bytes 56-65. */
+  exg1?: number[];
+  /** ADS1292R chip-2 register bank → SD header bytes 66-75. */
+  exg2?: number[];
 }
 
 /** Build a modern Shimmer3 (256 B) or Shimmer3R (384 B) SD-log header. */
@@ -94,6 +98,10 @@ export function buildSdLogHeader(opts: HeaderFixtureOptions = {}): Uint8Array {
   b[53] = Math.floor(cfgTime / 2 ** 16) % 256;
   b[54] = Math.floor(cfgTime / 2 ** 8) % 256;
   b[55] = cfgTime % 256;
+
+  // EXG register banks (ShimmerSDLog.java:252-253/322-323): bytes 56-65 / 66-75.
+  if (opts.exg1) opts.exg1.forEach((v, i) => (b[56 + i] = v & 0xff));
+  if (opts.exg2) opts.exg2.forEach((v, i) => (b[66 + i] = v & 0xff));
 
   // Calibration areas — recognizable default pattern.
   const fill = opts.calibFill ?? ((off: number) => off & 0xff);
