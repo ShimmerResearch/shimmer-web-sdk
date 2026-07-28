@@ -119,14 +119,14 @@ const CALIBRATION_SENSORS_GEN2: VerisenseCalibrationSensor[] = [
     id: CalibSensorId.LSM6DSV_ACCEL,
     label: 'Accelerometer (LSM6DSV)',
     unit: 'LSB/(m/s²)',
-    align: [0, -1, 0, 0, 0, 1, -1, 0, 0],
+    align: [0, 1, 0, 0, 0, 1, 1, 0, 0],
     ranges: ACCEL_RANGES,
   },
   {
     id: CalibSensorId.LSM6DSV_GYRO,
     label: 'Gyroscope (LSM6DSV)',
     unit: 'LSB/dps',
-    align: [0, -1, 0, 0, 0, 1, -1, 0, 0],
+    align: [0, 1, 0, 0, 0, 1, 1, 0, 0],
     ranges: GYRO_RANGES,
   },
   {
@@ -140,7 +140,7 @@ const CALIBRATION_SENSORS_GEN2: VerisenseCalibrationSensor[] = [
     id: CalibSensorId.LIS2MDL_MAG,
     label: 'Magnetometer (LIS2MDL)',
     unit: 'LSB/Gauss',
-    align: [0, 1, 0, 0, 0, 1, -1, 0, 0],
+    align: [1, 0, 0, 0, 0, 1, 0, 1, 0],
     ranges: [{ code: 0, label: '±49.152Ga', sens: 667 }],
   },
 ];
