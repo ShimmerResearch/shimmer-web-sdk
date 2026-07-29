@@ -142,7 +142,7 @@ describe('buildDefaultVerisenseCalibrationSet', () => {
     const accel2g = set.getImu(CalibSensorId.LSM6DSV_ACCEL, 0)!;
     expect(accel2g.bias).toEqual([0, 0, 0]);
     expect(accel2g.sens[0]).toBe(Math.fround(1671.665922915));
-    expect(accel2g.align).toEqual([0, -1, 0, 0, 0, 1, -1, 0, 0]);
+    expect(accel2g.align).toEqual([0, 1, 0, 0, 0, 1, 1, 0, 0]);
     expect(set.blocks.every((b) => b.isDefault)).toBe(true);
   });
 });
