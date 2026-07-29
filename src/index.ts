@@ -5,6 +5,7 @@
  *
  * Exports:
  * - {@link Shimmer3RClient} — Shimmer3R BLE client
+ * - {@link Shimmer3Client} — classic-Bluetooth (RFCOMM/SPP) Shimmer3 client
  * - {@link VerisenseBleDevice} — Verisense BLE + Web Serial client
  * - {@link ObjectCluster} — shared sensor data frame container
  * - {@link SensorBitmapShimmer3} — Shimmer3R sensor enable bitmasks
@@ -16,6 +17,27 @@
 // Core
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
+
+// Transport abstraction (pluggable byte pipes)
+export {
+  WebBluetoothTransport,
+  WebSerialTransport,
+  LoopbackTransport,
+} from './core/transport/index.js';
+export type {
+  ShimmerTransport,
+  ShimmerTransportKind,
+  TransportCapabilities,
+  TransportWriteOptions,
+  Unsubscribe,
+  DiscoveredDevice,
+  DeviceKind,
+  TransportScanner,
+  WebBluetoothTransportOptions,
+  WebSerialTransportOptions,
+  LoopbackTransportOptions,
+  LoopbackWrite,
+} from './core/transport/index.js';
 export { isUniformByteArray } from './core/arrayBuffer.js';
 export type {
   IShimmerClient,
@@ -61,6 +83,222 @@ export {
   nudgeGsrResistance,
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
+
+// Shimmer3 (classic Bluetooth / RFCOMM)
+export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
+export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';
+export {
+  SHIMMER3_DEFAULTS,
+  SHIMMER3_SPP_UUID,
+  SHIMMER3_SAMPLING_CLOCK_FREQ,
+} from './devices/shimmer3/constants.js';
+export {
+  FW_ID,
+  ACK as SHIMMER3_ACK,
+  NACK as SHIMMER3_NACK,
+  NEED_MORE as SHIMMER3_NEED_MORE,
+  RESYNC as SHIMMER3_RESYNC,
+  SHIMMER3_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3_INQ_CONFIG_OFFSET,
+  SHIMMER3_INQ_CONFIG_LENGTH,
+  SHIMMER3_INQ_NUM_CHANNELS_OFFSET,
+  SHIMMER3_INQ_CHANNELS_OFFSET,
+  interpretShimmer3InquiryResponse,
+  buildShimmer3Schema,
+  parseShimmer3DeviceVersionResponse,
+  parseShimmer3FwVersionResponse,
+  shimmer3UsesThreeByteTimestamp,
+  shimmer3ControlMessageLength,
+} from './devices/shimmer3/protocol.js';
+export type {
+  Shimmer3InquiryResult,
+  Shimmer3StreamSchema,
+  Shimmer3ChannelField,
+  Shimmer3DeviceVersion,
+  Shimmer3FwVersion,
+} from './devices/shimmer3/protocol.js';
+
+// Wired / dock UART (Shimmer docked in a BasicDock/Base)
+export { WiredShimmerClient } from './devices/dock/WiredShimmerClient.js';
+export type {
+  WiredShimmerClientOptions,
+  WiredIdentity,
+} from './devices/dock/WiredShimmerClient.js';
+export {
+  UART_PACKET_HEADER,
+  UART_DOCK_BAUD_RATE,
+  UART_PACKET_CMD,
+  UART_COMPONENT,
+  UART_PROP,
+  UART_CONFIG_COMMANDS,
+  PACKET_OVERHEAD_RESPONSE_DATA,
+  PACKET_OVERHEAD_RESPONSE_OTHER,
+  WIRED_DEFAULTS,
+  CHARGING_STATUS_BYTE,
+} from './devices/dock/constants.js';
+export type {
+  UartPacketCmd,
+  UartComponent,
+  UartPermission,
+  UartComponentProperty,
+  ChargingStatus,
+} from './devices/dock/constants.js';
+export {
+  SHIMMER_UART_CRC_INIT,
+  shimmerUartCrcByte,
+  shimmerUartCrcCalc,
+  shimmerUartCrcCheck,
+} from './devices/dock/crc.js';
+export {
+  buildUartPacket,
+  buildReadPacket,
+  buildWritePacket,
+  buildMemReadPayload,
+  buildMemWritePayload,
+  parseUartPacket,
+  wiredPacketLength,
+  isBadResponse,
+  badResponseReason,
+  parseMacId,
+  parseVersionInfo,
+  parseBatteryStatus,
+  battAdcToVoltage,
+  battVoltageToPercentage,
+  parseExpansionBoard,
+  msToRtcBytesLE,
+  isSupportedRtcConfigViaUart,
+  NEED_MORE as WIRED_NEED_MORE,
+  RESYNC as WIRED_RESYNC,
+} from './devices/dock/protocol.js';
+export type {
+  UartRxPacket,
+  WiredVersionInfo,
+  WiredBatteryStatus,
+  ExpansionBoardInfo,
+} from './devices/dock/protocol.js';
+
+// SmartDock multi-slot base (Base-6 / Base-15) — phase D2
+export { SmartDockClient } from './devices/dock/SmartDockClient.js';
+export type {
+  SmartDockClientOptions,
+  SmartDockInfo,
+  SlotOccupancy,
+} from './devices/dock/SmartDockClient.js';
+export {
+  SMARTDOCK_LINE_TERMINATOR,
+  SMARTDOCK_CONNECTION_TYPE,
+  SMARTDOCK_BASE_CMD,
+  SMARTDOCK_DEFAULTS,
+  BASE_HARDWARE_IDS,
+  baseHardwareType,
+  buildBaseCommand,
+  buildSelectSlotCommand,
+  extractBaseLine,
+  classifyBaseResponse,
+  parseSmartDockVersion,
+  parseSlotOccupancy,
+  parseActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+export type {
+  SmartDockConnectionType,
+  SmartDockHardwareType,
+  SmartDockResponseKind,
+  SmartDockVersionInfo,
+  SmartDockActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+
+// InfoMem configuration-memory codec (Shimmer3 / Shimmer3R) — configure-while-docked (phase P2)
+export {
+  parseInfoMem,
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  resolveInfoMemLayout,
+  checkConfigBytesValid,
+  fwCompare,
+  isSupportedMpl,
+  isSupportedEightByteDerivedSensors,
+  isSupportedSdLogSync,
+  isSdLoggingFirmware,
+  INFOMEM_SIZE,
+  INFOMEM_PAGE_SIZE,
+  INFOMEM_VALIDITY_BYTES,
+  INFOMEM_SAMPLING_CLOCK_FREQ,
+  INFOMEM_ADDR_LEGACY,
+  INFOMEM_ADDR_FLAT,
+  HW_ID as INFOMEM_HW_ID,
+  FW_ID as INFOMEM_FW_ID,
+  ANY_VERSION as INFOMEM_ANY_VERSION,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemContext,
+  InfoMemDeviceConfig,
+  InfoMemLayout,
+  GenerateInfoMemOptions,
+  DeviceWriteDivergentRanges,
+} from './devices/infomem/index.js';
+
+// Inertial (accel/gyro/mag) calibration — phase P3
+export {
+  matrixInverse3x3,
+  matrixMultiply3x3,
+  makeKinematicCalibration,
+  calibrateVector3,
+  parseKinematicCalibBlock,
+  generateKinematicCalibBlock,
+  INERTIAL_UNITS,
+  getGroupDefaults,
+  getDefaultCalibration,
+  parseCalibDump,
+  generateCalibDump,
+  CALIB_READ_SOURCE,
+  shouldOverrideCalibration,
+} from './devices/calibration/index.js';
+export type {
+  KinematicCalibration,
+  ParseKinematicOptions,
+  ImuFamily,
+  InertialGroup,
+  GroupDefaults,
+  CalibDump,
+  CalibDumpRecord,
+  CalibDumpVersion,
+  CalibReadSource,
+} from './devices/calibration/index.js';
+
+// Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
+export {
+  SDLOG_HW_ID,
+  SDLOG_FW_ID,
+  SDLOG_HEADER_LENGTH,
+  SDLOG_CLOCK_FREQ,
+  SDLOG_SYNC_OFFSET_LENGTH,
+  SDLOG_SYNC_BLOCK_LENGTH,
+  SDLogHeaderBitmask,
+  hasSensorBit,
+  SdLogFormatError,
+  decodeSdLogValue,
+  SDLOG_DATA_TYPE_BYTES,
+  parseSdLogHeader,
+  decodeSdLogFile,
+  decodeSdSession,
+  parseSdSessionName,
+  parseSdTrialFolderName,
+  isNewImuSensors,
+} from './devices/sdlog/index.js';
+export type {
+  SdLogChannel,
+  SdLogHeader,
+  SdLogRecord,
+  SdLogFormatErrorCode,
+  SdLogCalibrationBytes,
+  SdLogExpansionBoard,
+  SdLogImuRanges,
+  SdLogChannelCalibrationInfo,
+  SdLogDataType,
+  SdLogChannelSpec,
+  SdLogDecodeOptions,
+  SdLogDecodeResult,
+} from './devices/sdlog/index.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';

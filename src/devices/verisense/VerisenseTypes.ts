@@ -1,4 +1,5 @@
 import type { AsmCommand, AsmProperty } from './constants.js';
+import type { ShimmerTransport } from '../../core/transport/types.js';
 import type { VerisenseBleLinkDebugPayload } from './protocol.js';
 import type { SensorADC } from './sensors/SensorADC.js';
 import type { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
@@ -74,6 +75,13 @@ export interface VerisenseClientOptions {
    */
   stripStreamCrc?: boolean;
   debug?: boolean;
+  /**
+   * Inject a transport (byte pipe) instead of the default web ones. Lets
+   * non-browser runtimes (React Native, Bluetooth Classic) or tests drive the
+   * client. When omitted, `connect()` builds a Web Bluetooth transport and
+   * `connectSerial()` a Web Serial transport, so browser usage is unchanged.
+   */
+  transport?: ShimmerTransport;
 }
 
 export interface BleThroughputTestOptions {
