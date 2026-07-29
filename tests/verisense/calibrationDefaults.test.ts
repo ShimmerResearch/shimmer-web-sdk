@@ -142,7 +142,13 @@ describe('buildDefaultVerisenseCalibrationSet', () => {
     const accel2g = set.getImu(CalibSensorId.LSM6DSV_ACCEL, 0)!;
     expect(accel2g.bias).toEqual([0, 0, 0]);
     expect(accel2g.sens[0]).toBe(Math.fround(1671.665922915));
+    // pin every gen-2 default alignment so drift in any sensor's seed is caught.
     expect(accel2g.align).toEqual([0, 1, 0, 0, 0, 1, 1, 0, 0]);
+    expect(set.getImu(CalibSensorId.LSM6DSV_GYRO, 0)!.align).toEqual([0, 1, 0, 0, 0, 1, 1, 0, 0]);
+    expect(set.getImu(CalibSensorId.LIS2DW12_ACCEL, 0)!.align).toEqual([
+      1, 0, 0, 0, 0, 1, 0, -1, 0,
+    ]);
+    expect(set.getImu(CalibSensorId.LIS2MDL_MAG, 0)!.align).toEqual([1, 0, 0, 0, 0, 1, 0, 1, 0]);
     expect(set.blocks.every((b) => b.isDefault)).toBe(true);
   });
 });

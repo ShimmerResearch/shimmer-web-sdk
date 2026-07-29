@@ -10,7 +10,7 @@ import {
   type UartRxPacket,
 } from '../../src/devices/dock/protocol.js';
 import { UART_PACKET_CMD } from '../../src/devices/dock/constants.js';
-import { generateInfoMem, parseInfoMem, INFOMEM_SIZE } from '../../src/devices/infomem/index.js';
+import { parseInfoMem, INFOMEM_SIZE } from '../../src/devices/infomem/index.js';
 import type { InfoMemContext } from '../../src/devices/infomem/index.js';
 
 const dec = (u8: Uint8Array): string => new TextDecoder().decode(u8);
