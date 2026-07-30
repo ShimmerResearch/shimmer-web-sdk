@@ -97,6 +97,14 @@ export interface SdLogHeader {
   calibrationBytes: SdLogCalibrationBytes;
   /** GSR hardware range setting from the header (0-3 fixed, 4 = auto). */
   gsrRange: number;
+  /**
+   * Raw 10-byte ADS1292R chip-1 (EXG1) register bank from SD header bytes
+   * 56-65 (ShimmerSDLog.java:252-253 Shimmer3R, :322-323 Shimmer3). Decode
+   * with `decodeExgRegisters` from the EXG codec. All-zero on non-EXG devices.
+   */
+  exg1: Uint8Array;
+  /** Raw 10-byte ADS1292R chip-2 (EXG2) register bank from SD header bytes 66-75. */
+  exg2: Uint8Array;
   /** Expansion-board identity, when the firmware stores it in the header. */
   expansionBoard: SdLogExpansionBoard | null;
   /**

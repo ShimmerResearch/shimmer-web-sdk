@@ -5,6 +5,11 @@ import {
   SDLogHeaderBitmask as BM,
 } from '../../src/devices/sdlog/index.js';
 import { getDefaultCalibration } from '../../src/devices/calibration/index.js';
+import {
+  decodeExgRegisters,
+  detectExgPreset,
+  EXG_PRESET_ARRAYS,
+} from '../../src/devices/exg/index.js';
 import { buildSdLogHeader } from './fixtures.js';
 
 const expectCode = (fn: () => unknown, code: string): void => {
@@ -397,5 +402,43 @@ describe('parseSdLogHeader — rejection paths', () => {
         ),
       'BAD_HEADER',
     );
+  });
+});
+
+describe('parseSdLogHeader — EXG register banks (ShimmerSDLog.java:252-253/322-323)', () => {
+  it('extracts exg1/exg2 from bytes 56-65 / 66-75 and they decode to a preset', () => {
+    const ecg1 = [...EXG_PRESET_ARRAYS.ecg.exg1];
+    const ecg2 = [...EXG_PRESET_ARRAYS.ecg.exg2];
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        enabledSensors: BM.ACCEL_LN | BM.GSR,
+        exg1: ecg1,
+        exg2: ecg2,
+      }),
+    );
+    expect([...h.exg1]).toEqual(ecg1);
+    expect([...h.exg2]).toEqual(ecg2);
+    expect(detectExgPreset(h.exg1, h.exg2)).toBe('ecg');
+    expect(decodeExgRegisters(h.exg1).ch1.gain.gain).toBe(4);
+  });
+
+  it('yields all-zero banks on a non-EXG header', () => {
+    const h = parseSdLogHeader(buildSdLogHeader({ enabledSensors: BM.ACCEL_LN | BM.GSR }));
+    expect([...h.exg1]).toEqual(new Array(10).fill(0));
+    expect([...h.exg2]).toEqual(new Array(10).fill(0));
+  });
+
+  it('extracts EXG banks from a Shimmer3R (384 B) header at the same offsets', () => {
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion: [0, 1, 0],
+        signalIds: [0x1d],
+        exg1: [...EXG_PRESET_ARRAYS['test-signal'].exg1],
+        exg2: [...EXG_PRESET_ARRAYS['test-signal'].exg2],
+      }),
+    );
+    expect(detectExgPreset(h.exg1, h.exg2)).toBe('test-signal');
   });
 });
