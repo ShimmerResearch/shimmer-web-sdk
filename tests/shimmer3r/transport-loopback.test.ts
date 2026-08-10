@@ -118,6 +118,55 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     expect(t.writes.some((w) => w.bytes[0] === OPCODES.INQUIRY_COMMAND)).toBe(true);
   });
 
+  it('readInfoMem sends [cmd, len, addrLSB, addrMSB] and parses a piggybacked response', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // ACK + [INFOMEM_RSP][length][data...] in a single notification chunk.
+        scheduleChunks(tr, [[ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(224, 6);
+    expect(Array.from(data)).toEqual(payload);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.GET_INFOMEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    // 224 = 0x00e0 little-endian → addrLSB 0xe0, addrMSB 0x00.
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.GET_INFOMEM_COMMAND, 6, 0xe0, 0x00]);
+  });
+
+  it('getMacAddress reads InfoMem @224 and formats 12 uppercase hex chars', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // ACK alone, then the response in its own notification chunk.
+        scheduleChunks(tr, [[ACK], [OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.getMacAddress()).resolves.toBe('2601140185B8');
+  });
+
+  it('getMacAddress rejects an unprovisioned (all-FF) MAC', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        scheduleChunks(tr, [[ACK, OPCODES.INFOMEM_RESPONSE, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.getMacAddress()).rejects.toThrow(/unprovisioned MAC/);
+  });
+
   it('disconnect() tears the transport down', async () => {
     const t = new LoopbackTransport();
     const client = new Shimmer3RClient({ debug: false, transport: t });

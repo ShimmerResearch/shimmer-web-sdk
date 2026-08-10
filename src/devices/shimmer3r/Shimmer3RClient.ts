@@ -27,6 +27,18 @@ import {
   type InertialGroup,
   type KinematicCalibration,
 } from '../calibration/index.js';
+import { MAC_LENGTH } from '../infomem/layout.js';
+
+// ---------------------------------------------------------------------------
+// InfoMem constants
+// ---------------------------------------------------------------------------
+
+// InfoMem (device config memory) MAC location, mirroring ConfigByteLayoutShimmer3
+// in the Shimmer Java driver: idxMacAddress = 128+96 (=224), length 6 bytes.
+// 224+6 stays within one 128-byte InfoMem segment, so a single read suffices.
+const INFOMEM_MAC_OFFSET = 224;
+// Devices that have not been provisioned report an all-FF or all-zero MAC.
+const INVALID_MAC_IDS = ['FFFFFFFFFFFF', '000000000000'];
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -462,6 +474,67 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const info = this._interpretInquiryResponseShimmer3R(rsp);
     this.onInquiry?.(info);
     return info;
+  }
+
+  // ---------------------------------------------------------------------------
+  // InfoMem
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read a block from the device's InfoMem (config memory).
+   * Request layout is [cmd, length, addrLSB, addrMSB] (address is little-endian
+   * 16-bit), matching readMem()/GET_INFOMEM_COMMAND in the Shimmer Java driver.
+   * @returns the raw bytes read
+   */
+  async readInfoMem(address: number, length: number): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (length < 1 || length > 128) {
+      throw new Error('InfoMem read length must be 1..128 bytes.');
+    }
+
+    this._emitStatus(`GET_INFOMEM ${length}B @ ${address} → waiting for ACK then RSP…`);
+    const cmd = new Uint8Array([
+      OPCODES.GET_INFOMEM_COMMAND,
+      length & 0xff,
+      address & 0xff,
+      (address >> 8) & 0xff,
+    ]);
+
+    const remainder = await this._writeExpectingAck(cmd, 1500);
+    const rsp =
+      remainder && remainder[0] === OPCODES.INFOMEM_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.INFOMEM_RESPONSE, 2000);
+
+    // Response is [INFOMEM_RSP][length][data...]; tolerate either prefix being absent.
+    let off = 0;
+    if (rsp[off] === OPCODES.INFOMEM_RESPONSE) off++;
+    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
+
+    const data = rsp.slice(off, off + length);
+    if (data.length < length) {
+      throw new Error(`InfoMem read returned ${data.length} of ${length} bytes.`);
+    }
+    return data;
+  }
+
+  /**
+   * Read the device's MAC address from InfoMem and return it as 12 uppercase hex
+   * characters (e.g. "2601140185B8") — byte order as stored, matching the
+   * identifier format used by Verisense.
+   */
+  async getMacAddress(): Promise<string> {
+    const bytes = await this.readInfoMem(INFOMEM_MAC_OFFSET, MAC_LENGTH);
+    const mac = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+
+    if (INVALID_MAC_IDS.includes(mac)) {
+      throw new Error(`Device reported an unprovisioned MAC (${mac}).`);
+    }
+    this._emitStatus(`Device MAC: ${mac}`);
+    return mac;
   }
 
   // ---------------------------------------------------------------------------
