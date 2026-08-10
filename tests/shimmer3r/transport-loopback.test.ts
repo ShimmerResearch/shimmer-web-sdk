@@ -158,7 +158,9 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
       if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
-        scheduleChunks(tr, [[ACK, OPCODES.INFOMEM_RESPONSE, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]]);
+        scheduleChunks(tr, [
+          [ACK, OPCODES.INFOMEM_RESPONSE, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ]);
       }
     });
     const client = new Shimmer3RClient({ debug: false });
