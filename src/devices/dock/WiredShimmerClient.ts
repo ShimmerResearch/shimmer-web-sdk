@@ -431,13 +431,12 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * PC time. The payload is the 8-byte, LSB-first 32.768 kHz tick count
    * ({@link msToRtcBytesLE}).
    *
-   * NB the target property is `RTC_CFG_TIME` (0x04): the Java props table marks
-   * it READ_ONLY, yet the driver's SET issues a WRITE against it directly
-   * (line 150), which this mirrors by going through the low-level {@link _write}
-   * rather than the permission-checked {@link setConfig}.
-   *
-   * HARDWARE-VERIFY: the RTC payload format and RTC_CFG_TIME write have not been
-   * exercised against a real dock.
+   * NB the target property is `RTC_CFG_TIME` (0x04) — hardware-confirmed
+   * (DEV-866 drift tool bring-up): the firmware's UART_SET handler implements
+   * a time write ONLY for this property (RTC_setTimeFromTicksPtr), while a
+   * SET on CURR_LOCAL_TIME (0x05) is answered with BAD_CMD. The Java props
+   * table's READ_ONLY flag on 0x04 was wrong; the SDK table now says
+   * READ_WRITE, matching the firmware.
    */
   async writeRtcFromHostTime(nowMs?: number): Promise<void> {
     return this._serialize(() => this._writeRtcFromHostTimeImpl(nowMs ?? Date.now()));
