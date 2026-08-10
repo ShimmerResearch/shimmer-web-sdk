@@ -488,8 +488,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readInfoMem(address: number, length: number): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
-    if (length < 1 || length > 128) {
-      throw new Error('InfoMem read length must be 1..128 bytes.');
+    if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
+      throw new Error('InfoMem address must be an integer in 0..65535.');
+    }
+    if (!Number.isInteger(length) || length < 1 || length > 128) {
+      throw new Error('InfoMem read length must be an integer in 1..128.');
     }
 
     this._emitStatus(`GET_INFOMEM ${length}B @ ${address} → waiting for ACK then RSP…`);
@@ -506,7 +509,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
         ? remainder
         : await this._waitForResponse(OPCODES.INFOMEM_RESPONSE, 2000);
 
-    // Response is [INFOMEM_RSP][length][data...]; tolerate either prefix being absent.
+    // Response is [INFOMEM_RSP][length][data...] — the opcode is guaranteed by the
+    // selection above (firmware always opcode-frames InfoMem responses, matching
+    // readMem() in the Shimmer Java driver); only the length byte is optional and
+    // is skipped when present and consistent. Deliberately NOT accepting
+    // opcode-less chunks: a raw chunk could be an unrelated notification (e.g. a
+    // 0x00-preamble data frame while streaming) and must not be mis-captured as
+    // InfoMem payload.
     let off = 0;
     if (rsp[off] === OPCODES.INFOMEM_RESPONSE) off++;
     if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;

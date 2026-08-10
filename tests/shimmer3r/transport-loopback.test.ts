@@ -139,6 +139,37 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     expect(Array.from(cmd!.bytes)).toEqual([OPCODES.GET_INFOMEM_COMMAND, 6, 0xe0, 0x00]);
   });
 
+  it('readInfoMem rejects non-integer or out-of-range address/length before writing', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.readInfoMem(-1, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0x10000, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(224.5, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(224, 0)).rejects.toThrow(/length/);
+    await expect(client.readInfoMem(224, 129)).rejects.toThrow(/length/);
+    await expect(client.readInfoMem(224, 6.5)).rejects.toThrow(/length/);
+    // No command bytes were written for any rejected call.
+    expect(t.writes.length).toBe(0);
+  });
+
+  it('readInfoMem parses a response whose length byte is absent', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // [INFOMEM_RSP][data...] with no length byte.
+        scheduleChunks(tr, [[ACK], [OPCODES.INFOMEM_RESPONSE, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(224, 6);
+    expect(Array.from(data)).toEqual(payload);
+  });
+
   it('getMacAddress reads InfoMem @224 and formats 12 uppercase hex chars', async () => {
     const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
     const t = new LoopbackTransport();
