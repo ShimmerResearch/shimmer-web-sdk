@@ -16,6 +16,19 @@ export interface WebSerialTransportOptions {
   flowControl?: FlowControlType;
   /** `requestPort` filters. */
   filters?: SerialPortFilter[] | null;
+  /**
+   * DTR (data-terminal-ready) line state asserted right after the port opens.
+   * Defaults to TRUE together with {@link requestToSend}: the Shimmer
+   * single-slot dock wires the docked sensor's reset to the COM-port control
+   * lines and holds the sensor in RESET until both DTR and RTS are asserted,
+   * and asserted lines are also the safe norm for USB-CDC devices (hardware
+   * that ignores them behaves the same either way). Set false only for
+   * hardware that needs the line deasserted.
+   */
+  dataTerminalReady?: boolean;
+  /** RTS (request-to-send) line state asserted right after the port opens.
+   * Defaults to TRUE — see {@link dataTerminalReady}. */
+  requestToSend?: boolean;
   /** Enable verbose console logging. */
   debug?: boolean;
 }
@@ -41,6 +54,7 @@ export class WebSerialTransport implements ShimmerTransport {
     flowControl: FlowControlType;
   };
   private readonly _filters: SerialPortFilter[] | null;
+  private readonly _signals: { dataTerminalReady: boolean; requestToSend: boolean };
 
   private _port: SerialPort | null;
   private _abort: AbortController | null = null;
@@ -53,6 +67,10 @@ export class WebSerialTransport implements ShimmerTransport {
   constructor(opts: WebSerialTransportOptions = {}) {
     this._port = opts.port ?? null;
     this._filters = opts.filters ?? null;
+    this._signals = {
+      dataTerminalReady: opts.dataTerminalReady ?? true,
+      requestToSend: opts.requestToSend ?? true,
+    };
     this._debug = opts.debug ?? false;
     this._openOptions = {
       baudRate: opts.baudRate ?? 115200,
@@ -93,6 +111,21 @@ export class WebSerialTransport implements ShimmerTransport {
         }): Promise<void>;
       }
     ).open(this._openOptions);
+
+    // Assert DTR/RTS now that the port is open. The Shimmer single-slot dock
+    // holds the docked sensor in RESET until both lines are asserted, so a
+    // port opened without them leaves the sensor unresponsive. Non-fatal when
+    // unsupported: not every serial stack implements setSignals, and hardware
+    // that ignores the control lines behaves the same either way.
+    try {
+      await (
+        this._port as unknown as {
+          setSignals?(s: { dataTerminalReady: boolean; requestToSend: boolean }): Promise<void>;
+        }
+      ).setSignals?.(this._signals);
+    } catch (e) {
+      if (this._debug) console.warn('[WebSerialTransport] setSignals failed (continuing):', e);
+    }
 
     this._abort = new AbortController();
     this._startReadLoop(this._abort.signal);
