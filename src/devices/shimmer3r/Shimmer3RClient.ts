@@ -17,6 +17,7 @@ import {
   getOversamplingRatioADS1292R,
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
+import { msToRtcBytesLE } from '../dock/protocol.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import {
@@ -544,6 +545,69 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     this._emitStatus(`Device MAC: ${mac}`);
     return mac;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-world clock (RWC)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read the device's real-world clock (GET_RWC_COMMAND).
+   *
+   * The response payload is the current RTC value as a 64-bit little-endian
+   * tick count at 32768 Hz since the Unix epoch (the same unit SET_RWC writes:
+   * `ticks = ms * 32.768`). Intended for RTC drift measurement (DEV-844 /
+   * DEV-866): pair the returned time with a host timestamp taken at the
+   * midpoint of the round-trip and feed {@link RtcDriftMonitor}.
+   *
+   * @returns the raw tick count plus the conversion to Unix milliseconds.
+   */
+  async getRtcTime(): Promise<{ ticks: bigint; unixMs: number }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_RWC_COMMAND]),
+      1500,
+    );
+    const rsp =
+      remainder && remainder[0] === OPCODES.RWC_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.RWC_RESPONSE, 2000);
+
+    // Response is [RWC_RSP][8 bytes LSB-first]. Deliberately opcode-framed
+    // ONLY (the firmware always opcode-frames the RWC response, and both paths
+    // above select on the opcode): an opcode-less 8-byte chunk could be an
+    // unrelated notification and must not be mis-read as a clock value — the
+    // same policy as readInfoMem.
+    if (rsp[0] !== OPCODES.RWC_RESPONSE || rsp.length < 9) {
+      throw new Error(`Malformed RWC response (${rsp.length} bytes).`);
+    }
+    let ticks = 0n;
+    for (let i = 8; i >= 1; i--) {
+      ticks = (ticks << 8n) | BigInt(rsp[i]);
+    }
+    return { ticks, unixMs: Number(ticks) / 32.768 };
+  }
+
+  /**
+   * Set the device's real-world clock (SET_RWC_COMMAND) to the given Unix
+   * millisecond time, encoded as 64-bit little-endian 32768 Hz ticks via the
+   * same {@link msToRtcBytesLE} helper as the dock path (truncating, matching
+   * the Java driver's `(long)(ms * 32.768)`). Call with `Date.now()` to sync
+   * the device clock to the host before a drift run.
+   * NOTE (DEV-900): the device treats RWC as LOCAL civil time — pass a
+   * local-adjusted value if that distinction matters for the use case; for
+   * drift measurement only the rate matters, not the epoch.
+   */
+  async setRtcTime(unixMs: number): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!Number.isFinite(unixMs)) {
+      throw new Error('setRtcTime: unixMs must be a finite number.');
+    }
+    const cmd = new Uint8Array(9);
+    cmd[0] = OPCODES.SET_RWC_COMMAND;
+    cmd.set(msToRtcBytesLE(unixMs), 1);
+    await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('RWC set');
   }
 
   // ---------------------------------------------------------------------------

@@ -99,8 +99,15 @@ export const UART_PROP = Object.freeze({
     SAMPLE_RATE: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x01, 'READ_WRITE', 'SAMPLE_RATE'),
     MAC: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x02, 'READ_WRITE', 'MAC'),
     VER: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x03, 'READ_ONLY', 'VER'),
-    RTC_CFG_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x04, 'READ_ONLY', 'RTC_CFG_TIME'),
-    CURR_LOCAL_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x05, 'READ_WRITE', 'CURR_LOCAL_TIME'),
+    /* Access flags verified against the firmware handler (log-and-stream-common
+     * Comms/shimmer_dock_usart.c): UART_SET is implemented ONLY for
+     * RWC_CFG_TIME (0x04) — writing it calls RTC_setTimeFromTicksPtr(), i.e.
+     * this is the property that SETS the clock (payload from msToRtcBytesLE);
+     * reading it returns the time at which the RTC was last configured.
+     * CURR_LOCAL_TIME (0x05) is GET-only (current RTC value) — a SET is
+     * answered with BAD_CMD. */
+    RTC_CFG_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x04, 'READ_WRITE', 'RTC_CFG_TIME'),
+    CURR_LOCAL_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x05, 'READ_ONLY', 'CURR_LOCAL_TIME'),
     INFOMEM: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x06, 'READ_WRITE', 'INFOMEM'),
     LED0_STATE: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x07, 'READ_WRITE', 'LED_TOGGLE'),
     DEVICE_BOOT: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x08, 'READ_ONLY', 'DEVICE_BOOT'),
