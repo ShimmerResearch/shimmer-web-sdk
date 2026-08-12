@@ -155,9 +155,24 @@ export class RtcDriftMonitor {
    * CSV rows (header first) of the current series, matching the DEV-844
    * export format: host ISO time, host/device unix seconds, offset, rtt,
    * monotonic seconds.
+   *
+   * Optional `metadata` is emitted as `# key: value` comment lines before the
+   * header, so a saved file records what it came from (device, transport, the
+   * fit result, etc.) - the S3R drift tool established this preamble and the
+   * console adopts it. Keys/values have newlines and `#`/leading-whitespace
+   * that would break the preamble stripped; a caller can also read the fit via
+   * {@link ppmFit}/{@link deviceSteps}/{@link hostSteps} to build the map.
    */
-  toCsvRows(): string[] {
-    const rows = ['host_iso,host_unix_s,device_unix_s,offset_s,rtt_ms,perf_monotonic_s'];
+  toCsvRows(metadata?: Record<string, string | number>): string[] {
+    const rows: string[] = [];
+    if (metadata) {
+      for (const [k, v] of Object.entries(metadata)) {
+        // Keep each entry a single clean comment line.
+        const clean = String(v).replace(/[\r\n]+/g, ' ').trim();
+        rows.push(`# ${k}: ${clean}`);
+      }
+    }
+    rows.push('host_iso,host_unix_s,device_unix_s,offset_s,rtt_ms,perf_monotonic_s');
     for (const p of this.samples) {
       rows.push(
         `${new Date(p.hostSec * 1000).toISOString()},${p.hostSec.toFixed(3)},${p.devSec.toFixed(5)},${p.offsetSec.toFixed(3)},${p.rttMs},${(p.perfMs / 1000).toFixed(3)}`,
