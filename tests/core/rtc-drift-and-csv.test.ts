@@ -92,6 +92,26 @@ describe('RtcDriftMonitor', () => {
     expect(rows[1]).toMatch(/^\d{4}-\d{2}-\d{2}T.*,1750000000\.000,/);
   });
 
+  it('prepends metadata as comment lines before the header', () => {
+    const mon = new RtcDriftMonitor();
+    feedDrift(mon, 2, 100);
+    const rows = mon.toCsvRows({ device: 'SR68 95BC', transport: 'ble', ppm_fit: 42.1 });
+    expect(rows[0]).toBe('# device: SR68 95BC');
+    expect(rows[1]).toBe('# transport: ble');
+    expect(rows[2]).toBe('# ppm_fit: 42.1');
+    expect(rows[3]).toBe('host_iso,host_unix_s,device_unix_s,offset_s,rtt_ms,perf_monotonic_s');
+    // 3 metadata lines + header + 2 data rows
+    expect(rows).toHaveLength(6);
+  });
+
+  it('keeps each metadata entry a single clean comment line', () => {
+    const mon = new RtcDriftMonitor();
+    const rows = mon.toCsvRows({ note: '  line1\r\nline2  ' });
+    expect(rows[0]).toBe('# note: line1 line2');
+    // header only follows (no samples fed)
+    expect(rows).toHaveLength(2);
+  });
+
   it('reports the elapsed sample span in minutes', () => {
     const mon = new RtcDriftMonitor();
     expect(mon.elapsedMinutes()).toBe(0);
