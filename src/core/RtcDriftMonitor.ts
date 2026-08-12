@@ -152,15 +152,16 @@ export class RtcDriftMonitor {
   }
 
   /**
-   * CSV rows (header first) of the current series, matching the DEV-844
-   * export format: host ISO time, host/device unix seconds, offset, rtt,
-   * monotonic seconds.
+   * CSV rows of the current series, matching the DEV-844 export format: a
+   * header row (host ISO time, host/device unix seconds, offset, rtt,
+   * monotonic seconds) followed by one row per sample.
    *
-   * Optional `metadata` is emitted as `# key: value` comment lines before the
-   * header, so a saved file records what it came from (device, transport, the
-   * fit result, etc.) - the S3R drift tool established this preamble and the
-   * console adopts it. Keys/values have newlines and `#`/leading-whitespace
-   * that would break the preamble stripped; a caller can also read the fit via
+   * Optional `metadata` is emitted as `# key: value` comment lines BEFORE the
+   * header (so the header is no longer row 0 when metadata is supplied), so a
+   * saved file records what it came from (device, transport, the fit result,
+   * etc.) - the S3R drift tool established this preamble and the console
+   * adopts it. Each value has newlines collapsed so every entry stays a single
+   * comment line; a caller can read the fit via
    * {@link ppmFit}/{@link deviceSteps}/{@link hostSteps} to build the map.
    */
   toCsvRows(metadata?: Record<string, string | number>): string[] {
