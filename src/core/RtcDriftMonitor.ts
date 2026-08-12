@@ -168,7 +168,9 @@ export class RtcDriftMonitor {
     if (metadata) {
       for (const [k, v] of Object.entries(metadata)) {
         // Keep each entry a single clean comment line.
-        const clean = String(v).replace(/[\r\n]+/g, ' ').trim();
+        const clean = String(v)
+          .replace(/[\r\n]+/g, ' ')
+          .trim();
         rows.push(`# ${k}: ${clean}`);
       }
     }
