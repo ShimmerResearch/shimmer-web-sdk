@@ -649,9 +649,13 @@ function readMcuHeaderLine(
 }
 
 /**
- * Indented continuation lines. These are dispatched on their own wording
- * rather than on which test is open, so a missing parent line never
- * misattributes them.
+ * Indented continuation lines, dispatched on their own wording rather than on
+ * which test is open. A value always lands in the GLOBAL metrics map under its
+ * own name, so the flat map is correct even when the parent line went missing;
+ * it is additionally attached to the currently open test's entry when one
+ * exists, so a stray sub-line after an unrelated test would show up on that
+ * test's `metrics`/`detail` (the tests[] attachment is best-effort context,
+ * not the source of truth).
  */
 function readSubLine(
   trimmed: string,
@@ -818,13 +822,16 @@ export function verisenseFactoryTestReportToCsvRows(
   parsed: VerisenseFactoryTestReportParsed,
   meta: Record<string, string | number | boolean | null> = {},
 ): string[] {
+  // Normalized once and used for both key discovery and value lookup, so a
+  // null/undefined `parsed` from a plain-JS caller cannot throw here.
+  const metrics = parsed?.metrics ?? {};
   const metaKeys = Object.keys(meta);
   const metaKeySet = new Set(metaKeys);
-  const metricKeys = Object.keys(parsed?.metrics ?? {})
+  const metricKeys = Object.keys(metrics)
     .filter((k) => !metaKeySet.has(k))
     .sort();
   const header = [...metaKeys, ...metricKeys].map(csvCell).join(',');
-  const values = [...metaKeys.map((k) => meta[k]), ...metricKeys.map((k) => parsed.metrics[k])]
+  const values = [...metaKeys.map((k) => meta[k]), ...metricKeys.map((k) => metrics[k])]
     .map(csvCell)
     .join(',');
   return [header, values];

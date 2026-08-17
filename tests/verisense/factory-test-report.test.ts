@@ -491,6 +491,14 @@ describe('verisenseFactoryTestReportToCsvRows', () => {
     expect(rows[1]).toContain('"a,b"');
   });
 
+  it('tolerates a null parse from plain-JS callers', () => {
+    const rows = verisenseFactoryTestReportToCsvRows(
+      null as unknown as ReturnType<typeof parseVerisenseFactoryTestReport>,
+      { mo: '25112101' },
+    );
+    expect(rows).toEqual(['mo', '25112101']);
+  });
+
   it('never emits duplicate column names - meta wins a collision', () => {
     const parsed = parseVerisenseFactoryTestReport(SR68_REPORT);
     const rows = verisenseFactoryTestReportToCsvRows(parsed, {
