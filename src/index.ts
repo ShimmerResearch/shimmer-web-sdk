@@ -476,6 +476,30 @@ export type {
   VerisenseDfuRetryInfo,
   VerisenseDfuFlowOptions,
 } from './devices/verisense/dfu.js';
+
+// Verisense Nordic Secure-DFU over USB CDC serial (bootloader v3)
+export {
+  slipEncode,
+  SlipDecoder,
+  crc32,
+  SERIAL_DFU_OP,
+  SERIAL_DFU_OBJECT_TYPE,
+  SERIAL_DFU_RESULT_NAMES,
+  SERIAL_DFU_EXTENDED_ERROR_NAMES,
+  VERISENSE_USB_DFU_VID,
+  VERISENSE_USB_DFU_PID,
+  VERISENSE_USB_DFU_PORT_FILTERS,
+  VERISENSE_USB_DFU_REENUMERATION_DELAY_MS,
+  VERISENSE_SERIAL_DFU_REQUEST_TIMEOUT_MS,
+  VERISENSE_SERIAL_DFU_OBJECT_ATTEMPTS,
+  isUsbDfuUnsupportedError,
+  VerisenseSerialDfu,
+} from './devices/verisense/dfuSerial.js';
+export type {
+  SerialDfuTransportLike,
+  VerisenseSerialDfuProgress,
+  VerisenseSerialDfuOptions,
+} from './devices/verisense/dfuSerial.js';
 export {
   parseCalibrationBlob,
   serializeCalibrationBlob,
