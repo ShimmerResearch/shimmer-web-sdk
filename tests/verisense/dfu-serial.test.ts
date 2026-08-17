@@ -68,9 +68,7 @@ describe('crc32', () => {
 
 describe('constants', () => {
   it('filters target the bootloader DFU port, not the application port', () => {
-    expect(VERISENSE_USB_DFU_PORT_FILTERS).toEqual([
-      { usbVendorId: 0x1915, usbProductId: 0x521f },
-    ]);
+    expect(VERISENSE_USB_DFU_PORT_FILTERS).toEqual([{ usbVendorId: 0x1915, usbProductId: 0x521f }]);
   });
 
   it('classifies NACK rejections as USB-DFU-unsupported', () => {
@@ -165,8 +163,7 @@ class MockSerialBootloader implements SerialDfuTransportLike {
             // Whole preloaded objects were executed by the earlier attempt;
             // a trailing partial object is written but not executed.
             this._executedLength =
-              Math.floor(this.preloadedFirmware.length / this.maxObjectSize) *
-              this.maxObjectSize;
+              Math.floor(this.preloadedFirmware.length / this.maxObjectSize) * this.maxObjectSize;
             this.preloadedFirmware = [];
           }
           const bytes = this._firmwareBytes();

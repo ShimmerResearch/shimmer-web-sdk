@@ -381,7 +381,8 @@ export class VerisenseSerialDfu {
         startOffset = sel.offset - (sel.offset % sel.maxSize);
       } else {
         const remainder = sel.offset % sel.maxSize;
-        startOffset = sel.offset - (remainder !== 0 ? remainder : Math.min(sel.maxSize, sel.offset));
+        startOffset =
+          sel.offset - (remainder !== 0 ? remainder : Math.min(sel.maxSize, sel.offset));
         this._options.onLog?.(
           `device-reported firmware CRC mismatch at ${sel.offset}; rolling back to ${startOffset}`,
         );
