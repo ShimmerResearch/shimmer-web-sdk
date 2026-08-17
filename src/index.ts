@@ -565,3 +565,16 @@ export { SensorMAX32674 } from './devices/verisense/sensors/SensorMAX32674.js';
 export type { MAX32674Sample } from './devices/verisense/sensors/SensorMAX32674.js';
 export { SensorMLX90632 } from './devices/verisense/sensors/SensorMLX90632.js';
 export type { MLX90632Sample } from './devices/verisense/sensors/SensorMLX90632.js';
+export {
+  parseVerisenseFactoryTestReport,
+  verisenseFactoryTestReportToCsvRows,
+} from './devices/verisense/factoryTestReport.js';
+export type {
+  VerisenseFactoryTestVerdict,
+  VerisenseFactoryTestMetricValue,
+  VerisenseFactoryTestResult,
+  VerisenseFactoryTestMcuInfo,
+  VerisenseFactoryTestModelInfo,
+  VerisenseFactoryTestOverall,
+  VerisenseFactoryTestReportParsed,
+} from './devices/verisense/factoryTestReport.js';
