@@ -290,8 +290,8 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
 
     switch (cmd[0]) {
       case 0x2e: {
-        // GET_FW_VERSION → LogAndStream (3), v1.01.008
-        send([ACK, 0x2f, 3, 0, 1, 0, 1, 8]);
+        // GET_FW_VERSION → LogAndStream (3), v1.01.009
+        send([ACK, 0x2f, 3, 0, 1, 0, 1, 9]);
         return;
       }
       case OP.LIST_DIR_COMMAND: {

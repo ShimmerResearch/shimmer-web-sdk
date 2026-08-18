@@ -1267,13 +1267,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /**
    * True when the connected firmware serves the SD file-transfer commands
-   * (LogAndStream_Shimmer3R >= v1.01.008). Older firmware silently ignores
+   * (LogAndStream_Shimmer3R >= v1.01.009). Older firmware silently ignores
    * unknown opcodes, so version gating is the only reliable probe.
    */
   async supportsSdTransfer(): Promise<boolean> {
     try {
       const v = await this.readFwVersion();
-      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_001_008;
+      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_001_009;
     } catch {
       return false;
     }
@@ -1331,7 +1331,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // SD-card file transfer (FW >= v1.01.008)
+  // SD-card file transfer (FW >= v1.01.009)
   //
   // A dedicated, self-resynchronising RX pipeline: while any SD operation is
   // active, a persistent temp handler accumulates notification chunks and

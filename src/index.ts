@@ -84,7 +84,7 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
-// Shimmer3R SD-card file transfer (FW >= v1.01.008)
+// Shimmer3R SD-card file transfer (FW >= v1.01.009)
 export {
   SD_TRANSFER_OPCODES,
   SD_STATUS,
