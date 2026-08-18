@@ -1083,6 +1083,27 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   /**
+   * Request a reboot straight into the DFU bootloader over the USB serial
+   * transport.
+   *
+   * Writes the same ASM `DFU_MODE` property, but the firmware's USB handling
+   * differs from BLE: it ACKs and resets into the bootloader ~300 ms later
+   * (the delay lets the ACK drain), after which THIS serial port disappears
+   * and the bootloader enumerates as its own USB CDC device (0x1915/0x521F,
+   * "Verisense DFU" — see `VERISENSE_USB_DFU_PORT_FILTERS`). Expect the
+   * transport to drop shortly after this resolves.
+   *
+   * Firmware running on a BLE-only (v2) bootloader NACKs instead of
+   * rebooting (`isUsbDfuUnsupportedError` classifies the rejection); fall
+   * back to the BLE DFU flow there. Only meaningful on a serial connection —
+   * over BLE the same property write follows the
+   * {@link enableDfuServiceOnNextDisconnect} semantics.
+   */
+  async requestUsbDfuBootloaderReboot(): Promise<void> {
+    await this.writeProperty(ASM_PROPERTY.DFU_MODE, []);
+  }
+
+  /**
    * Reboot the device straight into the Nordic Secure DFU bootloader using the
    * buttonless DFU service.
    *
