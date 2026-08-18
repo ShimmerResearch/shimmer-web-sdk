@@ -1279,6 +1279,57 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
+  /**
+   * Measure raw BLE link throughput with the firmware's data-rate test
+   * (SET_DATA_RATE_TEST): the device free-runs 5-byte counter packets as
+   * fast as the link drains them and we count notification bytes for
+   * `durationMs`. This measures the pipe itself (connection interval, MTU,
+   * module buffering) independent of the SD/file-transfer protocol, so it
+   * gives an upper bound for transfer rates on a given host/adapter/OS.
+   * The device must be idle (the firmware NACKs the test while sensing).
+   */
+  async runDataRateTest(
+    durationMs = 5000,
+    onProgress?: (bytesSoFar: number, elapsedMs: number) => void,
+  ): Promise<{ bytesReceived: number; durationMs: number; kBps: number }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Data-rate test unavailable while streaming');
+
+    let counting = false;
+    let bytes = 0;
+    const counter = (chunk: Uint8Array): void => {
+      if (counting) bytes += chunk.length;
+    };
+    this._onTemp(counter);
+    try {
+      await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
+      const startedAt = Date.now();
+      counting = true;
+      let elapsed = 0;
+      while (elapsed < durationMs) {
+        await new Promise((r) => setTimeout(r, Math.min(250, durationMs - elapsed)));
+        elapsed = Date.now() - startedAt;
+        onProgress?.(bytes, elapsed);
+      }
+      counting = false;
+      const measuredMs = Date.now() - startedAt;
+      return {
+        bytesReceived: bytes,
+        durationMs: measuredMs,
+        kBps: bytes / 1024 / (measuredMs / 1000),
+      };
+    } finally {
+      this._offTemp(counter);
+      try {
+        await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000);
+      } catch {
+        /* the stop ACK can be indistinguishable from residual test bytes */
+      }
+      // Drop any test bytes that were mistaken for stream data
+      this._rxBuf = new Uint8Array(0);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // SD-card file transfer (FW >= v1.01.008)
   //
