@@ -324,9 +324,15 @@ describe('small DFU helpers', () => {
     expect(isSafeFirmwareArchiveName(42)).toBe(false);
   });
 
-  it('builds a bootloader-only picker filter with the DFU service granted', () => {
+  it('builds bootloader-only picker filters (both fleet prefixes) with the DFU service granted', () => {
     const opts = buildVerisenseDfuRequestDeviceOptions('fe59');
-    expect(opts.filters).toEqual([{ namePrefix: VERISENSE_DFU_BOOTLOADER_NAME_PREFIX }]);
+    expect(opts.filters).toEqual([
+      { namePrefix: 'Verisense-DFU' },
+      { namePrefix: 'Verisense-BL' },
+    ]);
+    // The v2-fleet prefix must never drop out: fielded BLE-only bootloaders
+    // advertise it forever.
+    expect(opts.filters).toContainEqual({ namePrefix: VERISENSE_DFU_BOOTLOADER_NAME_PREFIX });
     expect(opts.optionalServices).toEqual(['fe59']);
   });
 });
