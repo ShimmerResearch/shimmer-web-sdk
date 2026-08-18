@@ -84,8 +84,8 @@ describe('brandRecord', () => {
     expect(brandNameProblem('ABCDEFGHIJKLMNOPQ', 16)).toMatch(/longer/);
     expect(brandNameProblem('A,B', 16)).toMatch(/comma/);
     expect(brandNameProblem('Café', 16)).toMatch(/unsupported/);
-    expect(() => buildBrandRecord({ btClassic: 'A,B', ble: 'X', usb: 'Y', customerBranded: true })).toThrow(
-      /comma/,
-    );
+    expect(() =>
+      buildBrandRecord({ btClassic: 'A,B', ble: 'X', usb: 'Y', customerBranded: true }),
+    ).toThrow(/comma/);
   });
 });

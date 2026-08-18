@@ -151,8 +151,7 @@ export function parseBrandRecord(bytes: Uint8Array): BrandRecord {
   }
 
   if (magic !== BRAND_RECORD_MAGIC) {
-    rec.invalidReason =
-      bytes.every((b) => b === 0xff) ? 'blank (erased) record' : 'bad magic';
+    rec.invalidReason = bytes.every((b) => b === 0xff) ? 'blank (erased) record' : 'bad magic';
     return rec;
   }
   if (bytes[OFF_LAYOUT_VER] !== BRAND_RECORD_LAYOUT_VER) {
