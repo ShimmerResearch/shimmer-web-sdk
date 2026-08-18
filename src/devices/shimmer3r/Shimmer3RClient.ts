@@ -257,6 +257,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async connect(transport?: ShimmerTransport): Promise<void> {
     const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
     this._transport = t;
+    // The firmware's SD session counter restarts with the connection
+    this._sdKnownSession = null;
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
@@ -285,6 +287,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._streaming = false;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
+      this._sdKnownSession = null;
       this._emitStatus('Disconnected');
     }
   }
@@ -292,6 +295,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Handle an unexpected / requested transport disconnect. */
   private _handleTransportDisconnect = (): void => {
     this._streaming = false;
+    this._sdKnownSession = null;
     this._emitStatus('Device disconnected');
   };
 
@@ -1316,7 +1320,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return {
         bytesReceived: bytes,
         durationMs: measuredMs,
-        kBps: bytes / 1024 / (measuredMs / 1000),
+        kBps: measuredMs > 0 ? bytes / 1024 / (measuredMs / 1000) : 0,
       };
     } finally {
       this._offTemp(counter);
@@ -1407,6 +1411,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) {
       throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
+    }
+    if (this._sdExpect) {
+      // A shared expectation slot: concurrent SD commands would race on it,
+      // so refuse deterministically — callers are expected to sequence
+      throw new SdTransferError('another SD command is already in flight', SD_STATUS.BUSY);
     }
     this._sdAcquire();
     try {
@@ -1575,7 +1584,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._sdCrcErrorListener = () => fail(new Error('SD data frame failed CRC check'));
         this._sdFrameListener = (frame) => {
           // Adopt the first session id that is not a leftover of the
-          // previous window (e.g. its SUPERSEDED status frame)
+          // previous window (late data frames or a SUPERSEDED/closing status
+          // still draining from the firmware's TX ring). The tracker resets
+          // on connect/disconnect; the residual 1-in-256 wrap collision
+          // (new window randomly assigned the previous id) is recovered by
+          // the stall watchdog + the caller's re-read retry, which advances
+          // the firmware's session counter.
           if (session === null) {
             if (this._sdKnownSession !== null && frame.sessionId === this._sdKnownSession) return;
             session = frame.sessionId;

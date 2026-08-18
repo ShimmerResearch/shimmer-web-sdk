@@ -233,7 +233,7 @@ export function encodeSdPath(path: string): Uint8Array {
   return out;
 }
 
-/** Decode a FAT date/time pair; null when unset (open/never-closed files). */
+/** Decode a FAT date/time pair; null when unset or invalid. */
 export function fatDateTimeToDate(fdate: number, ftime: number): Date | null {
   if (!fdate) return null;
   const year = 1980 + ((fdate >> 9) & 0x7f);
@@ -243,6 +243,7 @@ export function fatDateTimeToDate(fdate: number, ftime: number): Date | null {
   const minutes = (ftime >> 5) & 0x3f;
   const seconds = (ftime & 0x1f) * 2;
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hours > 23 || minutes > 59 || seconds > 59) return null;
   return new Date(year, month - 1, day, hours, minutes, seconds);
 }
 
@@ -298,6 +299,12 @@ export function buildReadCmd(
   windowLen: number,
   blockPayloadLen = SD_BLOCK_PAYLOAD_DEFAULT,
 ): Uint8Array {
+  if (blockPayloadLen < SD_BLOCK_PAYLOAD_MIN || blockPayloadLen > SD_BLOCK_PAYLOAD_MAX) {
+    throw new SdTransferError(
+      `blockPayloadLen must be ${SD_BLOCK_PAYLOAD_MIN}..${SD_BLOCK_PAYLOAD_MAX}, got ${blockPayloadLen}`,
+      SD_STATUS.BAD_ARGS,
+    );
+  }
   const p = encodeSdPath(path);
   const cmd = new Uint8Array(12 + p.length);
   cmd[0] = SD_TRANSFER_OPCODES.FILE_READ_COMMAND;
