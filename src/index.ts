@@ -84,6 +84,25 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
+// EEPROM brand (advertising name) record — shared by Shimmer3/Shimmer3R over
+// BLE/BT (readDaughterCardMem) and the dock UART / USB-C (CARD_MEM)
+export {
+  BRAND_RECORD_HOST_OFFSET,
+  BRAND_RECORD_SIZE,
+  BRAND_RECORD_MAGIC,
+  BRAND_RECORD_LAYOUT_VER,
+  BRAND_BT_CLASSIC_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS_SHIMMER3,
+  BRAND_USB_MAX_CHARS,
+  BRAND_PLATFORM,
+  brandNameProblem,
+  parseBrandRecord,
+  buildBrandRecord,
+  buildBlankBrandRecord,
+} from './devices/brandRecord.js';
+export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
+
 // Shimmer3 (classic Bluetooth / RFCOMM)
 export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
 export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';

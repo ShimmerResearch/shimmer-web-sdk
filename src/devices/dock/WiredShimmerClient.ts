@@ -312,6 +312,39 @@ export class WiredShimmerClient extends BaseShimmerClient {
     return parseExpansionBoard(payload);
   }
 
+  /**
+   * Read from the daughter-card EEPROM memory (`DAUGHTER_CARD.CARD_MEM`).
+   * `address` is a HOST offset — firmware maps it past the first (HW details)
+   * EEPROM page, so host offsets 0..2031 cover absolute EEPROM bytes 16..2047.
+   */
+  async readDaughterCardMem(address: number, size: number): Promise<Uint8Array> {
+    if (!Number.isInteger(address) || address < 0 || address > 2031) {
+      throw new Error('Daughter-card mem address must be an integer in 0..2031.');
+    }
+    if (!Number.isInteger(size) || size < 1 || size > 128 || address + size > 2032) {
+      throw new Error('Daughter-card mem read must be 1..128 bytes within 0..2031.');
+    }
+    return this._serialize(() => this._readMem(UART_PROP.DAUGHTER_CARD.CARD_MEM, address, size));
+  }
+
+  /**
+   * Write to the daughter-card EEPROM memory (`DAUGHTER_CARD.CARD_MEM`).
+   * `address` is a HOST offset (see {@link readDaughterCardMem}).
+   */
+  async writeDaughterCardMem(address: number, data: Uint8Array): Promise<void> {
+    if (!Number.isInteger(address) || address < 0 || address > 2031) {
+      throw new Error('Daughter-card mem address must be an integer in 0..2031.');
+    }
+    if (data.length < 1 || data.length > 128 || address + data.length > 2032) {
+      throw new Error('Daughter-card mem write must be 1..128 bytes within 0..2031.');
+    }
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.DAUGHTER_CARD.CARD_MEM, address, data);
+      await this._writeRaw(UART_PROP.DAUGHTER_CARD.CARD_MEM, payload);
+      this._emitStatus(`Daughter-card mem write ACKed (${data.length}B @ ${address})`);
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Property-level config
   // ---------------------------------------------------------------------------
