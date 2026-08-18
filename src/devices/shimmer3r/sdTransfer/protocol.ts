@@ -6,7 +6,7 @@
  *
  * Command/response shapes (all multi-byte fields little-endian):
  *
- *   SD_LIST_DIR_COMMAND  0xC0: [startIdx u16][maxEntries u8][pathLen u8][path]
+ *   SD_LIST_DIR_COMMAND  0xCC: [startIdx u16][maxEntries u8][pathLen u8][path]
  *   SD_LIST_DIR_RESPONSE 0xC1: [status][startIdx u16][entriesLen u16][nEntries][flags][entries…]
  *       entry: [attr][size u32][fdate u16][ftime u16][nameLen][name…]
  *   SD_FILE_STAT_COMMAND 0xC2: [pathLen u8][path]
@@ -22,7 +22,10 @@
  */
 
 export const SD_TRANSFER_OPCODES = {
-  LIST_DIR_COMMAND: 0xc0,
+  // Command opcodes must avoid the CYW20820 EZ-Serial SOF bytes 0x80/0xC0/
+  // 0xD0 (the firmware's UART RX demux would route them to the EZ-Serial
+  // parser instead of the Shimmer command parser) — hence LIST sits at 0xCC.
+  LIST_DIR_COMMAND: 0xcc,
   LIST_DIR_RESPONSE: 0xc1,
   FILE_STAT_COMMAND: 0xc2,
   FILE_STAT_RESPONSE: 0xc3,
