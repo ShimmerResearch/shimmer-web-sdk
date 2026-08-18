@@ -185,9 +185,14 @@ export const VERISENSE_USB_DFU_REENUMERATION_DELAY_MS = 2000;
  * DFU mode from USB: firmware on a BLE-only (v2) bootloader NACKs the request
  * (the reboot would strand the device off the bus until the bootloader's
  * inactivity timeout). The caller should fall back to the BLE DFU flow.
+ *
+ * Keyed on the DFU_MODE property code (0x6) in the client's NACK message
+ * ("Device returned NACK command=0x.. property=0x6", unpadded hex — see
+ * `validatePendingResponse` in requestValidation.ts) so NACKs from unrelated
+ * requests are never misclassified as "USB DFU unsupported".
  */
 export function isUsbDfuUnsupportedError(error: unknown): boolean {
-  return /NACK/i.test(String(error));
+  return /NACK.*property=0x0?6\b/i.test(String(error));
 }
 
 // ── Transport + options ─────────────────────────────────────────────────────

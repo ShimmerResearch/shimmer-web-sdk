@@ -71,8 +71,20 @@ describe('constants', () => {
     expect(VERISENSE_USB_DFU_PORT_FILTERS).toEqual([{ usbVendorId: 0x1915, usbProductId: 0x521f }]);
   });
 
-  it('classifies NACK rejections as USB-DFU-unsupported', () => {
-    expect(isUsbDfuUnsupportedError(new Error('NACK command=0x70 property=0x6'))).toBe(true);
+  it('classifies only DFU_MODE NACK rejections as USB-DFU-unsupported', () => {
+    expect(
+      isUsbDfuUnsupportedError(new Error('Device returned NACK command=0x70 property=0x6')),
+    ).toBe(true);
+    expect(
+      isUsbDfuUnsupportedError(new Error('Device returned NACK command=0x70 property=0x06')),
+    ).toBe(true);
+    // NACKs from unrelated properties must not trigger the BLE fallback.
+    expect(
+      isUsbDfuUnsupportedError(new Error('Device returned NACK command=0x70 property=0x9')),
+    ).toBe(false);
+    expect(
+      isUsbDfuUnsupportedError(new Error('Device returned NACK command=0x50 property=0x60')),
+    ).toBe(false);
     expect(isUsbDfuUnsupportedError(new Error('Request timeout'))).toBe(false);
   });
 });
