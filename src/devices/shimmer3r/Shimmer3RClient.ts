@@ -374,6 +374,59 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return { gsrRange, ackRemainder };
   }
 
+  /**
+   * Set the wide-range accelerometer (LIS2DW12) range.
+   *
+   * Also updates {@link imuRanges} so streaming calibration picks the matching
+   * sensitivity straight away. An inquiry would refresh it from the config word
+   * anyway, but callers are free to set the range after their last inquiry.
+   *
+   * @param wrAccelRange 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g.
+   */
+  async setWrAccelRange(
+    wrAccelRange: number,
+  ): Promise<{ wrAccelRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(wrAccelRange) || wrAccelRange < 0 || wrAccelRange > 3) {
+      throw new Error('wrAccelRange must be 0–3 (±2/4/8/16 g)');
+    }
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+
+    const cmd = new Uint8Array([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, wrAccelRange & 0xff]);
+    this._emitStatus('SET_WR_ACCEL_RANGE → waiting for ACK…');
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('SET_WR_ACCEL_RANGE (ACK received).');
+    this.imuRanges = { ...this.imuRanges, wrAccel: wrAccelRange };
+    return { wrAccelRange, ackRemainder };
+  }
+
+  /**
+   * Set the gyroscope (LSM6DSV) range.
+   *
+   * Also updates {@link imuRanges}, as {@link setWrAccelRange} does.
+   *
+   * Note the firmware splits this setting across two config-setup bits when it
+   * reports back in an inquiry (LSB pair plus one MSB bit), but the command
+   * itself takes the full 0–5 index in one byte.
+   *
+   * @param gyroRange 0 = ±125, 1 = ±250, 2 = ±500, 3 = ±1000, 4 = ±2000,
+   *   5 = ±4000 dps. (Shimmer3 supports only 0–3: ±250/500/1000/2000 dps.)
+   */
+  async setGyroRange(
+    gyroRange: number,
+  ): Promise<{ gyroRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(gyroRange) || gyroRange < 0 || gyroRange > 5) {
+      throw new Error('gyroRange must be 0–5 (±125/250/500/1000/2000/4000 dps)');
+    }
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+
+    const cmd = new Uint8Array([OPCODES.SET_GYRO_RANGE_COMMAND, gyroRange & 0xff]);
+    this._emitStatus('SET_GYRO_RANGE → waiting for ACK…');
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('SET_GYRO_RANGE (ACK received).');
+    this.imuRanges = { ...this.imuRanges, gyro: gyroRange };
+    return { gyroRange, ackRemainder };
+  }
+
   getInternalExpPower(): number {
     return this.ExpPower;
   }
