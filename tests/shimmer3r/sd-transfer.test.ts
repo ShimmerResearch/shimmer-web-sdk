@@ -542,6 +542,31 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
     ).rejects.toThrow(/sequence gap/);
   });
 
+  it('refuses overlapping SD commands and read windows instead of racing shared state', async () => {
+    const card = makeCard();
+    const { client } = await makeClient(card);
+
+    // A read window is in flight (frames arrive on timers), so a second
+    // window and a one-shot command must both be refused, not silently
+    // hijack the first window's frame/expectation slots.
+    const inFlight = client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1200, {
+      blockPayloadLen: 128,
+    });
+
+    await expect(
+      client.sdReadFileWindow('data/Trial_1/Shim-000/001', 0, 300, { blockPayloadLen: 128 }),
+    ).rejects.toThrow(SdTransferError);
+
+    // The first window still completes correctly and in full
+    const res = await inFlight;
+    expect(res.bytesReceived).toBe(1200);
+
+    // Two concurrent one-shot commands: the second is refused
+    const listing = client.sdListDir('data/Trial_1');
+    await expect(client.sdStatFile('data/Trial_1/Shim-000/000')).rejects.toThrow(SdTransferError);
+    expect((await listing).length).toBe(2);
+  });
+
   it('ignores stale frames from the previous session', async () => {
     const { client, t } = await makeClient(makeCard());
     // Prime the known-session tracker with a first window

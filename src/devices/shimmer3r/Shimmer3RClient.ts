@@ -1539,6 +1539,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) {
       throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
     }
+    if (this._sdFrameListener) {
+      // The frame/CRC listeners are single-slot instance fields, so a second
+      // overlapping window would hijack the first one's frames. Refuse
+      // deterministically; the firmware serves one window at a time anyway.
+      throw new SdTransferError('another SD read window is already in flight', SD_STATUS.BUSY);
+    }
     const blockLen = opts.blockPayloadLen ?? SD_BLOCK_PAYLOAD_DEFAULT;
     const stallTimeoutMs = opts.stallTimeoutMs ?? 6000;
 
