@@ -3,6 +3,7 @@ import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import {
   OPCODES,
+  BT_FEATURE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
@@ -568,6 +569,76 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * 16-bit), matching readMem()/GET_INFOMEM_COMMAND in the Shimmer Java driver.
    * @returns the raw bytes read
    */
+  /**
+   * Issue a command and read back a length-prefixed response
+   * (`[opcode][len][data...]`), reassembling it across BLE notifications.
+   *
+   * A notification carries at most one ATT payload — around 42 bytes at the
+   * MTU the CYW20820 negotiates — and the transport surfaces one notification
+   * per chunk, so any response longer than that arrives split. Firmware writes
+   * the logical response contiguously, so the fragments simply concatenate in
+   * order: accumulate until `expectedLen` data bytes have arrived instead of
+   * assuming the first chunk holds the whole response.
+   *
+   * Firmware always emits the length byte after the opcode, but its absence is
+   * tolerated (older/variant firmware) by treating the first byte as a prefix
+   * only when it equals the requested length.
+   */
+  private async _readLengthPrefixedResponse(
+    cmd: Uint8Array,
+    respOpcode: number,
+    expectedLen: number,
+    label: string,
+    ackTimeoutMs = 1500,
+    responseTimeoutMs = 2000,
+  ): Promise<Uint8Array> {
+    const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs);
+    const first =
+      remainder && remainder[0] === respOpcode
+        ? remainder
+        : await this._waitForResponse(respOpcode, responseTimeoutMs);
+
+    /* Bytes after the response opcode. */
+    let acc = first[0] === respOpcode ? first.subarray(1) : first;
+    const dataOf = (buf: Uint8Array): Uint8Array =>
+      buf.length >= 1 && buf[0] === expectedLen ? buf.subarray(1) : buf;
+
+    if (dataOf(acc).length >= expectedLen) {
+      return dataOf(acc).slice(0, expectedLen);
+    }
+
+    /* Response is fragmented — collect the continuation chunks, which carry
+     * raw payload bytes with no opcode of their own. */
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        reject(
+          new Error(
+            `${label} returned ${dataOf(acc).length} of ${expectedLen} bytes (response truncated).`,
+          ),
+        );
+      }, responseTimeoutMs);
+
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || chunk.length === 0) return;
+        /* Every chunk from here is continuation payload — deliberately NOT
+         * filtering a lone 0xFF as a stray ACK, because a payload byte can be
+         * 0xFF and dropping it would silently corrupt the record. The ACK for
+         * this command was already consumed before this handler was registered,
+         * and commands are issued one at a time, so no other ACK can arrive
+         * mid-response. */
+        acc = concatU8(acc, chunk);
+        const data = dataOf(acc);
+        if (data.length >= expectedLen) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          resolve(data.slice(0, expectedLen));
+        }
+      };
+      this._onTemp(handler);
+    });
+  }
+
   async readInfoMem(address: number, length: number): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
@@ -585,28 +656,95 @@ export class Shimmer3RClient extends BaseShimmerClient {
       (address >> 8) & 0xff,
     ]);
 
-    const remainder = await this._writeExpectingAck(cmd, 1500);
-    const rsp =
-      remainder && remainder[0] === OPCODES.INFOMEM_RESPONSE
-        ? remainder
-        : await this._waitForResponse(OPCODES.INFOMEM_RESPONSE, 2000);
+    /* Response is [INFOMEM_RSP][length][data...]. The opcode is required (a raw
+     * opcode-less chunk could be an unrelated notification, e.g. a 0x00-preamble
+     * data frame, and must not be mis-captured as InfoMem payload); the length
+     * byte is optional. Reads longer than one BLE notification are reassembled. */
+    return this._readLengthPrefixedResponse(cmd, OPCODES.INFOMEM_RESPONSE, length, 'InfoMem read');
+  }
 
-    // Response is [INFOMEM_RSP][length][data...] — the opcode is guaranteed by the
-    // selection above (firmware always opcode-frames InfoMem responses, matching
-    // readMem() in the Shimmer Java driver); only the length byte is optional and
-    // is skipped when present and consistent. Deliberately NOT accepting
-    // opcode-less chunks: a raw chunk could be an unrelated notification (e.g. a
-    // 0x00-preamble data frame while streaming) and must not be mis-captured as
-    // InfoMem payload.
-    let off = 0;
-    if (rsp[off] === OPCODES.INFOMEM_RESPONSE) off++;
-    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
+  /**
+   * Arm a one-shot soft reboot that the device performs as soon as this host
+   * disconnects (SET_FEATURE / FEATURE_REBOOT_ON_DISCONNECT).
+   *
+   * Settings that firmware only reads at boot - notably the EEPROM brand
+   * record's advertising names - otherwise need a manual power-cycle. The
+   * reboot cannot happen while still connected, because the link has to drop
+   * for the Bluetooth module to re-read its name; so the sequence is: write
+   * settings, call this, then {@link disconnect}.
+   *
+   * Firmware skips the reboot while sensing so that it can never truncate an
+   * active SD recording, and clears the request either way - it is strictly
+   * one-shot and never carries into a later disconnect.
+   *
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
+   * firmware NACKs the unknown feature id.
+   */
+  async setRebootOnDisconnect(enabled: boolean): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
+    await this._writeExpectingAck(
+      new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
+      1500,
+    );
+    this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
+  }
 
-    const data = rsp.slice(off, off + length);
-    if (data.length < length) {
-      throw new Error(`InfoMem read returned ${data.length} of ${length} bytes.`);
+  /**
+   * Read from the daughter-card (expansion board) EEPROM memory. `offset` is a
+   * HOST offset — firmware maps it past the first (HW details) EEPROM page, so
+   * host offsets 0..2031 cover absolute EEPROM bytes 16..2047.
+   */
+  async readDaughterCardMem(offset: number, length: number): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
     }
-    return data;
+    if (!Number.isInteger(length) || length < 1 || length > 128 || offset + length > 2032) {
+      throw new Error('Daughter-card mem read must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`GET_DAUGHTER_CARD_MEM ${length}B @ ${offset} → waiting for ACK then RSP…`);
+    const cmd = new Uint8Array([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      length & 0xff,
+      offset & 0xff,
+      (offset >> 8) & 0xff,
+    ]);
+
+    /* Response is [DAUGHTER_CARD_MEM_RSP][length][data...] — same framing
+     * rationale as readInfoMem() above. The 64-byte brand record exceeds one
+     * BLE notification, so the reassembly in the helper is load-bearing here. */
+    return this._readLengthPrefixedResponse(
+      cmd,
+      OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
+      length,
+      'Daughter-card mem read',
+    );
+  }
+
+  /**
+   * Write to the daughter-card (expansion board) EEPROM memory. `offset` is a
+   * HOST offset (see {@link readDaughterCardMem}). Max 128 bytes per write.
+   */
+  async writeDaughterCardMem(offset: number, data: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
+    }
+    if (data.length < 1 || data.length > 128 || offset + data.length > 2032) {
+      throw new Error('Daughter-card mem write must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`SET_DAUGHTER_CARD_MEM ${data.length}B @ ${offset} → waiting for ACK…`);
+    const cmd = new Uint8Array(4 + data.length);
+    cmd[0] = OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND;
+    cmd[1] = data.length & 0xff;
+    cmd[2] = offset & 0xff;
+    cmd[3] = (offset >> 8) & 0xff;
+    cmd.set(data, 4);
+    await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('Daughter-card mem write ACKed');
   }
 
   /**

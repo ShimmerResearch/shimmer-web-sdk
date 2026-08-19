@@ -2,7 +2,13 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
-import { OPCODES, SHIMMER3_DEFAULTS, GSR_NAME, GSR_UNCAL_LIMIT_RANGE3 } from './constants.js';
+import {
+  OPCODES,
+  BT_FEATURE,
+  SHIMMER3_DEFAULTS,
+  GSR_NAME,
+  GSR_UNCAL_LIMIT_RANGE3,
+} from './constants.js';
 import type { TimestampFmt } from './constants.js';
 import {
   calibrateGsrDataToResistanceFromAmplifierEq,
@@ -540,6 +546,101 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._log('onInquiry handler error', e);
     }
     return info;
+  }
+
+  /**
+   * Arm a one-shot soft reboot that the device performs as soon as this host
+   * disconnects (SET_FEATURE / FEATURE_REBOOT_ON_DISCONNECT).
+   *
+   * Settings that firmware only reads at boot - notably the EEPROM brand
+   * record's advertising names - otherwise need a manual power-cycle. The
+   * reboot cannot happen while still connected, because the link has to drop
+   * for the Bluetooth module to re-read its name; so the sequence is: write
+   * settings, call this, then {@link disconnect}.
+   *
+   * Firmware skips the reboot while sensing so that it can never truncate an
+   * active SD recording, and clears the request either way - it is strictly
+   * one-shot and never carries into a later disconnect.
+   *
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
+   * firmware NACKs the unknown feature id.
+   */
+  async setRebootOnDisconnect(enabled: boolean): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
+    await this._writeExpectingAck(
+      new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
+      SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+    );
+    this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Daughter-card (expansion board) EEPROM memory
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read from the daughter-card EEPROM memory. `offset` is a HOST offset —
+   * firmware maps it past the first (HW details) EEPROM page, so host offsets
+   * 0..2031 cover absolute EEPROM bytes 16..2047.
+   */
+  async readDaughterCardMem(offset: number, length: number): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
+    }
+    if (!Number.isInteger(length) || length < 1 || length > 128 || offset + length > 2032) {
+      throw new Error('Daughter-card mem read must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`GET_DAUGHTER_CARD_MEM ${length}B @ ${offset} → waiting for RSP…`);
+    const cmd = new Uint8Array([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      length & 0xff,
+      offset & 0xff,
+      (offset >> 8) & 0xff,
+    ]);
+    await this._write(cmd);
+    const rsp = await this._waitForResponse(
+      OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
+      SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    );
+
+    /* Response is [DAUGHTER_CARD_MEM_RSP][length][data...]; the opcode and
+     * length bytes are skipped when present and consistent. */
+    let off = 0;
+    if (rsp[off] === OPCODES.DAUGHTER_CARD_MEM_RESPONSE) off++;
+    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
+
+    const data = rsp.slice(off, off + length);
+    if (data.length < length) {
+      throw new Error(`Daughter-card mem read returned ${data.length} of ${length} bytes.`);
+    }
+    return data;
+  }
+
+  /**
+   * Write to the daughter-card EEPROM memory. `offset` is a HOST offset (see
+   * {@link readDaughterCardMem}). Max 128 bytes per write.
+   */
+  async writeDaughterCardMem(offset: number, data: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
+    }
+    if (data.length < 1 || data.length > 128 || offset + data.length > 2032) {
+      throw new Error('Daughter-card mem write must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`SET_DAUGHTER_CARD_MEM ${data.length}B @ ${offset} → waiting for ACK…`);
+    const cmd = new Uint8Array(4 + data.length);
+    cmd[0] = OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND;
+    cmd[1] = data.length & 0xff;
+    cmd[2] = offset & 0xff;
+    cmd[3] = (offset >> 8) & 0xff;
+    cmd.set(data, 4);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    this._emitStatus('Daughter-card mem write ACKed');
   }
 
   // ---------------------------------------------------------------------------

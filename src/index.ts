@@ -15,6 +15,7 @@
  */
 
 // Core
+export { SDK_VERSION } from './version.js';
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
 
@@ -69,6 +70,7 @@ export { SensorBitmapShimmer3 } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
 export {
   OPCODES,
+  BT_FEATURE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
@@ -84,6 +86,25 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
+// EEPROM brand (advertising name) record — shared by Shimmer3/Shimmer3R over
+// BLE/BT (readDaughterCardMem) and the dock UART / USB-C (CARD_MEM)
+export {
+  BRAND_RECORD_HOST_OFFSET,
+  BRAND_RECORD_SIZE,
+  BRAND_RECORD_MAGIC,
+  BRAND_RECORD_LAYOUT_VER,
+  BRAND_BT_CLASSIC_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS_SHIMMER3,
+  BRAND_USB_PRODUCT_MAX_CHARS,
+  BRAND_USB_MANUFACTURER_MAX_CHARS,
+  BRAND_PLATFORM,
+  brandNameProblem,
+  parseBrandRecord,
+  buildBrandRecord,
+  buildBlankBrandRecord,
+} from './devices/brandRecord.js';
+export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
 // Shimmer3R SD-card file transfer (FW >= v1.01.009)
 export {
   SD_TRANSFER_OPCODES,
