@@ -17,6 +17,9 @@ import {
 import {
   downloadSdTree,
   enumerateSdTree,
+  formatSdImportStamp,
+  consensysBackupSegments,
+  CONSENSYS_UNKNOWN_DEVICE,
 } from '../../src/devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 
 const ACK = 0xff;
@@ -680,5 +683,96 @@ describe('downloadSdTree', () => {
     });
     expect(summary.filesFailed).toEqual([]);
     expect(dest.atPath('data/Trial_1/Shim-000')?.files.get('000')?.data).toEqual(asciiBytes(1200));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Consensys Backup layout
+// ---------------------------------------------------------------------------
+
+describe('Consensys Backup layout', () => {
+  it('formats the import stamp the way Consensys names its import folders', () => {
+    // 2025-06-25 15:30:36 local — matches the observed
+    // Shimmer_Workspace/Backup/2025-06-25_15.30.36 folder
+    expect(formatSdImportStamp(new Date(2025, 5, 25, 15, 30, 36))).toBe('2025-06-25_15.30.36');
+    expect(formatSdImportStamp(new Date(2025, 0, 2, 3, 4, 5))).toBe('2025-01-02_03.04.05');
+  });
+
+  it('nests the card tree under <stamp>/<ShimmerName>, taking the name from the session folder', () => {
+    expect(
+      consensysBackupSegments(
+        ['data', 'sync_1750856068', 'Shimmer_5AA4-002'],
+        '2025-06-25_15.30.36',
+      ),
+    ).toEqual([
+      '2025-06-25_15.30.36',
+      'Shimmer_5AA4',
+      'data',
+      'sync_1750856068',
+      'Shimmer_5AA4-002',
+    ]);
+  });
+
+  it('falls back to a placeholder device folder when the session folder is not <Name>-<NNN>', () => {
+    expect(consensysBackupSegments(['data', 'oddly_named'], 'S')).toEqual([
+      'S',
+      CONSENSYS_UNKNOWN_DEVICE,
+      'data',
+      'oddly_named',
+    ]);
+  });
+
+  it('downloads into a Consensys-importable tree and reports the import stamp', async () => {
+    const card = new VirtualCard();
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/000', asciiBytes(700));
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/001', asciiBytes(120));
+    const { client } = await makeClient(card);
+    const dest = new MemDir();
+
+    const summary = await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+      layout: 'consensysBackup',
+      importStamp: '2025-06-25_15.30.36',
+      windowLen: 4096,
+    });
+
+    expect(summary.filesDownloaded).toBe(2);
+    expect(summary.importStamp).toBe('2025-06-25_15.30.36');
+
+    // Backup/<stamp>/<ShimmerName>/data/<trial>/<session>/<file>
+    const sessionDir = dest.atPath(
+      '2025-06-25_15.30.36/Shimmer_5AA4/data/sync_1750856068/Shimmer_5AA4-002',
+    );
+    expect(sessionDir).toBeDefined();
+    expect(sessionDir?.files.get('000')?.data).toEqual(asciiBytes(700));
+    expect(sessionDir?.files.get('001')?.data).toEqual(asciiBytes(120));
+
+    // The raw card mirror must NOT be created at the destination root
+    expect(dest.dirs.has('data')).toBe(false);
+  });
+
+  it('files sessions from two devices on one card under their own name folders', async () => {
+    const card = new VirtualCard();
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-000/000', asciiBytes(64));
+    card.addFile('data/sync_1750856068/Shimmer_BEEF-001/000', asciiBytes(64));
+    const { client } = await makeClient(card);
+    const dest = new MemDir();
+
+    await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+      layout: 'consensysBackup',
+      importStamp: 'STAMP',
+    });
+
+    expect(Array.from(dest.atPath('STAMP')?.dirs.keys() ?? []).sort()).toEqual([
+      'Shimmer_5AA4',
+      'Shimmer_BEEF',
+    ]);
+  });
+
+  it('still mirrors the card layout by default', async () => {
+    const { client } = await makeClient(makeCard());
+    const dest = new MemDir();
+    const summary = await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {});
+    expect(summary.importStamp).toBeUndefined();
+    expect(dest.dirs.has('data')).toBe(true);
   });
 });

@@ -10,6 +10,7 @@
 import type { Shimmer3RClient } from '../Shimmer3RClient.js';
 import { ensureDirectoryPath } from '../../verisense/protocolDataFlow.js';
 import { toArrayBuffer } from '../../../core/arrayBuffer.js';
+import { parseSdSessionName } from '../../sdlog/naming.js';
 import {
   SD_XFER,
   SdTransferError,
@@ -17,6 +18,55 @@ import {
   SD_BLOCK_PAYLOAD_DEFAULT,
   type SdDirEntry,
 } from './protocol.js';
+
+/**
+ * Where the downloaded files are placed under the destination folder.
+ *
+ * - `card` mirrors the on-card tree as-is:
+ *   `data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
+ * - `consensysBackup` nests that same tree under the two levels Consensys
+ *   expects inside its workspace `Backup` folder:
+ *   `<import-stamp>/<ShimmerName>/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
+ *   so the download can be imported via
+ *   *Application Settings -> Manage Data -> Import Data From Backup Directory*.
+ */
+export type SdDestinationLayout = 'card' | 'consensysBackup';
+
+/** Device-name folder used when a session folder is not `<Name>-<NNN>`. */
+export const CONSENSYS_UNKNOWN_DEVICE = 'Unknown_Shimmer';
+
+/**
+ * Format an import-time folder name as Consensys does: `yyyy-MM-dd_HH.mm.ss`
+ * in local time (e.g. `2025-06-25_15.30.36`).
+ */
+export function formatSdImportStamp(date: Date = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}` +
+    `_${p(date.getHours())}.${p(date.getMinutes())}.${p(date.getSeconds())}`
+  );
+}
+
+/**
+ * Map a card directory chain to its Consensys Backup destination.
+ *
+ * The device name is taken from the session folder (`<ShimmerName>-<NNN>`)
+ * rather than from the connected device, so sessions recorded under a previous
+ * device name - or on a card that has been moved between devices - still file
+ * under the name they were recorded with, which is what Consensys shows.
+ */
+export function consensysBackupSegments(cardDirSegments: string[], importStamp: string): string[] {
+  let shimmerName = CONSENSYS_UNKNOWN_DEVICE;
+  const sessionDir = cardDirSegments[cardDirSegments.length - 1];
+  if (sessionDir) {
+    try {
+      shimmerName = parseSdSessionName(sessionDir).shimmerName;
+    } catch {
+      /* not a <ShimmerName>-<NNN> folder - fall back to the placeholder */
+    }
+  }
+  return [importStamp, shimmerName, ...cardDirSegments];
+}
 
 export interface SdRemoteFile {
   /** Full on-card path, e.g. `data/DefaultTrial_123/Shimmer_ABCD-000/000`. */
@@ -67,11 +117,20 @@ export interface DownloadSdTreeOptions {
   maxRetriesPerFile?: number;
   /** Per-window stall watchdog passed to sdReadFileWindow. @default 6000 */
   stallTimeoutMs?: number;
+  /** Destination folder layout. @default 'card' */
+  layout?: SdDestinationLayout;
+  /**
+   * Import-time folder name for `consensysBackup` (one per download run).
+   * Defaults to the current local time via {@link formatSdImportStamp}.
+   */
+  importStamp?: string;
   signal?: AbortSignal;
   onProgress?: (p: SdTransferProgress) => void;
 }
 
 export interface SdTransferSummary {
+  /** Import folder used for `consensysBackup`; undefined for `card`. */
+  importStamp?: string;
   filesDownloaded: number;
   filesSkipped: number;
   filesFailed: { path: string; error: string }[];
@@ -130,8 +189,11 @@ export async function downloadSdTree(
   const resume = opts.resume ?? true;
   const skipExisting = opts.skipExisting ?? true;
   const maxRetriesPerFile = opts.maxRetriesPerFile ?? 3;
+  const layout = opts.layout ?? 'card';
+  const importStamp = opts.importStamp ?? formatSdImportStamp();
 
   const summary: SdTransferSummary = {
+    importStamp: layout === 'consensysBackup' ? importStamp : undefined,
     filesDownloaded: 0,
     filesSkipped: 0,
     filesFailed: [],
@@ -169,7 +231,9 @@ export async function downloadSdTree(
     const name = segments.pop() as string;
 
     try {
-      const dir = await ensureDirectoryPath(destRoot, segments);
+      const destSegments =
+        layout === 'consensysBackup' ? consensysBackupSegments(segments, importStamp) : segments;
+      const dir = await ensureDirectoryPath(destRoot, destSegments);
       const handle = await dir.getFileHandle(name, { create: true });
       const existingSize = (await handle.getFile()).size;
 

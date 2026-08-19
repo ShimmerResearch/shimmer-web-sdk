@@ -128,8 +128,12 @@ export {
   enumerateSdTree,
   downloadSdTree,
   deleteDownloadedFromCard,
+  formatSdImportStamp,
+  consensysBackupSegments,
+  CONSENSYS_UNKNOWN_DEVICE,
 } from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 export type {
+  SdDestinationLayout,
   SdRemoteFile,
   SdRemoteTree,
   SdTransferProgress,
