@@ -15,6 +15,7 @@
  */
 
 // Core
+export { SDK_VERSION } from './version.js';
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
 
