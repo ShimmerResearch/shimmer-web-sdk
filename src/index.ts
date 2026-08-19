@@ -70,6 +70,7 @@ export { SensorBitmapShimmer3 } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
 export {
   OPCODES,
+  BT_FEATURE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
@@ -95,7 +96,8 @@ export {
   BRAND_BT_CLASSIC_MAX_CHARS,
   BRAND_BLE_MAX_CHARS,
   BRAND_BLE_MAX_CHARS_SHIMMER3,
-  BRAND_USB_MAX_CHARS,
+  BRAND_USB_PRODUCT_MAX_CHARS,
+  BRAND_USB_MANUFACTURER_MAX_CHARS,
   BRAND_PLATFORM,
   brandNameProblem,
   parseBrandRecord,

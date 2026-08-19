@@ -2,6 +2,25 @@
  * Shimmer3R BLE protocol opcodes.
  * Values taken directly from the Shimmer3 firmware header.
  */
+/**
+ * Feature ids for the SET_FEATURE (0xB7) command: `[0xB7][featureId][value]`.
+ * Mirrors the FEATURE_* enum in log-and-stream-common
+ * `Comms/shimmer_bt_uart.h`.
+ */
+export const BT_FEATURE = Object.freeze({
+  NONE: 0,
+  /** Shimmer3 RN4678 error LEDs. */
+  RN4678_ERROR_LEDS: 1,
+  /**
+   * Arm a one-shot soft reboot that fires when the host disconnects. Lets a
+   * host apply settings only read at boot (e.g. the EEPROM brand record's
+   * advertising names) without the user power-cycling the device. Firmware
+   * skips the reboot while sensing, so an armed request can never truncate an
+   * active SD recording.
+   */
+  REBOOT_ON_DISCONNECT: 2,
+} as const);
+
 export const OPCODES = Object.freeze({
   DATA_PACKET: 0x00,
   INQUIRY_COMMAND: 0x01,

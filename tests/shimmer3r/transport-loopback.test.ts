@@ -212,8 +212,8 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
 });
 
 describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
-  // Brand record host offset 1952 = 0x07a0 little-endian → addrLSB 0xa0, addrMSB 0x07.
-  const OFFSET = 1952;
+  // Brand record host offset 1936 = 0x0790 little-endian → addrLSB 0x90, addrMSB 0x07.
+  const OFFSET = 1936;
 
   it('readDaughterCardMem sends [cmd, len, offLSB, offMSB] and parses a piggybacked response', async () => {
     const payload = Array.from({ length: 8 }, (_, i) => 0x40 + i);
@@ -235,7 +235,7 @@ describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
     expect(Array.from(cmd!.bytes)).toEqual([
       OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
       payload.length,
-      0xa0,
+      0x90,
       0x07,
     ]);
   });
@@ -272,7 +272,7 @@ describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
     expect(Array.from(cmd!.bytes)).toEqual([
       OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND,
       data.length,
-      0xa0,
+      0x90,
       0x07,
       ...data,
     ]);
@@ -297,13 +297,13 @@ describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
 
 describe('Shimmer3RClient fragmented BLE responses', () => {
   /**
-   * Regression: a 64-byte brand-record read returned only 40 bytes on real
-   * hardware. One BLE notification carries a single ATT payload (~42 bytes at
-   * the CYW20820's negotiated MTU), so the response arrives split and the
+   * Regression: an 80-byte brand-record read returned only a partial record on
+   * real hardware. One BLE notification carries a single ATT payload (~42 bytes
+   * at the CYW20820's negotiated MTU), so the response arrives split and the
    * client must reassemble it rather than trusting the first chunk.
    */
-  it('readDaughterCardMem reassembles a 64-byte record split across notifications', async () => {
-    const record = Array.from({ length: 64 }, (_, i) => i);
+  it('readDaughterCardMem reassembles an 80-byte record split across notifications', async () => {
+    const record = Array.from({ length: 80 }, (_, i) => i);
     const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
     // Split at 42 bytes — the fragment size observed on hardware.
     const t = new LoopbackTransport();
@@ -315,12 +315,12 @@ describe('Shimmer3RClient fragmented BLE responses', () => {
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
 
-    const data = await client.readDaughterCardMem(1952, 64);
+    const data = await client.readDaughterCardMem(1936, 80);
     expect(Array.from(data)).toEqual(record);
   });
 
   it('readDaughterCardMem reassembles a record dribbled one byte per notification', async () => {
-    const record = Array.from({ length: 64 }, (_, i) => 0xc0 ^ i);
+    const record = Array.from({ length: 80 }, (_, i) => 0xc0 ^ i);
     const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
@@ -334,12 +334,12 @@ describe('Shimmer3RClient fragmented BLE responses', () => {
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
 
-    const data = await client.readDaughterCardMem(0, 64);
+    const data = await client.readDaughterCardMem(0, 80);
     expect(Array.from(data)).toEqual(record);
   });
 
   it('reports how many bytes arrived when a fragmented response never completes', async () => {
-    const record = Array.from({ length: 64 }, (_, i) => i);
+    const record = Array.from({ length: 80 }, (_, i) => i);
     const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
@@ -351,7 +351,7 @@ describe('Shimmer3RClient fragmented BLE responses', () => {
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
 
-    await expect(client.readDaughterCardMem(1952, 64)).rejects.toThrow(/39 of 64 bytes/);
+    await expect(client.readDaughterCardMem(1936, 80)).rejects.toThrow(/39 of 80 bytes/);
   });
 
   it('readInfoMem also reassembles a fragmented long read', async () => {

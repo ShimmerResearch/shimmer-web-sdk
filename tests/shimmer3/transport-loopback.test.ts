@@ -446,8 +446,8 @@ describe('Shimmer3Client drain quiescence timing (fake timers)', () => {
 
 describe('Shimmer3Client daughter-card memory', () => {
   const DCMEM_RSP = OPCODES.DAUGHTER_CARD_MEM_RESPONSE;
-  // Brand record host offset 1952 = 0x07a0 little-endian → offLSB 0xa0, offMSB 0x07.
-  const OFFSET = 1952;
+  // Brand record host offset 1936 = 0x0790 little-endian → offLSB 0x90, offMSB 0x07.
+  const OFFSET = 1936;
 
   it('readDaughterCardMem sends [cmd, len, offLSB, offMSB] and parses the response', async () => {
     const payload = [0x42, 0x53, 0x01, 0x02, 0x08, 0x05];
@@ -466,7 +466,7 @@ describe('Shimmer3Client daughter-card memory', () => {
     expect(Array.from(cmd!.bytes)).toEqual([
       OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
       payload.length,
-      0xa0,
+      0x90,
       0x07,
     ]);
   });
@@ -496,7 +496,7 @@ describe('Shimmer3Client daughter-card memory', () => {
     expect(Array.from(cmd!.bytes)).toEqual([
       OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND,
       data.length,
-      0xa0,
+      0x90,
       0x07,
       ...data,
     ]);

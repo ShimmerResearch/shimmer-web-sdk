@@ -305,8 +305,8 @@ describe('WiredShimmerClient command serialization (ACK correlation)', () => {
 });
 
 describe('WiredShimmerClient daughter-card memory (CARD_MEM)', () => {
-  // Brand record host offset 1952 = 0x07a0 → addr bytes [0xa0, 0x07] (little-endian).
-  const OFFSET = 1952;
+  // Brand record host offset 1936 = 0x0790 → addr bytes [0x90, 0x07] (little-endian).
+  const OFFSET = 1936;
   const CARD_MEM = UART_PROP.DAUGHTER_CARD.CARD_MEM;
 
   /** Script a dock that answers CARD_MEM READs with `stored` and ACKs WRITEs. */
@@ -346,7 +346,7 @@ describe('WiredShimmerClient daughter-card memory (CARD_MEM)', () => {
           p.property === CARD_MEM.property,
       );
     expect(readPkt).toBeTruthy();
-    expect(Array.from(readPkt!.payload!)).toEqual([stored.length, 0xa0, 0x07]);
+    expect(Array.from(readPkt!.payload!)).toEqual([stored.length, 0x90, 0x07]);
   });
 
   it('writeDaughterCardMem sends WRITE [size, addrLo, addrHi, data...] and resolves on ACK', async () => {
@@ -357,7 +357,7 @@ describe('WiredShimmerClient daughter-card memory (CARD_MEM)', () => {
     await client.writeDaughterCardMem(OFFSET, data);
 
     expect(seen.writes.length).toBe(1);
-    expect(Array.from(seen.writes[0])).toEqual([data.length, 0xa0, 0x07, ...Array.from(data)]);
+    expect(Array.from(seen.writes[0])).toEqual([data.length, 0x90, 0x07, ...Array.from(data)]);
   });
 
   it('rejects out-of-range addresses/sizes before writing', async () => {
