@@ -84,6 +84,66 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
+// Shimmer3R SD-card file transfer (FW >= v1.01.009)
+export {
+  SD_TRANSFER_OPCODES,
+  SD_STATUS,
+  SD_XFER,
+  SD_ATTR_DIR,
+  SD_ATTR_NAME_TRUNCATED,
+  SD_MAX_PATH_LEN,
+  SD_BLOCK_PAYLOAD_MIN,
+  SD_BLOCK_PAYLOAD_MAX,
+  SD_BLOCK_PAYLOAD_DEFAULT,
+  SdTransferError,
+  sdStatusToString,
+  sdXferStatusToString,
+  sdCrc16,
+  fatDateTimeToDate,
+  encodeSdPath,
+  buildListDirCmd,
+  buildStatCmd,
+  buildDeleteCmd,
+  buildFreeSpaceCmd,
+  buildAbortCmd,
+  buildReadCmd,
+  parseListDirRsp,
+  parseStatRsp,
+  parseFreeSpaceRsp,
+  parseDeleteRsp,
+  tryExtractSdMessage,
+} from './devices/shimmer3r/sdTransfer/protocol.js';
+export type {
+  SdDirEntry,
+  SdFileStat,
+  SdCardSpace,
+  SdDataFrame,
+  SdStatusFrame,
+  SdOneShotResponse,
+  SdMessage,
+  SdListDirPage,
+  SdExtractResult,
+} from './devices/shimmer3r/sdTransfer/protocol.js';
+export {
+  enumerateSdTree,
+  downloadSdTree,
+  deleteDownloadedFromCard,
+  formatSdImportStamp,
+  consensysBackupSegments,
+  CONSENSYS_UNKNOWN_DEVICE,
+} from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
+export type {
+  SdDestinationLayout,
+  SdRemoteFile,
+  SdRemoteTree,
+  SdTransferProgress,
+  DownloadSdTreeOptions,
+  SdTransferSummary,
+} from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
+
+// Host-side directory-tree creation (File System Access API)
+export { ensureDirectoryPath } from './devices/verisense/protocolDataFlow.js';
+
 // Shimmer3 (classic Bluetooth / RFCOMM)
 export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
 export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';
