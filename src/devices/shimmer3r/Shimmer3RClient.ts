@@ -381,22 +381,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * sensitivity straight away. An inquiry would refresh it from the config word
    * anyway, but callers are free to set the range after their last inquiry.
    *
-   * @param range 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g.
+   * @param wrAccelRange 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g.
    */
   async setWrAccelRange(
-    range: number,
-  ): Promise<{ range: number; ackRemainder: Uint8Array | null }> {
-    if (!Number.isInteger(range) || range < 0 || range > 3) {
-      throw new Error('WR accel range must be 0-3 (±2/4/8/16 g)');
+    wrAccelRange: number,
+  ): Promise<{ wrAccelRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(wrAccelRange) || wrAccelRange < 0 || wrAccelRange > 3) {
+      throw new Error('wrAccelRange must be 0–3 (±2/4/8/16 g)');
     }
     if (!this._transport) throw new Error('Not connected (RX missing)');
 
-    const cmd = new Uint8Array([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, range & 0xff]);
+    const cmd = new Uint8Array([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, wrAccelRange & 0xff]);
     this._emitStatus('SET_WR_ACCEL_RANGE → waiting for ACK…');
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     this._emitStatus('SET_WR_ACCEL_RANGE (ACK received).');
-    this.imuRanges = { ...this.imuRanges, wrAccel: range };
-    return { range, ackRemainder };
+    this.imuRanges = { ...this.imuRanges, wrAccel: wrAccelRange };
+    return { wrAccelRange, ackRemainder };
   }
 
   /**
@@ -406,23 +406,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * Note the firmware splits this setting across two config-setup bits when it
    * reports back in an inquiry (LSB pair plus one MSB bit), but the command
-   * itself takes the full 0-5 index in one byte.
+   * itself takes the full 0–5 index in one byte.
    *
-   * @param range 0 = ±125, 1 = ±250, 2 = ±500, 3 = ±1000, 4 = ±2000,
-   *   5 = ±4000 dps. (Shimmer3 supports only 0-3: ±250/500/1000/2000 dps.)
+   * @param gyroRange 0 = ±125, 1 = ±250, 2 = ±500, 3 = ±1000, 4 = ±2000,
+   *   5 = ±4000 dps. (Shimmer3 supports only 0–3: ±250/500/1000/2000 dps.)
    */
-  async setGyroRange(range: number): Promise<{ range: number; ackRemainder: Uint8Array | null }> {
-    if (!Number.isInteger(range) || range < 0 || range > 5) {
-      throw new Error('gyro range must be 0-5 (±125/250/500/1000/2000/4000 dps)');
+  async setGyroRange(
+    gyroRange: number,
+  ): Promise<{ gyroRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(gyroRange) || gyroRange < 0 || gyroRange > 5) {
+      throw new Error('gyroRange must be 0–5 (±125/250/500/1000/2000/4000 dps)');
     }
     if (!this._transport) throw new Error('Not connected (RX missing)');
 
-    const cmd = new Uint8Array([OPCODES.SET_GYRO_RANGE_COMMAND, range & 0xff]);
+    const cmd = new Uint8Array([OPCODES.SET_GYRO_RANGE_COMMAND, gyroRange & 0xff]);
     this._emitStatus('SET_GYRO_RANGE → waiting for ACK…');
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     this._emitStatus('SET_GYRO_RANGE (ACK received).');
-    this.imuRanges = { ...this.imuRanges, gyro: range };
-    return { range, ackRemainder };
+    this.imuRanges = { ...this.imuRanges, gyro: gyroRange };
+    return { gyroRange, ackRemainder };
   }
 
   getInternalExpPower(): number {

@@ -70,7 +70,7 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     await client.connect(t);
 
     const res = await client.setWrAccelRange(1);
-    expect(res.range).toBe(1);
+    expect(res.wrAccelRange).toBe(1);
     // Streaming calibration must see the new range without waiting for an inquiry.
     expect(client.imuRanges.wrAccel).toBe(1);
 
@@ -88,7 +88,7 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     // 5 = ±4000 dps, the Shimmer3R-only range the firmware reports back through
     // the split LSB-pair + MSB-bit config field. The command is a single byte.
     const res = await client.setGyroRange(5);
-    expect(res.range).toBe(5);
+    expect(res.gyroRange).toBe(5);
     expect(client.imuRanges.gyro).toBe(5);
 
     const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_GYRO_RANGE_COMMAND);
@@ -101,12 +101,12 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
 
-    await expect(client.setWrAccelRange(4)).rejects.toThrow(/WR accel range/);
-    await expect(client.setWrAccelRange(-1)).rejects.toThrow(/WR accel range/);
-    await expect(client.setWrAccelRange(1.5)).rejects.toThrow(/WR accel range/);
-    await expect(client.setGyroRange(6)).rejects.toThrow(/gyro range/);
-    await expect(client.setGyroRange(-1)).rejects.toThrow(/gyro range/);
-    await expect(client.setGyroRange(2.5)).rejects.toThrow(/gyro range/);
+    await expect(client.setWrAccelRange(4)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setWrAccelRange(-1)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setWrAccelRange(1.5)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setGyroRange(6)).rejects.toThrow(/gyroRange/);
+    await expect(client.setGyroRange(-1)).rejects.toThrow(/gyroRange/);
+    await expect(client.setGyroRange(2.5)).rejects.toThrow(/gyroRange/);
     expect(t.writes.length).toBe(0);
     // Nothing was cached either.
     expect(client.imuRanges.wrAccel).toBe(0);
