@@ -63,6 +63,56 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     expect(client.gsrRangeSetting).toBe(2);
   });
 
+  it('setWrAccelRange sends [0x09, range] and updates the calibration range', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const res = await client.setWrAccelRange(1);
+    expect(res.range).toBe(1);
+    // Streaming calibration must see the new range without waiting for an inquiry.
+    expect(client.imuRanges.wrAccel).toBe(1);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_WR_ACCEL_RANGE_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, 1]);
+  });
+
+  it('setGyroRange sends [0x49, range] and updates the calibration range', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    // 5 = ±4000 dps, the Shimmer3R-only range the firmware reports back through
+    // the split LSB-pair + MSB-bit config field. The command is a single byte.
+    const res = await client.setGyroRange(5);
+    expect(res.range).toBe(5);
+    expect(client.imuRanges.gyro).toBe(5);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_GYRO_RANGE_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_GYRO_RANGE_COMMAND, 5]);
+  });
+
+  it('range setters reject out-of-range values before writing', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.setWrAccelRange(4)).rejects.toThrow(/WR accel range/);
+    await expect(client.setWrAccelRange(-1)).rejects.toThrow(/WR accel range/);
+    await expect(client.setWrAccelRange(1.5)).rejects.toThrow(/WR accel range/);
+    await expect(client.setGyroRange(6)).rejects.toThrow(/gyro range/);
+    await expect(client.setGyroRange(-1)).rejects.toThrow(/gyro range/);
+    await expect(client.setGyroRange(2.5)).rejects.toThrow(/gyro range/);
+    expect(t.writes.length).toBe(0);
+    // Nothing was cached either.
+    expect(client.imuRanges.wrAccel).toBe(0);
+    expect(client.imuRanges.gyro).toBe(0);
+  });
+
   it('parses an inquiry response piggybacked in the SAME chunk as its ACK (regression)', async () => {
     // The regression: Shimmer3R firmware frequently returns the ACK (0xFF) and
     // the INQUIRY_RESPONSE (0x02 ...) in a single BLE notification. The transport
