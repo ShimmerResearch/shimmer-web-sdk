@@ -294,3 +294,79 @@ describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
     expect(t.writes.length).toBe(0);
   });
 });
+
+describe('Shimmer3RClient fragmented BLE responses', () => {
+  /**
+   * Regression: a 64-byte brand-record read returned only 40 bytes on real
+   * hardware. One BLE notification carries a single ATT payload (~42 bytes at
+   * the CYW20820's negotiated MTU), so the response arrives split and the
+   * client must reassemble it rather than trusting the first chunk.
+   */
+  it('readDaughterCardMem reassembles a 64-byte record split across notifications', async () => {
+    const record = Array.from({ length: 64 }, (_, i) => i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    // Split at 42 bytes — the fragment size observed on hardware.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42), full.slice(42)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(1952, 64);
+    expect(Array.from(data)).toEqual(record);
+  });
+
+  it('readDaughterCardMem reassembles a record dribbled one byte per notification', async () => {
+    const record = Array.from({ length: 64 }, (_, i) => 0xc0 ^ i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(
+          tr,
+          full.map((b) => [b]),
+        );
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(0, 64);
+    expect(Array.from(data)).toEqual(record);
+  });
+
+  it('reports how many bytes arrived when a fragmented response never completes', async () => {
+    const record = Array.from({ length: 64 }, (_, i) => i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      // Deliver only the first fragment, then go silent.
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.readDaughterCardMem(1952, 64)).rejects.toThrow(/39 of 64 bytes/);
+  });
+
+  it('readInfoMem also reassembles a fragmented long read', async () => {
+    const payload = Array.from({ length: 100 }, (_, i) => (i * 7) & 0xff);
+    const full = [ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42), full.slice(42, 84), full.slice(84)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(0, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+  });
+});

@@ -487,6 +487,76 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * 16-bit), matching readMem()/GET_INFOMEM_COMMAND in the Shimmer Java driver.
    * @returns the raw bytes read
    */
+  /**
+   * Issue a command and read back a length-prefixed response
+   * (`[opcode][len][data...]`), reassembling it across BLE notifications.
+   *
+   * A notification carries at most one ATT payload — around 42 bytes at the
+   * MTU the CYW20820 negotiates — and the transport surfaces one notification
+   * per chunk, so any response longer than that arrives split. Firmware writes
+   * the logical response contiguously, so the fragments simply concatenate in
+   * order: accumulate until `expectedLen` data bytes have arrived instead of
+   * assuming the first chunk holds the whole response.
+   *
+   * Firmware always emits the length byte after the opcode, but its absence is
+   * tolerated (older/variant firmware) by treating the first byte as a prefix
+   * only when it equals the requested length.
+   */
+  private async _readLengthPrefixedResponse(
+    cmd: Uint8Array,
+    respOpcode: number,
+    expectedLen: number,
+    label: string,
+    ackTimeoutMs = 1500,
+    responseTimeoutMs = 2000,
+  ): Promise<Uint8Array> {
+    const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs);
+    const first =
+      remainder && remainder[0] === respOpcode
+        ? remainder
+        : await this._waitForResponse(respOpcode, responseTimeoutMs);
+
+    /* Bytes after the response opcode. */
+    let acc = first[0] === respOpcode ? first.subarray(1) : first;
+    const dataOf = (buf: Uint8Array): Uint8Array =>
+      buf.length >= 1 && buf[0] === expectedLen ? buf.subarray(1) : buf;
+
+    if (dataOf(acc).length >= expectedLen) {
+      return dataOf(acc).slice(0, expectedLen);
+    }
+
+    /* Response is fragmented — collect the continuation chunks, which carry
+     * raw payload bytes with no opcode of their own. */
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        reject(
+          new Error(
+            `${label} returned ${dataOf(acc).length} of ${expectedLen} bytes (response truncated).`,
+          ),
+        );
+      }, responseTimeoutMs);
+
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || chunk.length === 0) return;
+        /* Every chunk from here is continuation payload — deliberately NOT
+         * filtering a lone 0xFF as a stray ACK, because a payload byte can be
+         * 0xFF and dropping it would silently corrupt the record. The ACK for
+         * this command was already consumed before this handler was registered,
+         * and commands are issued one at a time, so no other ACK can arrive
+         * mid-response. */
+        acc = concatU8(acc, chunk);
+        const data = dataOf(acc);
+        if (data.length >= expectedLen) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          resolve(data.slice(0, expectedLen));
+        }
+      };
+      this._onTemp(handler);
+    });
+  }
+
   async readInfoMem(address: number, length: number): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
@@ -504,28 +574,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
       (address >> 8) & 0xff,
     ]);
 
-    const remainder = await this._writeExpectingAck(cmd, 1500);
-    const rsp =
-      remainder && remainder[0] === OPCODES.INFOMEM_RESPONSE
-        ? remainder
-        : await this._waitForResponse(OPCODES.INFOMEM_RESPONSE, 2000);
-
-    // Response is [INFOMEM_RSP][length][data...] — the opcode is guaranteed by the
-    // selection above (firmware always opcode-frames InfoMem responses, matching
-    // readMem() in the Shimmer Java driver); only the length byte is optional and
-    // is skipped when present and consistent. Deliberately NOT accepting
-    // opcode-less chunks: a raw chunk could be an unrelated notification (e.g. a
-    // 0x00-preamble data frame while streaming) and must not be mis-captured as
-    // InfoMem payload.
-    let off = 0;
-    if (rsp[off] === OPCODES.INFOMEM_RESPONSE) off++;
-    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
-
-    const data = rsp.slice(off, off + length);
-    if (data.length < length) {
-      throw new Error(`InfoMem read returned ${data.length} of ${length} bytes.`);
-    }
-    return data;
+    /* Response is [INFOMEM_RSP][length][data...]. The opcode is required (a raw
+     * opcode-less chunk could be an unrelated notification, e.g. a 0x00-preamble
+     * data frame, and must not be mis-captured as InfoMem payload); the length
+     * byte is optional. Reads longer than one BLE notification are reassembled. */
+    return this._readLengthPrefixedResponse(cmd, OPCODES.INFOMEM_RESPONSE, length, 'InfoMem read');
   }
 
   /**
@@ -550,23 +603,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
       (offset >> 8) & 0xff,
     ]);
 
-    const remainder = await this._writeExpectingAck(cmd, 1500);
-    const rsp =
-      remainder && remainder[0] === OPCODES.DAUGHTER_CARD_MEM_RESPONSE
-        ? remainder
-        : await this._waitForResponse(OPCODES.DAUGHTER_CARD_MEM_RESPONSE, 2000);
-
     /* Response is [DAUGHTER_CARD_MEM_RSP][length][data...] — same framing
-     * rationale as readInfoMem() above. */
-    let off = 0;
-    if (rsp[off] === OPCODES.DAUGHTER_CARD_MEM_RESPONSE) off++;
-    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
-
-    const data = rsp.slice(off, off + length);
-    if (data.length < length) {
-      throw new Error(`Daughter-card mem read returned ${data.length} of ${length} bytes.`);
-    }
-    return data;
+     * rationale as readInfoMem() above. The 64-byte brand record exceeds one
+     * BLE notification, so the reassembly in the helper is load-bearing here. */
+    return this._readLengthPrefixedResponse(
+      cmd,
+      OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
+      length,
+      'Daughter-card mem read',
+    );
   }
 
   /**
