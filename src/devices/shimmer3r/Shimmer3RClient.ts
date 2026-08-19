@@ -30,6 +30,30 @@ import {
   type KinematicCalibration,
 } from '../calibration/index.js';
 import { MAC_LENGTH } from '../infomem/layout.js';
+import {
+  SD_TRANSFER_OPCODES,
+  SD_STATUS,
+  SD_LIST_MAX_ENTRIES,
+  SD_BLOCK_PAYLOAD_DEFAULT,
+  SdTransferError,
+  sdStatusToString,
+  buildListDirCmd,
+  buildStatCmd,
+  buildDeleteCmd,
+  buildFreeSpaceCmd,
+  buildAbortCmd,
+  buildReadCmd,
+  parseListDirRsp,
+  parseStatRsp,
+  parseFreeSpaceRsp,
+  parseDeleteRsp,
+  tryExtractSdMessage,
+  type SdDirEntry,
+  type SdFileStat,
+  type SdCardSpace,
+  type SdDataFrame,
+  type SdStatusFrame,
+} from './sdTransfer/protocol.js';
 
 // ---------------------------------------------------------------------------
 // InfoMem constants
@@ -234,6 +258,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async connect(transport?: ShimmerTransport): Promise<void> {
     const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
     this._transport = t;
+    // The firmware's SD session counter restarts with the connection
+    this._sdKnownSession = null;
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
@@ -262,6 +288,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._streaming = false;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
+      this._sdKnownSession = null;
       this._emitStatus('Disconnected');
     }
   }
@@ -269,6 +296,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Handle an unexpected / requested transport disconnect. */
   private _handleTransportDisconnect = (): void => {
     this._streaming = false;
+    this._sdKnownSession = null;
     this._emitStatus('Device disconnected');
   };
 
@@ -373,6 +401,59 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus('SET_GSR_RANGE (ACK received).');
     this.gsrRangeSetting = gsrRange;
     return { gsrRange, ackRemainder };
+  }
+
+  /**
+   * Set the wide-range accelerometer (LIS2DW12) range.
+   *
+   * Also updates {@link imuRanges} so streaming calibration picks the matching
+   * sensitivity straight away. An inquiry would refresh it from the config word
+   * anyway, but callers are free to set the range after their last inquiry.
+   *
+   * @param wrAccelRange 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g.
+   */
+  async setWrAccelRange(
+    wrAccelRange: number,
+  ): Promise<{ wrAccelRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(wrAccelRange) || wrAccelRange < 0 || wrAccelRange > 3) {
+      throw new Error('wrAccelRange must be 0–3 (±2/4/8/16 g)');
+    }
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+
+    const cmd = new Uint8Array([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, wrAccelRange & 0xff]);
+    this._emitStatus('SET_WR_ACCEL_RANGE → waiting for ACK…');
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('SET_WR_ACCEL_RANGE (ACK received).');
+    this.imuRanges = { ...this.imuRanges, wrAccel: wrAccelRange };
+    return { wrAccelRange, ackRemainder };
+  }
+
+  /**
+   * Set the gyroscope (LSM6DSV) range.
+   *
+   * Also updates {@link imuRanges}, as {@link setWrAccelRange} does.
+   *
+   * Note the firmware splits this setting across two config-setup bits when it
+   * reports back in an inquiry (LSB pair plus one MSB bit), but the command
+   * itself takes the full 0–5 index in one byte.
+   *
+   * @param gyroRange 0 = ±125, 1 = ±250, 2 = ±500, 3 = ±1000, 4 = ±2000,
+   *   5 = ±4000 dps. (Shimmer3 supports only 0–3: ±250/500/1000/2000 dps.)
+   */
+  async setGyroRange(
+    gyroRange: number,
+  ): Promise<{ gyroRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(gyroRange) || gyroRange < 0 || gyroRange > 5) {
+      throw new Error('gyroRange must be 0–5 (±125/250/500/1000/2000/4000 dps)');
+    }
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+
+    const cmd = new Uint8Array([OPCODES.SET_GYRO_RANGE_COMMAND, gyroRange & 0xff]);
+    this._emitStatus('SET_GYRO_RANGE → waiting for ACK…');
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('SET_GYRO_RANGE (ACK received).');
+    this.imuRanges = { ...this.imuRanges, gyro: gyroRange };
+    return { gyroRange, ackRemainder };
   }
 
   getInternalExpPower(): number {
@@ -1350,5 +1431,405 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._log('temp handler error', e);
       }
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Firmware version (feature gating)
+  // ---------------------------------------------------------------------------
+
+  private _fwVersionCache: { fwId: number; major: number; minor: number; patch: number } | null =
+    null;
+
+  /** Read (and cache) the firmware version via GET_FW_VERSION_COMMAND. */
+  async readFwVersion(): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
+    if (this._fwVersionCache) return this._fwVersionCache;
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const cmd = new Uint8Array([OPCODES.GET_FW_VERSION_COMMAND]);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const rsp =
+      ackRemainder && ackRemainder[0] === OPCODES.FW_VERSION_RESPONSE
+        ? ackRemainder
+        : await this._waitForResponse(OPCODES.FW_VERSION_RESPONSE, 1500);
+    if (rsp.length < 7) throw new Error('short FW_VERSION_RESPONSE');
+    this._fwVersionCache = {
+      fwId: rsp[1] | (rsp[2] << 8),
+      major: rsp[3] | (rsp[4] << 8),
+      minor: rsp[5],
+      patch: rsp[6],
+    };
+    return this._fwVersionCache;
+  }
+
+  /**
+   * True when the connected firmware serves the SD file-transfer commands
+   * (LogAndStream_Shimmer3R >= v1.01.009). Older firmware silently ignores
+   * unknown opcodes, so version gating is the only reliable probe.
+   */
+  async supportsSdTransfer(): Promise<boolean> {
+    try {
+      const v = await this.readFwVersion();
+      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_001_009;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Measure raw BLE link throughput with the firmware's data-rate test
+   * (SET_DATA_RATE_TEST): the device free-runs 5-byte counter packets as
+   * fast as the link drains them and we count notification bytes for
+   * `durationMs`. This measures the pipe itself (connection interval, MTU,
+   * module buffering) independent of the SD/file-transfer protocol, so it
+   * gives an upper bound for transfer rates on a given host/adapter/OS.
+   * The device must be idle (the firmware NACKs the test while sensing).
+   */
+  async runDataRateTest(
+    durationMs = 5000,
+    onProgress?: (bytesSoFar: number, elapsedMs: number) => void,
+  ): Promise<{ bytesReceived: number; durationMs: number; kBps: number }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Data-rate test unavailable while streaming');
+
+    let counting = false;
+    let bytes = 0;
+    const counter = (chunk: Uint8Array): void => {
+      if (counting) bytes += chunk.length;
+    };
+    this._onTemp(counter);
+    try {
+      await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
+      const startedAt = Date.now();
+      counting = true;
+      let elapsed = 0;
+      while (elapsed < durationMs) {
+        await new Promise((r) => setTimeout(r, Math.min(250, durationMs - elapsed)));
+        elapsed = Date.now() - startedAt;
+        onProgress?.(bytes, elapsed);
+      }
+      counting = false;
+      const measuredMs = Date.now() - startedAt;
+      return {
+        bytesReceived: bytes,
+        durationMs: measuredMs,
+        kBps: measuredMs > 0 ? bytes / 1024 / (measuredMs / 1000) : 0,
+      };
+    } finally {
+      this._offTemp(counter);
+      try {
+        await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000);
+      } catch {
+        /* the stop ACK can be indistinguishable from residual test bytes */
+      }
+      // Drop any test bytes that were mistaken for stream data
+      this._rxBuf = new Uint8Array(0);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SD-card file transfer (FW >= v1.01.009)
+  //
+  // A dedicated, self-resynchronising RX pipeline: while any SD operation is
+  // active, a persistent temp handler accumulates notification chunks and
+  // extracts length-delimited SD messages from them (multi-notification
+  // reassembly). Unknown bytes are skipped one at a time so interleaved
+  // traffic (e.g. unsolicited instream status responses) cannot jam it.
+  // ---------------------------------------------------------------------------
+
+  private _sdRx: Uint8Array = new Uint8Array(0);
+  private _sdUsers = 0;
+  private _sdHandlerAttached = false;
+  private _sdExpect: { opcode: number; resolve: (body: Uint8Array) => void } | null = null;
+  private _sdFrameListener: ((frame: SdDataFrame | SdStatusFrame) => void) | null = null;
+  private _sdCrcErrorListener: (() => void) | null = null;
+  private _sdKnownSession: number | null = null;
+
+  private _sdAcquire(): void {
+    this._sdUsers++;
+    if (!this._sdHandlerAttached) {
+      this._onTemp(this._sdChunkHandler);
+      this._sdHandlerAttached = true;
+    }
+  }
+
+  private _sdRelease(): void {
+    this._sdUsers = Math.max(0, this._sdUsers - 1);
+    if (this._sdUsers === 0 && this._sdHandlerAttached) {
+      this._offTemp(this._sdChunkHandler);
+      this._sdHandlerAttached = false;
+      this._sdRx = new Uint8Array(0);
+    }
+  }
+
+  private _sdChunkHandler = (chunk: Uint8Array): void => {
+    // Lone ACKs are consumed by the command flow, not the SD pipeline
+    if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) return;
+    this._sdRx = concatU8(this._sdRx, chunk);
+    for (;;) {
+      const r = tryExtractSdMessage(this._sdRx);
+      if (r.crcError) {
+        try {
+          this._sdCrcErrorListener?.();
+        } catch (e) {
+          this._log('sd crc listener error', e);
+        }
+      }
+      if (r.consumed === 0) break;
+      this._sdRx = this._sdRx.slice(r.consumed);
+      const m = r.msg;
+      if (!m) continue;
+      if (m.kind === 'oneshot') {
+        if (this._sdExpect && m.opcode === this._sdExpect.opcode) {
+          const e = this._sdExpect;
+          this._sdExpect = null;
+          e.resolve(m.body);
+        }
+      } else {
+        try {
+          this._sdFrameListener?.(m);
+        } catch (e) {
+          this._log('sd frame listener error', e);
+        }
+      }
+    }
+  };
+
+  /** Send an SD command and await its reassembled one-shot response. */
+  private async _sdCommand(
+    cmd: Uint8Array,
+    rspOpcode: number,
+    timeoutMs = 5000,
+  ): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) {
+      throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
+    }
+    if (this._sdExpect) {
+      // A shared expectation slot: concurrent SD commands would race on it,
+      // so refuse deterministically — callers are expected to sequence
+      throw new SdTransferError('another SD command is already in flight', SD_STATUS.BUSY);
+    }
+    this._sdAcquire();
+    try {
+      return await new Promise<Uint8Array>((resolve, reject) => {
+        const t = setTimeout(() => {
+          this._sdExpect = null;
+          reject(new Error(`SD response 0x${rspOpcode.toString(16)} timeout`));
+        }, timeoutMs);
+        this._sdExpect = {
+          opcode: rspOpcode,
+          resolve: (b) => {
+            clearTimeout(t);
+            resolve(b);
+          },
+        };
+        this._writeExpectingAck(cmd, timeoutMs)
+          .then((ackRemainder) => {
+            // When the ACK and the response share a notification the command
+            // flow consumes the remainder — feed it back into the SD pipeline
+            if (ackRemainder && ackRemainder.length) this._sdChunkHandler(ackRemainder);
+          })
+          .catch((e) => {
+            clearTimeout(t);
+            this._sdExpect = null;
+            reject(e);
+          });
+      });
+    } finally {
+      this._sdRelease();
+    }
+  }
+
+  /**
+   * List a directory on the SD card, transparently following the firmware's
+   * startIdx paging. Path example: `'data'` or
+   * `'data/DefaultTrial_123/Shimmer_ABCD-000'`.
+   */
+  async sdListDir(path: string, opts: { maxEntriesPerPage?: number } = {}): Promise<SdDirEntry[]> {
+    const entries: SdDirEntry[] = [];
+    let startIdx = 0;
+    for (;;) {
+      const body = await this._sdCommand(
+        buildListDirCmd(path, startIdx, opts.maxEntriesPerPage ?? SD_LIST_MAX_ENTRIES),
+        SD_TRANSFER_OPCODES.LIST_DIR_RESPONSE,
+      );
+      const page = parseListDirRsp(body);
+      if (page.status !== SD_STATUS.OK) {
+        throw new SdTransferError(`list '${path}': ${sdStatusToString(page.status)}`, page.status);
+      }
+      entries.push(...page.entries);
+      if (!page.hasMore) return entries;
+      if (page.entries.length === 0) {
+        throw new Error(`list '${path}': paging made no progress at index ${startIdx}`);
+      }
+      startIdx += page.entries.length;
+    }
+  }
+
+  /** Stat one file or directory on the SD card. */
+  async sdStatFile(path: string): Promise<SdFileStat> {
+    const body = await this._sdCommand(buildStatCmd(path), SD_TRANSFER_OPCODES.FILE_STAT_RESPONSE);
+    const { status, stat } = parseStatRsp(body);
+    if (status !== SD_STATUS.OK) {
+      throw new SdTransferError(`stat '${path}': ${sdStatusToString(status)}`, status);
+    }
+    return stat;
+  }
+
+  /** Query free/total space on the SD card (in KB). */
+  async sdGetFreeSpace(): Promise<SdCardSpace> {
+    // First call on a large FAT32 card can scan the FAT — allow extra time
+    const body = await this._sdCommand(
+      buildFreeSpaceCmd(),
+      SD_TRANSFER_OPCODES.FREE_SPACE_RESPONSE,
+      15000,
+    );
+    const { status, space } = parseFreeSpaceRsp(body);
+    if (status !== SD_STATUS.OK) {
+      throw new SdTransferError(`free space: ${sdStatusToString(status)}`, status);
+    }
+    return space;
+  }
+
+  /**
+   * Delete one file (or empty directory) on the SD card. The firmware only
+   * permits paths strictly under `data/`.
+   */
+  async sdDeletePath(path: string): Promise<void> {
+    const body = await this._sdCommand(buildDeleteCmd(path), SD_TRANSFER_OPCODES.DELETE_RESPONSE);
+    const { status } = parseDeleteRsp(body);
+    if (status !== SD_STATUS.OK) {
+      throw new SdTransferError(`delete '${path}': ${sdStatusToString(status)}`, status);
+    }
+  }
+
+  /** Ask the firmware to abandon the in-flight read window, if any. */
+  async sdAbortTransfer(): Promise<void> {
+    if (!this._transport) return;
+    await this._writeExpectingAck(buildAbortCmd(), 2000);
+  }
+
+  /**
+   * Read one window of a file. The firmware streams the window as CRC'd
+   * blocks; `onBlock` is invoked for each verified block in order. Resolves
+   * with the closing status frame. Rejects on stall, CRC failure or sequence
+   * gap — the caller re-requests from its last good offset (the firmware is
+   * stateless, so a fresh window is always a valid resume).
+   */
+  async sdReadFileWindow(
+    path: string,
+    offset: number,
+    windowLen: number,
+    opts: {
+      blockPayloadLen?: number;
+      stallTimeoutMs?: number;
+      signal?: AbortSignal;
+      onBlock?: (payload: Uint8Array, absOffset: number) => void;
+    } = {},
+  ): Promise<{ status: number; nextOffset: number; bytesReceived: number }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) {
+      throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
+    }
+    if (this._sdFrameListener) {
+      // The frame/CRC listeners are single-slot instance fields, so a second
+      // overlapping window would hijack the first one's frames. Refuse
+      // deterministically; the firmware serves one window at a time anyway.
+      throw new SdTransferError('another SD read window is already in flight', SD_STATUS.BUSY);
+    }
+    const blockLen = opts.blockPayloadLen ?? SD_BLOCK_PAYLOAD_DEFAULT;
+    const stallTimeoutMs = opts.stallTimeoutMs ?? 6000;
+
+    this._sdAcquire();
+    try {
+      return await new Promise((resolve, reject) => {
+        let session: number | null = null;
+        let expectedSeq = 0;
+        let bytesReceived = 0;
+        let stallTimer: ReturnType<typeof setTimeout> | null = null;
+        let settled = false;
+
+        const cleanup = (): void => {
+          if (stallTimer) clearTimeout(stallTimer);
+          this._sdFrameListener = null;
+          this._sdCrcErrorListener = null;
+          opts.signal?.removeEventListener('abort', onAbort);
+        };
+        const fail = (err: Error): void => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(err);
+        };
+        const succeed = (status: number, nextOffset: number): void => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve({ status, nextOffset, bytesReceived });
+        };
+        const kickStall = (): void => {
+          if (stallTimer) clearTimeout(stallTimer);
+          stallTimer = setTimeout(
+            () => fail(new Error(`SD read stalled (no frames for ${stallTimeoutMs} ms)`)),
+            stallTimeoutMs,
+          );
+        };
+        const onAbort = (): void => {
+          void this.sdAbortTransfer().catch(() => {});
+          fail(new DOMException('SD read aborted', 'AbortError'));
+        };
+
+        this._sdCrcErrorListener = () => fail(new Error('SD data frame failed CRC check'));
+        this._sdFrameListener = (frame) => {
+          // Adopt the first session id that is not a leftover of the
+          // previous window (late data frames or a SUPERSEDED/closing status
+          // still draining from the firmware's TX ring). The tracker resets
+          // on connect/disconnect; the residual 1-in-256 wrap collision
+          // (new window randomly assigned the previous id) is recovered by
+          // the stall watchdog + the caller's re-read retry, which advances
+          // the firmware's session counter.
+          if (session === null) {
+            if (this._sdKnownSession !== null && frame.sessionId === this._sdKnownSession) return;
+            session = frame.sessionId;
+            this._sdKnownSession = frame.sessionId;
+          }
+          if (frame.sessionId !== session) return;
+          kickStall();
+          if (frame.kind === 'data') {
+            if (frame.seq !== expectedSeq) {
+              fail(new Error(`SD block sequence gap (expected ${expectedSeq}, got ${frame.seq})`));
+              return;
+            }
+            expectedSeq++;
+            try {
+              opts.onBlock?.(frame.payload, offset + bytesReceived);
+            } catch (e) {
+              fail(e instanceof Error ? e : new Error(String(e)));
+              return;
+            }
+            bytesReceived += frame.payload.length;
+          } else {
+            succeed(frame.status, frame.nextOffset);
+          }
+        };
+
+        if (opts.signal) {
+          if (opts.signal.aborted) {
+            onAbort();
+            return;
+          }
+          opts.signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        kickStall();
+        this._writeExpectingAck(buildReadCmd(path, offset, windowLen, blockLen), 3000)
+          .then((ackRemainder) => {
+            // The ACK can coalesce with the first data frame in one notification
+            if (ackRemainder && ackRemainder.length) this._sdChunkHandler(ackRemainder);
+          })
+          .catch((e) => fail(e instanceof Error ? e : new Error(String(e))));
+      });
+    } finally {
+      this._sdRelease();
+    }
   }
 }
