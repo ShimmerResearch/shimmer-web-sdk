@@ -20,18 +20,18 @@ describe('brandRecord', () => {
 
   it('round-trips a customer brand', () => {
     const bytes = buildBrandRecord({
-      btClassic: 'OUTPUT',
-      ble: 'OUTPUT',
-      usb: 'OUTPUT Sports',
+      btClassic: 'Acme',
+      ble: 'Acme',
+      usb: 'Acme Health',
       customerBranded: true,
     });
     expect(bytes.length).toBe(BRAND_RECORD_SIZE);
     const rec = parseBrandRecord(bytes);
     expect(rec.valid).toBe(true);
     expect(rec.invalidReason).toBeUndefined();
-    expect(rec.btClassic).toBe('OUTPUT');
-    expect(rec.ble).toBe('OUTPUT');
-    expect(rec.usb).toBe('OUTPUT Sports');
+    expect(rec.btClassic).toBe('Acme');
+    expect(rec.ble).toBe('Acme');
+    expect(rec.usb).toBe('Acme Health');
     expect(rec.customerBranded).toBe(true);
     expect(rec.seededPlatform).toBe(BRAND_PLATFORM.UNKNOWN);
   });
