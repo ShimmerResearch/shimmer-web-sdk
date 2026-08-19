@@ -543,6 +543,74 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Daughter-card (expansion board) EEPROM memory
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read from the daughter-card EEPROM memory. `offset` is a HOST offset —
+   * firmware maps it past the first (HW details) EEPROM page, so host offsets
+   * 0..2031 cover absolute EEPROM bytes 16..2047.
+   */
+  async readDaughterCardMem(offset: number, length: number): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
+    }
+    if (!Number.isInteger(length) || length < 1 || length > 128 || offset + length > 2032) {
+      throw new Error('Daughter-card mem read must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`GET_DAUGHTER_CARD_MEM ${length}B @ ${offset} → waiting for RSP…`);
+    const cmd = new Uint8Array([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      length & 0xff,
+      offset & 0xff,
+      (offset >> 8) & 0xff,
+    ]);
+    await this._write(cmd);
+    const rsp = await this._waitForResponse(
+      OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
+      SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    );
+
+    /* Response is [DAUGHTER_CARD_MEM_RSP][length][data...]; the opcode and
+     * length bytes are skipped when present and consistent. */
+    let off = 0;
+    if (rsp[off] === OPCODES.DAUGHTER_CARD_MEM_RESPONSE) off++;
+    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
+
+    const data = rsp.slice(off, off + length);
+    if (data.length < length) {
+      throw new Error(`Daughter-card mem read returned ${data.length} of ${length} bytes.`);
+    }
+    return data;
+  }
+
+  /**
+   * Write to the daughter-card EEPROM memory. `offset` is a HOST offset (see
+   * {@link readDaughterCardMem}). Max 128 bytes per write.
+   */
+  async writeDaughterCardMem(offset: number, data: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
+      throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
+    }
+    if (data.length < 1 || data.length > 128 || offset + data.length > 2032) {
+      throw new Error('Daughter-card mem write must be 1..128 bytes within 0..2031.');
+    }
+
+    this._emitStatus(`SET_DAUGHTER_CARD_MEM ${data.length}B @ ${offset} → waiting for ACK…`);
+    const cmd = new Uint8Array(4 + data.length);
+    cmd[0] = OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND;
+    cmd[1] = data.length & 0xff;
+    cmd[2] = offset & 0xff;
+    cmd[3] = (offset >> 8) & 0xff;
+    cmd.set(data, 4);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    this._emitStatus('Daughter-card mem write ACKed');
+  }
+
+  // ---------------------------------------------------------------------------
   // Streaming
   // ---------------------------------------------------------------------------
 

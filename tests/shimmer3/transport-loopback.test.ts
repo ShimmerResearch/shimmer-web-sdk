@@ -443,3 +443,85 @@ describe('Shimmer3Client drain quiescence timing (fake timers)', () => {
     }
   });
 });
+
+describe('Shimmer3Client daughter-card memory', () => {
+  const DCMEM_RSP = OPCODES.DAUGHTER_CARD_MEM_RESPONSE;
+  // Brand record host offset 1952 = 0x07a0 little-endian → offLSB 0xa0, offMSB 0x07.
+  const OFFSET = 1952;
+
+  it('readDaughterCardMem sends [cmd, len, offLSB, offMSB] and parses the response', async () => {
+    const payload = [0x42, 0x53, 0x01, 0x02, 0x08, 0x05];
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        setTimeout(() => tr.notify([ACK, DCMEM_RSP, payload.length, ...payload]), 0);
+      }
+    });
+
+    const data = await client.readDaughterCardMem(OFFSET, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      payload.length,
+      0xa0,
+      0x07,
+    ]);
+  });
+
+  it('readDaughterCardMem survives 1-byte RFCOMM dribble of the response', async () => {
+    const payload = [0x11, 0x22, 0x33, 0x44];
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        dribble(tr, [ACK, DCMEM_RSP, payload.length, ...payload]);
+      }
+    });
+
+    const data = await client.readDaughterCardMem(0, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+  });
+
+  it('writeDaughterCardMem sends [cmd, len, offLSB, offMSB, data...] and resolves on ACK', async () => {
+    const data = [0xde, 0xad, 0xbe, 0xef];
+    const { t, client } = await connected();
+    t.setOnWrite((_bytes, tr) => setTimeout(() => tr.notify([ACK]), 0));
+
+    await client.writeDaughterCardMem(OFFSET, Uint8Array.from(data));
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND,
+      data.length,
+      0xa0,
+      0x07,
+      ...data,
+    ]);
+  });
+
+  it('writeDaughterCardMem rejects on NACK', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND) {
+        setTimeout(() => tr.notify([NACK]), 0);
+      }
+    });
+
+    await expect(client.writeDaughterCardMem(0, Uint8Array.of(1, 2))).rejects.toThrow(/NACK/);
+  });
+
+  it('rejects out-of-range offsets/lengths before writing', async () => {
+    const { t, client } = await connected();
+    const writesBefore = t.writes.length;
+
+    await expect(client.readDaughterCardMem(-1, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(2032, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(0, 129)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readDaughterCardMem(2000, 64)).rejects.toThrow(/1\.\.128/);
+    await expect(client.writeDaughterCardMem(0, new Uint8Array(0))).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(writesBefore);
+  });
+});
