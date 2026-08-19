@@ -14,32 +14,41 @@
  * Reachable over BLE/BT via GET/SET_DAUGHTER_CARD_MEM and over the dock UART /
  * USB-C via `UART_PROP.DAUGHTER_CARD.CARD_MEM` — both take host offsets.
  *
- * Layout (all multi-byte fields little-endian, name fields NOT NUL-terminated):
+ * Layout v2 (all multi-byte fields little-endian, names NOT NUL-terminated):
  * ```
  * offset  size  field
  *      0     2  magic 0x5342 ("SB": bytes 0x42,0x53 on the wire)
- *      2     1  layoutVer (1)
- *      3     1  flags: bit0 customerBranded, bits1-2 seededPlatform
- *      4     1  btClassicLen        5     1  bleLen        6     1  usbLen
- *      7    16  btClassic (Classic BT name prefix)
- *     23    10  ble       (BLE name prefix)
- *     33    16  usb       (USB product prefix / manufacturer)
- *     49    13  padding (zero)
- *     62     2  CRC over bytes 0..61 — Shimmer UART CRC, LSB first
+ *      2     1  layoutVer (2)
+ *      3     1  flags: bit0 reserved, bits1-2 seededPlatform
+ *      4     1  btClassicLen        5     1  bleLen
+ *      6     1  usbProductLen       7     1  usbManufacturerLen
+ *      8    16  btClassic       (Classic BT name prefix)
+ *     24    10  ble             (BLE name prefix)
+ *     34    16  usbProduct      (USB product prefix)
+ *     50    24  usbManufacturer (USB iManufacturer string)
+ *     74     4  padding (zero)
+ *     78     2  CRC over bytes 0..77 — Shimmer UART CRC, LSB first
  * ```
+ *
+ * The stock record carries the factory USB manufacturer string
+ * ("Shimmer Research Ltd."), so firmware applies the record unconditionally
+ * and an unbranded unit reports exactly what it always did. There is no
+ * "customer branded" flag: bit 0 of `flags` is reserved.
  */
 
 import { shimmerUartCrcCalc } from './dock/crc.js';
 
-/** Host daughter-card-memory offset of the record (absolute EEPROM 1968). */
-export const BRAND_RECORD_HOST_OFFSET = 1952;
-export const BRAND_RECORD_SIZE = 64;
+/** Host expansion-board-memory offset of the record (absolute EEPROM 1952). */
+export const BRAND_RECORD_HOST_OFFSET = 1936;
+export const BRAND_RECORD_SIZE = 80;
 export const BRAND_RECORD_MAGIC = 0x5342;
-export const BRAND_RECORD_LAYOUT_VER = 1;
+export const BRAND_RECORD_LAYOUT_VER = 2;
 
 export const BRAND_BT_CLASSIC_MAX_CHARS = 16;
 export const BRAND_BLE_MAX_CHARS = 10;
-export const BRAND_USB_MAX_CHARS = 16;
+export const BRAND_USB_PRODUCT_MAX_CHARS = 16;
+/** Long enough for the stock "Shimmer Research Ltd." (21 chars). */
+export const BRAND_USB_MANUFACTURER_MAX_CHARS = 24;
 /**
  * Shimmer3 firmware truncates the BLE prefix to 8 chars so "<prefix>-XXXX"
  * fits the RN4678's 31-byte advertisement payload. Shimmer3R allows the full
@@ -55,7 +64,6 @@ export const BRAND_PLATFORM = Object.freeze({
   SHIMMER4_SDK: 3,
 } as const);
 
-const FLAG_CUSTOMER_BRANDED = 0x01;
 const PLATFORM_MASK = 0x06;
 const PLATFORM_SHIFT = 1;
 
@@ -64,11 +72,13 @@ const OFF_LAYOUT_VER = 2;
 const OFF_FLAGS = 3;
 const OFF_BT_CLASSIC_LEN = 4;
 const OFF_BLE_LEN = 5;
-const OFF_USB_LEN = 6;
-const OFF_BT_CLASSIC = 7;
-const OFF_BLE = OFF_BT_CLASSIC + BRAND_BT_CLASSIC_MAX_CHARS; // 23
-const OFF_USB = OFF_BLE + BRAND_BLE_MAX_CHARS; // 33
-const OFF_CRC = BRAND_RECORD_SIZE - 2; // 62
+const OFF_USB_PRODUCT_LEN = 6;
+const OFF_USB_MANUFACTURER_LEN = 7;
+const OFF_BT_CLASSIC = 8;
+const OFF_BLE = OFF_BT_CLASSIC + BRAND_BT_CLASSIC_MAX_CHARS; // 24
+const OFF_USB_PRODUCT = OFF_BLE + BRAND_BLE_MAX_CHARS; // 34
+const OFF_USB_MANUFACTURER = OFF_USB_PRODUCT + BRAND_USB_PRODUCT_MAX_CHARS; // 50
+const OFF_CRC = BRAND_RECORD_SIZE - 2; // 78
 
 export interface BrandRecord {
   /** True when magic, layout version, lengths, charset and CRC all check out. */
@@ -79,10 +89,10 @@ export interface BrandRecord {
   btClassic: string;
   /** BLE name prefix. */
   ble: string;
-  /** USB product prefix / manufacturer string. */
-  usb: string;
-  /** Customer-branded records are honoured on any platform and never re-seeded. */
-  customerBranded: boolean;
+  /** USB product-name prefix (firmware appends the MAC suffix). */
+  usbProduct: string;
+  /** USB iManufacturer string, verbatim. */
+  usbManufacturer: string;
   /** BRAND_PLATFORM value stamped by the seeding firmware. */
   seededPlatform: number;
 }
@@ -90,9 +100,9 @@ export interface BrandRecord {
 export interface BrandRecordFields {
   btClassic: string;
   ble: string;
-  usb: string;
-  customerBranded: boolean;
-  /** Defaults to BRAND_PLATFORM.UNKNOWN — only meaningful for stock records. */
+  usbProduct: string;
+  usbManufacturer: string;
+  /** Defaults to BRAND_PLATFORM.UNKNOWN — informational only. */
   seededPlatform?: number;
 }
 
@@ -118,14 +128,14 @@ function readField(bytes: Uint8Array, off: number, len: number): string {
   return s;
 }
 
-/** Decode and validate a 64-byte brand record read from the device. */
+/** Decode and validate a brand record read from the device. */
 export function parseBrandRecord(bytes: Uint8Array): BrandRecord {
   const rec: BrandRecord = {
     valid: false,
     btClassic: '',
     ble: '',
-    usb: '',
-    customerBranded: false,
+    usbProduct: '',
+    usbManufacturer: '',
     seededPlatform: BRAND_PLATFORM.UNKNOWN,
   };
   if (bytes.length < BRAND_RECORD_SIZE) {
@@ -134,20 +144,23 @@ export function parseBrandRecord(bytes: Uint8Array): BrandRecord {
   }
   const magic = bytes[OFF_MAGIC] | (bytes[OFF_MAGIC + 1] << 8);
   const flags = bytes[OFF_FLAGS];
-  rec.customerBranded = (flags & FLAG_CUSTOMER_BRANDED) !== 0;
   rec.seededPlatform = (flags & PLATFORM_MASK) >> PLATFORM_SHIFT;
 
   const btLen = bytes[OFF_BT_CLASSIC_LEN];
   const bleLen = bytes[OFF_BLE_LEN];
-  const usbLen = bytes[OFF_USB_LEN];
+  const usbProductLen = bytes[OFF_USB_PRODUCT_LEN];
+  const usbManufacturerLen = bytes[OFF_USB_MANUFACTURER_LEN];
   if (btLen >= 1 && btLen <= BRAND_BT_CLASSIC_MAX_CHARS) {
     rec.btClassic = readField(bytes, OFF_BT_CLASSIC, btLen);
   }
   if (bleLen >= 1 && bleLen <= BRAND_BLE_MAX_CHARS) {
     rec.ble = readField(bytes, OFF_BLE, bleLen);
   }
-  if (usbLen >= 1 && usbLen <= BRAND_USB_MAX_CHARS) {
-    rec.usb = readField(bytes, OFF_USB, usbLen);
+  if (usbProductLen >= 1 && usbProductLen <= BRAND_USB_PRODUCT_MAX_CHARS) {
+    rec.usbProduct = readField(bytes, OFF_USB_PRODUCT, usbProductLen);
+  }
+  if (usbManufacturerLen >= 1 && usbManufacturerLen <= BRAND_USB_MANUFACTURER_MAX_CHARS) {
+    rec.usbManufacturer = readField(bytes, OFF_USB_MANUFACTURER, usbManufacturerLen);
   }
 
   if (magic !== BRAND_RECORD_MAGIC) {
@@ -161,7 +174,8 @@ export function parseBrandRecord(bytes: Uint8Array): BrandRecord {
   const fieldChecks: Array<[string, string, number]> = [
     ['Classic BT name', rec.btClassic, BRAND_BT_CLASSIC_MAX_CHARS],
     ['BLE name', rec.ble, BRAND_BLE_MAX_CHARS],
-    ['USB name', rec.usb, BRAND_USB_MAX_CHARS],
+    ['USB product name', rec.usbProduct, BRAND_USB_PRODUCT_MAX_CHARS],
+    ['USB manufacturer name', rec.usbManufacturer, BRAND_USB_MANUFACTURER_MAX_CHARS],
   ];
   for (const [label, value, max] of fieldChecks) {
     const problem = brandNameProblem(value, max);
@@ -187,7 +201,8 @@ export function buildBrandRecord(fields: BrandRecordFields): Uint8Array {
   const checks: Array<[string, string, number]> = [
     ['btClassic', fields.btClassic, BRAND_BT_CLASSIC_MAX_CHARS],
     ['ble', fields.ble, BRAND_BLE_MAX_CHARS],
-    ['usb', fields.usb, BRAND_USB_MAX_CHARS],
+    ['usbProduct', fields.usbProduct, BRAND_USB_PRODUCT_MAX_CHARS],
+    ['usbManufacturer', fields.usbManufacturer, BRAND_USB_MANUFACTURER_MAX_CHARS],
   ];
   for (const [label, value, max] of checks) {
     const problem = brandNameProblem(value, max);
@@ -202,17 +217,21 @@ export function buildBrandRecord(fields: BrandRecordFields): Uint8Array {
   bytes[OFF_MAGIC] = BRAND_RECORD_MAGIC & 0xff;
   bytes[OFF_MAGIC + 1] = (BRAND_RECORD_MAGIC >> 8) & 0xff;
   bytes[OFF_LAYOUT_VER] = BRAND_RECORD_LAYOUT_VER;
-  bytes[OFF_FLAGS] =
-    (fields.customerBranded ? FLAG_CUSTOMER_BRANDED : 0) |
-    ((platform << PLATFORM_SHIFT) & PLATFORM_MASK);
+  bytes[OFF_FLAGS] = (platform << PLATFORM_SHIFT) & PLATFORM_MASK;
   bytes[OFF_BT_CLASSIC_LEN] = fields.btClassic.length;
   bytes[OFF_BLE_LEN] = fields.ble.length;
-  bytes[OFF_USB_LEN] = fields.usb.length;
+  bytes[OFF_USB_PRODUCT_LEN] = fields.usbProduct.length;
+  bytes[OFF_USB_MANUFACTURER_LEN] = fields.usbManufacturer.length;
   for (let i = 0; i < fields.btClassic.length; i++) {
     bytes[OFF_BT_CLASSIC + i] = fields.btClassic.charCodeAt(i);
   }
   for (let i = 0; i < fields.ble.length; i++) bytes[OFF_BLE + i] = fields.ble.charCodeAt(i);
-  for (let i = 0; i < fields.usb.length; i++) bytes[OFF_USB + i] = fields.usb.charCodeAt(i);
+  for (let i = 0; i < fields.usbProduct.length; i++) {
+    bytes[OFF_USB_PRODUCT + i] = fields.usbProduct.charCodeAt(i);
+  }
+  for (let i = 0; i < fields.usbManufacturer.length; i++) {
+    bytes[OFF_USB_MANUFACTURER + i] = fields.usbManufacturer.charCodeAt(i);
+  }
 
   const [crcLo, crcHi] = shimmerUartCrcCalc(bytes, OFF_CRC);
   bytes[OFF_CRC] = crcLo;

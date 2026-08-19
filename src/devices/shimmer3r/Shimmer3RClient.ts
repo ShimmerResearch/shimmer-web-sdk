@@ -3,6 +3,7 @@ import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import {
   OPCODES,
+  BT_FEATURE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
@@ -607,6 +608,33 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * data frame, and must not be mis-captured as InfoMem payload); the length
      * byte is optional. Reads longer than one BLE notification are reassembled. */
     return this._readLengthPrefixedResponse(cmd, OPCODES.INFOMEM_RESPONSE, length, 'InfoMem read');
+  }
+
+  /**
+   * Arm a one-shot soft reboot that the device performs as soon as this host
+   * disconnects (SET_FEATURE / FEATURE_REBOOT_ON_DISCONNECT).
+   *
+   * Settings that firmware only reads at boot - notably the EEPROM brand
+   * record's advertising names - otherwise need a manual power-cycle. The
+   * reboot cannot happen while still connected, because the link has to drop
+   * for the Bluetooth module to re-read its name; so the sequence is: write
+   * settings, call this, then {@link disconnect}.
+   *
+   * Firmware skips the reboot while sensing so that it can never truncate an
+   * active SD recording, and clears the request either way - it is strictly
+   * one-shot and never carries into a later disconnect.
+   *
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
+   * firmware NACKs the unknown feature id.
+   */
+  async setRebootOnDisconnect(enabled: boolean): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
+    await this._writeExpectingAck(
+      new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
+      1500,
+    );
+    this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
   }
 
   /**

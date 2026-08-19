@@ -11,6 +11,7 @@
 // module (these are identical across the two device families).
 export {
   OPCODES,
+  BT_FEATURE,
   TIMESTAMP_FIELD,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,

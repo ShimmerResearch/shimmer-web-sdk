@@ -2,7 +2,13 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
-import { OPCODES, SHIMMER3_DEFAULTS, GSR_NAME, GSR_UNCAL_LIMIT_RANGE3 } from './constants.js';
+import {
+  OPCODES,
+  BT_FEATURE,
+  SHIMMER3_DEFAULTS,
+  GSR_NAME,
+  GSR_UNCAL_LIMIT_RANGE3,
+} from './constants.js';
 import type { TimestampFmt } from './constants.js';
 import {
   calibrateGsrDataToResistanceFromAmplifierEq,
@@ -540,6 +546,33 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._log('onInquiry handler error', e);
     }
     return info;
+  }
+
+  /**
+   * Arm a one-shot soft reboot that the device performs as soon as this host
+   * disconnects (SET_FEATURE / FEATURE_REBOOT_ON_DISCONNECT).
+   *
+   * Settings that firmware only reads at boot - notably the EEPROM brand
+   * record's advertising names - otherwise need a manual power-cycle. The
+   * reboot cannot happen while still connected, because the link has to drop
+   * for the Bluetooth module to re-read its name; so the sequence is: write
+   * settings, call this, then {@link disconnect}.
+   *
+   * Firmware skips the reboot while sensing so that it can never truncate an
+   * active SD recording, and clears the request either way - it is strictly
+   * one-shot and never carries into a later disconnect.
+   *
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
+   * firmware NACKs the unknown feature id.
+   */
+  async setRebootOnDisconnect(enabled: boolean): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
+    await this._writeExpectingAck(
+      new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
+      SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+    );
+    this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
   }
 
   // ---------------------------------------------------------------------------
