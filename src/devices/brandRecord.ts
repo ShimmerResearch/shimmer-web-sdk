@@ -193,6 +193,10 @@ export function buildBrandRecord(fields: BrandRecordFields): Uint8Array {
     const problem = brandNameProblem(value, max);
     if (problem) throw new Error(`${label}: ${problem}`);
   }
+  const platform = fields.seededPlatform ?? BRAND_PLATFORM.UNKNOWN;
+  if (!Number.isInteger(platform) || platform < 0 || platform > 3) {
+    throw new Error(`seededPlatform: must be a BRAND_PLATFORM value (0..3), got ${platform}`);
+  }
 
   const bytes = new Uint8Array(BRAND_RECORD_SIZE); // zero-filled, incl. padding
   bytes[OFF_MAGIC] = BRAND_RECORD_MAGIC & 0xff;
@@ -200,7 +204,7 @@ export function buildBrandRecord(fields: BrandRecordFields): Uint8Array {
   bytes[OFF_LAYOUT_VER] = BRAND_RECORD_LAYOUT_VER;
   bytes[OFF_FLAGS] =
     (fields.customerBranded ? FLAG_CUSTOMER_BRANDED : 0) |
-    (((fields.seededPlatform ?? BRAND_PLATFORM.UNKNOWN) << PLATFORM_SHIFT) & PLATFORM_MASK);
+    ((platform << PLATFORM_SHIFT) & PLATFORM_MASK);
   bytes[OFF_BT_CLASSIC_LEN] = fields.btClassic.length;
   bytes[OFF_BLE_LEN] = fields.ble.length;
   bytes[OFF_USB_LEN] = fields.usb.length;

@@ -89,3 +89,18 @@ describe('brandRecord', () => {
     ).toThrow(/comma/);
   });
 });
+
+describe('brandRecord seededPlatform validation', () => {
+  it('rejects out-of-range seededPlatform instead of silently masking it', () => {
+    const base = { btClassic: 'X', ble: 'X', usb: 'X', customerBranded: false };
+    expect(() => buildBrandRecord({ ...base, seededPlatform: 99 })).toThrow(/seededPlatform/);
+    expect(() => buildBrandRecord({ ...base, seededPlatform: -1 })).toThrow(/seededPlatform/);
+    expect(() => buildBrandRecord({ ...base, seededPlatform: 1.5 })).toThrow(/seededPlatform/);
+    // All in-range values encode cleanly
+    for (const p of Object.values(BRAND_PLATFORM)) {
+      expect(
+        parseBrandRecord(buildBrandRecord({ ...base, seededPlatform: p })).seededPlatform,
+      ).toBe(p);
+    }
+  });
+});
