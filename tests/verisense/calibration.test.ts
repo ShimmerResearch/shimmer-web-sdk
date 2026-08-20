@@ -116,6 +116,12 @@ describe('Verisense calibration TLV codec', () => {
     expect(serializeCalibrationBlob(sampleInput())[2]).toBe(SC_CALIB_FORMAT_VERSION);
   });
 
+  // Every expectation in this test is a hard-coded literal on purpose: it pins
+  // the on-the-wire layout against the spec, so a change to any constant has to
+  // show up here as a deliberate edit. Do not swap these for the exported
+  // constants - an assertion written in terms of the value it is checking would
+  // pass no matter what that value became. The round-trip test above uses
+  // SC_CALIB_FORMAT_VERSION because it checks fidelity, not the spec.
   it('writes a spec-exact byte layout (offsets, totalLen, block headers)', () => {
     const blob = serializeCalibrationBlob(sampleInput());
 
