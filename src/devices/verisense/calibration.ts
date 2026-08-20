@@ -35,7 +35,19 @@
 
 import { u16le_at, f32le, crc16_ccitt_false } from './protocolUtils.js';
 
-export const SC_CALIB_FORMAT_VERSION = 1;
+/**
+ * Blob layout version. v2 is byte-for-byte identical in layout to v1 — the
+ * firmware bumped it purely to force already-deployed gen-2 units to re-seed
+ * with the corrected LSM6DSV/LIS2MDL alignment (its load path checks neither a
+ * CRC nor the FW version, so nothing else would).
+ *
+ * `parseCalibrationBlob` accepts any version and reports what it read;
+ * `serializeCalibrationBlob` preserves `input.formatVersion` when present and
+ * only falls back to this constant. That matters when writing to a device: a
+ * blob stamped with the wrong version is rejected at the device's next boot and
+ * silently replaced by the seeded defaults.
+ */
+export const SC_CALIB_FORMAT_VERSION = 2;
 export const SC_GLOBAL_HEADER_BYTES = 12;
 export const SC_BLOCK_HEADER_BYTES = 12;
 export const SC_TS_BYTES = 8;
