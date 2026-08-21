@@ -17,6 +17,33 @@ export interface WebSerialTransportOptions {
   /** `requestPort` filters. */
   filters?: SerialPortFilter[] | null;
   /**
+   * Service class IDs the port picker may surface Bluetooth (RFCOMM/SPP) ports
+   * for — pass `[SHIMMER3_SPP_UUID]` to reach a Shimmer paired over classic
+   * Bluetooth. Chrome hides Bluetooth serial ports from the picker unless the
+   * origin names their service class, so `filters` alone is not enough.
+   */
+  allowedBluetoothServiceClassIds?: BluetoothServiceClassId[] | null;
+  /**
+   * Read buffer size handed to `port.open`. Defaults to the browser's own
+   * default (8 KiB in Chrome); raise it for bulk transfers so a slow turn of
+   * the read loop cannot stall the sender.
+   */
+  bufferSize?: number;
+  /**
+   * Reported {@link ShimmerTransport.kind}. Defaults to `'serial'`; pass
+   * `'rfcomm'` when the port is a classic-Bluetooth virtual COM port so logs
+   * and UI can tell the two apart (no client behaviour depends on it).
+   */
+  kind?: ShimmerTransportKind;
+  /**
+   * Abandon `port.open()` after this many ms (0 disables). Opening a classic
+   * Bluetooth COM port is what actually establishes the RFCOMM link, so the
+   * call can block for tens of seconds when the sensor is asleep or out of
+   * range — where a USB CDC port either opens at once or fails at once.
+   * Defaults to 15 s.
+   */
+  openTimeoutMs?: number;
+  /**
    * DTR (data-terminal-ready) line state asserted right after the port opens.
    * Defaults to TRUE together with {@link requestToSend}: the Shimmer
    * single-slot dock wires the docked sensor's reset to the COM-port control
@@ -42,7 +69,7 @@ export interface WebSerialTransportOptions {
  * lifecycle) is ported verbatim from `VerisenseBleDevice`'s former serial path.
  */
 export class WebSerialTransport implements ShimmerTransport {
-  readonly kind: ShimmerTransportKind = 'serial';
+  readonly kind: ShimmerTransportKind;
   readonly capabilities: TransportCapabilities = { framed: false };
 
   private readonly _debug: boolean;
@@ -52,8 +79,11 @@ export class WebSerialTransport implements ShimmerTransport {
     stopBits: number;
     parity: ParityType;
     flowControl: FlowControlType;
+    bufferSize?: number;
   };
   private readonly _filters: SerialPortFilter[] | null;
+  private readonly _allowedBluetoothServiceClassIds: BluetoothServiceClassId[] | null;
+  private readonly _openTimeoutMs: number;
   private readonly _signals: { dataTerminalReady: boolean; requestToSend: boolean };
 
   private _port: SerialPort | null;
@@ -67,6 +97,9 @@ export class WebSerialTransport implements ShimmerTransport {
   constructor(opts: WebSerialTransportOptions = {}) {
     this._port = opts.port ?? null;
     this._filters = opts.filters ?? null;
+    this._allowedBluetoothServiceClassIds = opts.allowedBluetoothServiceClassIds ?? null;
+    this._openTimeoutMs = opts.openTimeoutMs ?? 15_000;
+    this.kind = opts.kind ?? 'serial';
     this._signals = {
       dataTerminalReady: opts.dataTerminalReady ?? true,
       requestToSend: opts.requestToSend ?? true,
@@ -78,6 +111,7 @@ export class WebSerialTransport implements ShimmerTransport {
       stopBits: opts.stopBits ?? 1,
       parity: opts.parity ?? 'none',
       flowControl: opts.flowControl ?? 'none',
+      ...(opts.bufferSize !== undefined ? { bufferSize: opts.bufferSize } : {}),
     };
   }
 
@@ -94,23 +128,20 @@ export class WebSerialTransport implements ShimmerTransport {
     if (!this._port) {
       const serial = (
         navigator as unknown as {
-          serial: { requestPort(o?: { filters?: SerialPortFilter[] }): Promise<SerialPort> };
+          serial: { requestPort(o?: SerialPortRequestOptions): Promise<SerialPort> };
         }
       ).serial;
-      this._port = await serial.requestPort(this._filters ? { filters: this._filters } : undefined);
+      // Unknown dictionary members are ignored by WebIDL, so naming the
+      // Bluetooth service classes is safe on browsers that predate them.
+      const request: SerialPortRequestOptions = {};
+      if (this._filters) request.filters = this._filters;
+      if (this._allowedBluetoothServiceClassIds) {
+        request.allowedBluetoothServiceClassIds = this._allowedBluetoothServiceClassIds;
+      }
+      this._port = await serial.requestPort(Object.keys(request).length ? request : undefined);
     }
 
-    await (
-      this._port as unknown as {
-        open(o: {
-          baudRate: number;
-          dataBits: number;
-          stopBits: number;
-          parity: string;
-          flowControl: string;
-        }): Promise<void>;
-      }
-    ).open(this._openOptions);
+    await this._openWithTimeout();
 
     // Assert DTR/RTS now that the port is open. The Shimmer single-slot dock
     // holds the docked sensor in RESET until both lines are asserted, so a
@@ -129,6 +160,55 @@ export class WebSerialTransport implements ShimmerTransport {
 
     this._abort = new AbortController();
     this._startReadLoop(this._abort.signal);
+  }
+
+  /**
+   * `port.open()`, bounded by {@link WebSerialTransportOptions.openTimeoutMs}.
+   *
+   * Opening a classic-Bluetooth COM port is what brings the RFCOMM link up, so
+   * an asleep or out-of-range sensor blocks here rather than failing fast. If
+   * the timeout wins we still close the port should the open land later —
+   * otherwise the OS keeps an orphaned handle and the next attempt fails with
+   * "port already open" instead of the real reason.
+   */
+  private async _openWithTimeout(): Promise<void> {
+    const port = this._port as unknown as {
+      open(o: SerialOptions): Promise<void>;
+      close(): Promise<void>;
+    };
+    const opening = port.open(this._openOptions);
+    if (this._openTimeoutMs <= 0) return opening;
+
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        opening,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(
+              new Error(
+                `Timed out after ${this._openTimeoutMs} ms opening the serial port. ` +
+                  'For a Bluetooth COM port: check the sensor is powered, in range, ' +
+                  'and still paired with this PC.',
+              ),
+            );
+          }, this._openTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (timedOut) {
+        // Never leave the late open unobserved (unhandled rejection) or the
+        // port held open behind our back.
+        void opening.then(
+          () => port.close().catch(() => undefined),
+          () => undefined,
+        );
+        this._port = null;
+      }
+    }
   }
 
   async write(data: Uint8Array): Promise<void> {

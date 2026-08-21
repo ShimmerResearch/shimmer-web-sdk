@@ -273,6 +273,12 @@ interface SimOptions {
   corruptSeqOnce?: number;
   /** Drop the given block seq once (sequence-gap test). */
   dropSeqOnce?: number;
+  /**
+   * Report the transport as unframed (`capabilities.framed = false`), i.e. a
+   * byte stream — Web Serial over USB or over the COM port a classic-Bluetooth
+   * pairing creates. Combine with a small `chunkSize` to split messages.
+   */
+  framed?: boolean;
 }
 
 /** Scripted Shimmer3R firmware: answers SD-transfer commands from a VirtualCard. */
@@ -395,7 +401,7 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
 }
 
 async function makeClient(card: VirtualCard, opts: SimOptions = {}) {
-  const t = new LoopbackTransport();
+  const t = new LoopbackTransport(opts.framed === false ? { capabilities: { framed: false } } : {});
   const sim = attachFwSim(t, card, opts);
   const client = new Shimmer3RClient({ debug: false });
   await client.connect(t);
@@ -589,6 +595,97 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
 // ---------------------------------------------------------------------------
 // Orchestrator tests
 // ---------------------------------------------------------------------------
+
+// The same firmware simulator, but over a transport that reports itself as an
+// unframed byte stream and chops every reply into chunks far smaller than a
+// message. This is a Shimmer reached over Web Serial — either USB or the virtual
+// COM port a classic-Bluetooth pairing creates — where a read can split a
+// response down the middle or carry several messages at once.
+//
+// Which of these the re-framing drain is actually load-bearing for: the two
+// FW-version cases, and only those. The SD lane accumulates and re-frames on its
+// own (`_sdChunkHandler` + `tryExtractSdMessage`), so it was already
+// fragmentation-proof — verified by disabling the drain, which fails exactly the
+// FW-version pair. The SD cases stay as regression guards: the drain now sits in
+// front of that lane and must not disturb it.
+describe('Shimmer3RClient SD commands over an UNFRAMED transport', () => {
+  const unframed = (extra: SimOptions = {}): SimOptions => ({
+    framed: false,
+    chunkSize: 3,
+    ...extra,
+  });
+
+  it('reads the FW version when the ACK and its response are split across reads', async () => {
+    const { client } = await makeClient(makeCard(), unframed({ chunkSize: 1 }));
+    await expect(client.readFwVersion()).resolves.toEqual({
+      fwId: 3,
+      major: 1,
+      minor: 1,
+      patch: 9,
+    });
+  });
+
+  it('supportsSdTransfer still gates on FW version', async () => {
+    const { client } = await makeClient(makeCard(), unframed());
+    await expect(client.supportsSdTransfer()).resolves.toBe(true);
+  });
+
+  it('sdGetFreeSpace parses a one-shot response delivered 3 bytes at a time', async () => {
+    const { client } = await makeClient(makeCard(), unframed());
+    await expect(client.sdGetFreeSpace()).resolves.toEqual({ freeKB: 1024, totalKB: 2048 });
+  });
+
+  it('sdListDir reassembles a listing whose entries straddle every read', async () => {
+    const { client } = await makeClient(makeCard(), unframed());
+    const entries = await client.sdListDir('data/Trial_1');
+    expect(entries.map((e) => e.name).sort()).toEqual(['Shim-000', 'Shim-001']);
+  });
+
+  it('sdStatFile still surfaces in-band error statuses', async () => {
+    const { client } = await makeClient(makeCard(), unframed());
+    await expect(client.sdStatFile('data/nope')).rejects.toThrow(SdTransferError);
+  });
+
+  it('sdReadFileWindow verifies every block with frames split across reads', async () => {
+    const { client } = await makeClient(makeCard(), unframed({ chunkSize: 7 }));
+    const got: number[] = [];
+    const res = await client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1200, {
+      blockPayloadLen: 256,
+      onBlock: (p) => {
+        got.push(...p);
+      },
+    });
+    expect(res.status).toBe(SD_XFER.WINDOW_COMPLETE);
+    expect(got.length).toBe(1200);
+    expect(new Uint8Array(got)).toEqual(asciiBytes(1200));
+  });
+
+  it('downloads a whole tree byte-identically over the byte stream', async () => {
+    const card = makeCard();
+    const { client } = await makeClient(card, unframed({ chunkSize: 5 }));
+    const root = new MemDir();
+    const res = await downloadSdTree(client, root as unknown as FileSystemDirectoryHandle, {
+      layout: 'card',
+      blockPayloadLen: 256,
+    });
+    expect(res.filesDownloaded).toBe(3);
+    const dir = root.atPath('data/Trial_1/Shim-000');
+    expect(dir?.files.get('000')?.data).toEqual(asciiBytes(1200));
+    expect(dir?.files.get('001')?.data).toEqual(asciiBytes(300));
+  });
+
+  // The re-framing drain spans a frame by its header length alone, so this
+  // pins that a bad CRC is still rejected downstream rather than trusted.
+  it('still rejects a CRC-corrupted block rather than trusting the span', async () => {
+    const { client } = await makeClient(makeCard(), unframed({ chunkSize: 7, corruptSeqOnce: 1 }));
+    await expect(
+      client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1200, {
+        blockPayloadLen: 256,
+        stallTimeoutMs: 500,
+      }),
+    ).rejects.toThrow(/CRC|stall|sequence/);
+  });
+});
 
 describe('downloadSdTree', () => {
   it('recreates the on-card tree and downloads byte-identical files', async () => {
