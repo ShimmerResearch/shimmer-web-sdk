@@ -647,6 +647,17 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (!Number.isInteger(length) || length < 1 || length > 128) {
       throw new Error('InfoMem read length must be an integer in 1..128.');
     }
+    /* One read must stay inside one page, or the firmware returns
+     * page-boundary-dependent junk for the overhang. Every page base is
+     * 128-aligned in both addressing modes (legacy 0x1800/0x1880/0x1900 and
+     * flat 0/128/256), so the offset within the page is just address % 128
+     * regardless of which mode the connected firmware uses. */
+    if ((address % INFOMEM_PAGE_SIZE) + length > INFOMEM_PAGE_SIZE) {
+      throw new Error(
+        `InfoMem read ${length}B @ ${address} crosses a ${INFOMEM_PAGE_SIZE}-byte page ` +
+          'boundary; split it into one read per page.',
+      );
+    }
 
     this._emitStatus(`GET_INFOMEM ${length}B @ ${address} → waiting for RSP…`);
     const cmd = new Uint8Array([

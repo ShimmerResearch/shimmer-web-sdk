@@ -582,7 +582,8 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
 
   it('reassembles an InfoMem read dribbled one byte at a time', async () => {
     const t = newTransport();
-    const payload = Array.from({ length: 40 }, (_, i) => i);
+    // 32B @224 keeps the read inside the C page (offset 96 + 32 = 128).
+    const payload = Array.from({ length: 32 }, (_, i) => i);
     t.setOnWrite((bytes, tr) => {
       const op = bytes[0];
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
@@ -605,6 +606,21 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
     await expect(client.readInfoMem(0, 129)).rejects.toThrow(/1\.\.128/);
     await expect(client.readInfoMem(0, 0)).rejects.toThrow(/1\.\.128/);
     expect(t.writes.length).toBe(before);
+  });
+
+  // A read that straddles a page boundary would get boundary-dependent junk for
+  // the overhang, so it is refused rather than half-served. Page bases are
+  // 128-aligned in both addressing modes, so address % 128 is the in-page offset
+  // whichever mode the firmware uses.
+  it('rejects an InfoMem read that crosses a page boundary', async () => {
+    const { t, client } = await withFirmware(3, 16);
+    const before = t.writes.length;
+    await expect(client.readInfoMem(127, 8)).rejects.toThrow(/page boundary/);
+    await expect(client.readInfoMem(0x1880 + 124, 8)).rejects.toThrow(/page boundary/);
+    expect(t.writes.length).toBe(before);
+    // Right up to the boundary is fine, on both flat and legacy page bases.
+    await expect(client.readInfoMem(122, 6)).resolves.toBeInstanceOf(Uint8Array);
+    await expect(client.readInfoMem(0x1880 + 96, 6)).resolves.toBeInstanceOf(Uint8Array);
   });
 
   it('refuses to guess the layout before the handshake has run', async () => {
