@@ -130,6 +130,76 @@ describe('drainByteStream', () => {
     });
   });
 
+  describe('decode hook', () => {
+    // Modelled on the dock UART: frame by length, then validate a CRC. A packet
+    // that frames but fails validation must resync by ONE byte, because a bad
+    // CRC is evidence the framing itself was wrong — the real header may be a
+    // byte or two further on, and skipping the whole span would step over it.
+    const decodeSum = (msg: Uint8Array): { total: number } | null => {
+      // Toy "CRC": the last payload byte must equal the sum of the ones before.
+      const payload = msg.subarray(2);
+      if (payload.length === 0) return null;
+      const want = payload[payload.length - 1];
+      let sum = 0;
+      for (let i = 0; i < payload.length - 1; i++) sum = (sum + payload[i]) & 0xff;
+      return sum === want ? { total: sum } : null;
+    };
+
+    it('returns decoded messages, not raw bytes', () => {
+      const r = drainByteStream(new Uint8Array([0xa0, 0x03, 5, 6, 11]), {
+        messageLength: toyLength,
+        decode: decodeSum,
+      });
+      expect(r.messages).toEqual([{ total: 11 }]);
+      expect(Array.from(r.rest)).toEqual([]);
+    });
+
+    it('resyncs ONE byte when decode refuses, not the whole framed span', () => {
+      const onDrop = vi.fn();
+      // First packet's checksum is wrong (12 != 5+6). Dropping only its header
+      // byte lets the parser find the valid packet that starts inside it.
+      const bad = [0xa0, 0x03, 5, 6, 12];
+      const good = [0xa0, 0x02, 7, 7];
+      const r = drainByteStream(new Uint8Array([...bad, ...good]), {
+        messageLength: toyLength,
+        decode: decodeSum,
+        onDrop,
+      });
+      expect(onDrop).toHaveBeenCalledWith(0xa0, 'rejected');
+      expect(r.messages).toEqual([{ total: 7 }]);
+      expect(Array.from(r.rest)).toEqual([]);
+    });
+
+    it('finds a real packet that starts INSIDE a rejected one', () => {
+      // Why refusal must resync by one byte and not by the framed length: here a
+      // stray 0xA0 0x03 makes the framer claim a 5-byte packet that swallows the
+      // start of the genuine one. Byte-at-a-time recovery walks into it and finds
+      // the real header; skipping the claimed 5 bytes would land past it and lose
+      // the packet entirely.
+      const r = drainByteStream(new Uint8Array([0xa0, 0x03, 0xa0, 0x02, 7, 7]), {
+        messageLength: toyLength,
+        decode: decodeSum,
+      });
+      expect(r.messages).toEqual([{ total: 7 }]);
+      expect(Array.from(r.rest)).toEqual([]);
+    });
+
+    it('decodes the coalesced buffer, not the pre-merge message', () => {
+      const seen: number[][] = [];
+      const r = drainByteStream(new Uint8Array([ONE_BYTE, 0xa0, 0x02, 7, 7]), {
+        messageLength: toyLength,
+        coalesce: (msg, rest) =>
+          msg.length === 1 && msg[0] === ONE_BYTE && rest.length ? toyLength(rest) : 0,
+        decode: (msg) => {
+          seen.push(Array.from(msg));
+          return msg.length;
+        },
+      });
+      expect(seen).toEqual([[ONE_BYTE, 0xa0, 0x02, 7, 7]]);
+      expect(r.messages).toEqual([5]);
+    });
+  });
+
   it('is pure: the input buffer is never mutated', () => {
     const input = new Uint8Array([ONE_BYTE, 0xa0, 0x01, 7]);
     const copy = Array.from(input);

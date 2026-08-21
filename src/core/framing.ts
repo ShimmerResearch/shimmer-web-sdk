@@ -47,12 +47,30 @@ export type MessageLengthFn = (buf: Uint8Array) => number;
  */
 export type DrainVerdict = 'frame' | 'drop' | 'stop';
 
-/** Why a byte was consumed without becoming a message (for logging). */
-export type DropReason = 'resync' | 'gated';
+/**
+ * Why a byte was consumed without becoming a message (for logging).
+ *
+ * - `resync` — the framer could not size a message here.
+ * - `gated` — {@link DrainOptions.inspect} rejected the byte as out of context.
+ * - `rejected` — the framer sized a message but {@link DrainOptions.decode}
+ *   refused it (a failed CRC, a malformed body).
+ */
+export type DropReason = 'resync' | 'gated' | 'rejected';
 
-export interface DrainOptions {
+export interface DrainOptions<T = Uint8Array> {
   /** Framer for the protocol being drained. */
   messageLength: MessageLengthFn;
+  /**
+   * Turn a framed message into whatever the caller's handlers consume, or return
+   * `null` to refuse it. Omit to receive the raw bytes.
+   *
+   * Refusal deliberately resynchronises by **one byte**, not by the whole span:
+   * a packet that framed but failed its CRC is evidence that the framing itself
+   * was wrong — the real packet header may be a byte or two further on, and
+   * skipping the whole supposed length would step over it. This mirrors the Java
+   * driver's `parseSinglePacket` CRC-fail path.
+   */
+  decode?: (msg: Uint8Array) => T | null;
   /**
    * Per-head-byte gate, evaluated before framing. Defaults to always `frame`.
    * Called with the whole remaining buffer so a gate can look past byte 0.
@@ -73,9 +91,9 @@ export interface DrainOptions {
   onDrop?: (byte: number, reason: DropReason) => void;
 }
 
-export interface DrainResult {
-  /** Complete messages, in wire order. */
-  messages: Uint8Array[];
+export interface DrainResult<T = Uint8Array> {
+  /** Complete messages, in wire order — decoded when a `decode` was supplied. */
+  messages: T[];
   /** Bytes not consumed — the caller stores this back as its accumulator. */
   rest: Uint8Array;
   /** True when {@link DrainOptions.inspect} returned `stop`. */
@@ -95,9 +113,12 @@ export interface DrainResult {
  * buffer on garbage: a corrupt byte then costs one byte, not every valid message
  * queued behind it.
  */
-export function drainByteStream(buf: Uint8Array, opts: DrainOptions): DrainResult {
-  const { messageLength, inspect, coalesce, onDrop } = opts;
-  const messages: Uint8Array[] = [];
+export function drainByteStream<T = Uint8Array>(
+  buf: Uint8Array,
+  opts: DrainOptions<T>,
+): DrainResult<T> {
+  const { messageLength, decode, inspect, coalesce, onDrop } = opts;
+  const messages: T[] = [];
   let rest: Uint8Array = buf;
   let stopped = false;
 
@@ -128,20 +149,34 @@ export function drainByteStream(buf: Uint8Array, opts: DrainOptions): DrainResul
     // yet cover, but never slice past the end of the buffer if one does.
     if (rest.length < len) break;
 
-    const msg = new Uint8Array(rest.subarray(0, len));
-    rest = rest.subarray(len);
+    // Nothing is consumed until the disposition is known, so a message `decode`
+    // refuses can still resync by one byte from where it started.
+    let payload = new Uint8Array(rest.subarray(0, len));
+    let consumed = len;
 
-    const extra = coalesce ? coalesce(msg, rest) : 0;
-    if (extra > 0 && extra <= rest.length) {
-      const merged = new Uint8Array(msg.length + extra);
-      merged.set(msg, 0);
-      merged.set(rest.subarray(0, extra), msg.length);
-      messages.push(merged);
-      rest = rest.subarray(extra);
-      continue;
+    const extra = coalesce ? coalesce(payload, rest.subarray(len)) : 0;
+    if (extra > 0 && extra <= rest.length - len) {
+      const merged = new Uint8Array(len + extra);
+      merged.set(payload, 0);
+      merged.set(rest.subarray(len, len + extra), len);
+      payload = merged;
+      consumed = len + extra;
     }
 
-    messages.push(msg);
+    if (decode) {
+      const decoded = decode(payload);
+      if (decoded === null) {
+        onDrop?.(rest[0], 'rejected');
+        rest = rest.subarray(1);
+        continue;
+      }
+      messages.push(decoded);
+    } else {
+      // No decode: T is its default, Uint8Array. The cast is the price of one
+      // signature serving both the raw and the decoded case.
+      messages.push(payload as unknown as T);
+    }
+    rest = rest.subarray(consumed);
   }
 
   return {
