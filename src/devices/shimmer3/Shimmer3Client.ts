@@ -2,6 +2,7 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { drainByteStream, type DrainVerdict } from '../../core/framing.js';
 import {
   OPCODES,
   BT_FEATURE,
@@ -32,8 +33,6 @@ import {
 import {
   ACK,
   NACK,
-  NEED_MORE,
-  RESYNC,
   concatU8,
   u16le,
   u16be,
@@ -359,50 +358,43 @@ export class Shimmer3Client extends BaseShimmerClient {
    * ACK/response machinery below.
    */
   private _drainControl(): void {
-    let buf = this._rxBuf;
-    for (;;) {
-      if (buf.length === 0) break;
-      // While a stream is (about to be) live, DATA_PACKET (0x00) bytes belong to
-      // the stream parser, not the control plane — leave them buffered.
-      if ((this._streaming || this._streamStarting) && buf[0] === OPCODES.DATA_PACKET) break;
+    const { messages, rest } = drainByteStream(this._rxBuf, {
+      messageLength: shimmer3ControlMessageLength,
+      inspect: (buf) => this._inspectControlHead(buf),
+      onDrop: (byte, reason) =>
+        this._log(
+          reason === 'resync'
+            ? `resync: dropping unexpected control byte 0x${byte.toString(16)}`
+            : `drainControl: dropping gated byte 0x${byte.toString(16)}`,
+        ),
+    });
+    this._rxBuf = rest;
+    for (const msg of messages) this._emitTemp(msg);
+  }
 
-      // Only frame 0x02 as an INQUIRY_RESPONSE when an inquiry is actually
-      // awaited; an unexpected 0x02 is a stray/stream byte and framing it would
-      // swallow real control bytes. Drop it instead.
-      if (buf[0] === OPCODES.INQUIRY_RESPONSE && this._awaitInq <= 0) {
-        this._log('drainControl: dropping 0x02 — no INQUIRY awaited');
-        buf = buf.subarray(1);
-        continue;
-      }
-
-      // Same guard for NACK (0xFE): only frame it as a control message while a
-      // command is genuinely awaiting a response (_awaitCmd > 0). A stray 0xFE —
-      // e.g. a late residual byte arriving after the stop-drain returned early —
-      // is dropped instead of framed. This diverges from the Java driver
-      // (ShimmerObject processes every 0xFE unconditionally) but strictly reduces
-      // the risk of a leaked stream byte being mistaken for a NACK, mirroring the
-      // 0x02 gate above. Defence-in-depth: today _onTemp handlers are added only
-      // while _awaitCmd > 0, so an ungated stray 0xFE would emit to no listener;
-      // this guard keeps that invariant explicit and survives refactors that add
-      // a longer-lived control listener.
-      if (buf[0] === NACK && this._awaitCmd <= 0) {
-        this._log('drainControl: dropping 0xFE — no command awaited');
-        buf = buf.subarray(1);
-        continue;
-      }
-
-      const len = shimmer3ControlMessageLength(buf);
-      if (len === NEED_MORE) break;
-      if (len === RESYNC) {
-        this._log(`resync: dropping unexpected control byte 0x${buf[0].toString(16)}`);
-        buf = buf.subarray(1);
-        continue;
-      }
-      if (buf.length < len) break; // full message not here yet
-      this._emitTemp(new Uint8Array(buf.subarray(0, len)));
-      buf = buf.subarray(len);
-    }
-    this._rxBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
+  /**
+   * Gate the head byte before framing is attempted.
+   *
+   * Three bytes are only control traffic in the right context, and framing one
+   * out of context would swallow the real control bytes behind it:
+   *
+   * - DATA_PACKET (0x00) while a stream is (about to be) live belongs to the
+   *   stream parser — stop and leave it buffered.
+   * - INQUIRY_RESPONSE (0x02) with no inquiry outstanding is a stray/stream
+   *   byte; framing it would consume `9 + numChannels` bytes of garbage.
+   * - NACK (0xFE) with no command outstanding is likewise dropped. This diverges
+   *   from the Java driver (ShimmerObject processes every 0xFE unconditionally)
+   *   but strictly reduces the risk of a leaked stream byte being read as a NACK.
+   *   Defence-in-depth: `_onTemp` handlers are only added while `_awaitCmd > 0`,
+   *   so an ungated stray 0xFE would emit to no listener anyway — this keeps that
+   *   invariant explicit and survives refactors that add a longer-lived listener.
+   */
+  private _inspectControlHead(buf: Uint8Array): DrainVerdict {
+    const head = buf[0];
+    if ((this._streaming || this._streamStarting) && head === OPCODES.DATA_PACKET) return 'stop';
+    if (head === OPCODES.INQUIRY_RESPONSE && this._awaitInq <= 0) return 'drop';
+    if (head === NACK && this._awaitCmd <= 0) return 'drop';
+    return 'frame';
   }
 
   // ---------------------------------------------------------------------------
