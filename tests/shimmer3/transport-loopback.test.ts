@@ -628,3 +628,43 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
     await expect(client.getMacAddress()).rejects.toThrow(/handshake/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gate interleaving (Copilot review on the shared-drain PR)
+// ---------------------------------------------------------------------------
+
+// The `_awaitInq` gate is decremented synchronously inside the waiter handler, so
+// the drain has to dispatch each message before inspecting the next head byte.
+// If it collected everything first, a stray 0x02 sharing a read with a genuine
+// INQUIRY_RESPONSE would still look "awaited", get framed as an inquiry, and
+// swallow the bytes behind it — including a following ACK.
+describe('Shimmer3Client stray 0x02 after a real inquiry', () => {
+  it('drops the stray and still delivers the ACK behind it', async () => {
+    const { t, client } = await connected();
+
+    // A stray 0x02 crafted so that, if framed, it would consume 9 + 3 = 12 bytes
+    // and eat the trailing ACK exactly.
+    const stray = [INQ_RSP, 0, 0, 0, 0, 0, 0, 3, 0, 0xaa, 0xbb, ACK];
+
+    const seen: number[][] = [];
+    const internals = client as unknown as { _temps: Set<(c: Uint8Array) => void> };
+    const spy = (c: Uint8Array): void => void seen.push(Array.from(c));
+
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        internals._temps.add(spy);
+        setTimeout(() => tr.notify([...INQUIRY_MSG, ...stray]), 0);
+      }
+    });
+
+    const inq = await client.inquiry();
+    expect(inq.numChannels).toBe(3);
+
+    internals._temps.delete(spy);
+
+    // The ACK behind the stray survived rather than being swallowed by it.
+    expect(seen.some((m) => m.length === 1 && m[0] === ACK)).toBe(true);
+    // And the stray was never delivered as a second inquiry.
+    expect(seen.filter((m) => m[0] === INQ_RSP)).toHaveLength(1);
+  });
+});

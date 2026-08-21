@@ -21,7 +21,7 @@ import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './pr
 import { msToRtcBytesLE } from '../dock/protocol.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
-import { NEED_MORE, RESYNC } from '../../core/framing.js';
+import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
 import { shimmer3rControlMessageLength } from './streamFraming.js';
 import {
   applyStreamingCalibration,
@@ -404,70 +404,50 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
 
     this._ctrlBuf = concatU8(this._ctrlBuf, chunk);
-    for (const msg of this._extractUnframedMessages()) this._handleFramedChunk(msg);
-  }
-
-  /**
-   * Pull every complete message out of {@link _ctrlBuf}, leaving the incomplete
-   * tail behind. Extraction is finished before anything is dispatched so a
-   * handler can never observe a half-updated buffer.
-   */
-  private _extractUnframedMessages(): Uint8Array[] {
-    const out: Uint8Array[] = [];
-    let buf: Uint8Array = this._ctrlBuf;
-
-    for (;;) {
-      if (buf.length === 0) break;
-
+    /* Dispatch as extracted, not in a batch afterwards: _coalesceAckWithResponse
+     * reads `_expectingAck`, which _handleFramedChunk decrements synchronously
+     * when it consumes an ACK. Batching would evaluate the coalescing decision
+     * for a second ACK+response pair in the same read against a stale count. */
+    const { rest, stopped } = drainByteStream(this._ctrlBuf, {
+      messageLength: shimmer3rControlMessageLength,
+      onMessage: (msg) => this._handleFramedChunk(msg),
       // DATA_PACKET belongs to the stream plane even before `_streaming` is set
       // (the window between START_STREAMING and its ACK). Its length comes from
       // the schema, so stop framing and let the stream parser own the rest.
-      if (buf[0] === OPCODES.DATA_PACKET) {
-        this._rxBuf = concatU8(this._rxBuf, buf);
-        buf = new Uint8Array(0);
-        this._parseStreamIfPossible();
-        break;
-      }
+      inspect: (buf) => (buf[0] === OPCODES.DATA_PACKET ? 'stop' : 'frame'),
+      coalesce: this._coalesceAckWithResponse,
+      onDrop: (byte) =>
+        this._log(`serial resync: dropping unframeable byte 0x${byte.toString(16)}`),
+    });
 
-      const len = shimmer3rControlMessageLength(buf);
-      if (len === NEED_MORE) break;
-      if (len === RESYNC) {
-        this._log(`serial resync: dropping unframeable byte 0x${buf[0].toString(16)}`);
-        buf = buf.subarray(1);
-        continue;
-      }
-      if (buf.length < len) break; // defensive: framer should have said NEED_MORE
-
-      const msg = new Uint8Array(buf.subarray(0, len));
-      buf = buf.subarray(len);
-
-      // Emulate BLE's coalescing: the module packs an ACK and the response the
-      // firmware wrote straight after it into ONE notification, and the waiters
-      // rely on that — `_waitForAck` hands the remainder over synchronously via
-      // `_lastAckRemainder`. Emitted as two separate messages, the response
-      // would arrive before the caller's `await` continuation had registered its
-      // response handler, and be dropped. Two ACKs are never merged: the second
-      // would masquerade as the first's response body.
-      if (msg.length === 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED && this._expectingAck > 0) {
-        const nextLen = shimmer3rControlMessageLength(buf);
-        if (
-          nextLen !== NEED_MORE &&
-          nextLen !== RESYNC &&
-          buf.length >= nextLen &&
-          buf[0] !== OPCODES.ACK_COMMAND_PROCESSED
-        ) {
-          out.push(concatU8(msg, buf.subarray(0, nextLen)));
-          buf = buf.subarray(nextLen);
-          continue;
-        }
-      }
-
-      out.push(msg);
+    if (stopped) {
+      this._ctrlBuf = new Uint8Array(0);
+      this._rxBuf = concatU8(this._rxBuf, rest);
+      this._parseStreamIfPossible();
+    } else {
+      this._ctrlBuf = rest;
     }
-
-    this._ctrlBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
-    return out;
   }
+
+  /**
+   * Merge a bare ACK with the message that follows it, emulating BLE: the module
+   * packs an ACK and the response the firmware wrote straight after it into ONE
+   * notification, and the waiters rely on that — `_waitForAck` hands the
+   * remainder over synchronously via `_lastAckRemainder`. Emitted as two
+   * separate messages, the response would arrive before the caller's `await`
+   * continuation had registered its response handler, and be dropped.
+   *
+   * Two ACKs are never merged: the second would masquerade as the first's
+   * response body.
+   */
+  private _coalesceAckWithResponse = (msg: Uint8Array, rest: Uint8Array): number => {
+    if (msg.length !== 1 || msg[0] !== OPCODES.ACK_COMMAND_PROCESSED) return 0;
+    if (this._expectingAck <= 0) return 0;
+    if (rest.length === 0 || rest[0] === OPCODES.ACK_COMMAND_PROCESSED) return 0;
+    const nextLen = shimmer3rControlMessageLength(rest);
+    if (nextLen === NEED_MORE || nextLen === RESYNC || rest.length < nextLen) return 0;
+    return nextLen;
+  };
 
   /** Run the schema parser if one has been built, swallowing parse errors. */
   private _parseStreamIfPossible(): void {
