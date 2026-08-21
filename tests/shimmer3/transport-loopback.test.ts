@@ -525,3 +525,90 @@ describe('Shimmer3Client daughter-card memory', () => {
     expect(t.writes.length).toBe(writesBefore);
   });
 });
+
+// ---------------------------------------------------------------------------
+// InfoMem / MAC
+// ---------------------------------------------------------------------------
+
+// The MAC has no command of its own — it lives in InfoMem at image index 224,
+// which equals the WIRE address only on firmware using flat page addressing.
+// Older firmware addresses the C page at 0x1880, so the same field sits at
+// 0x18E0. These tests pin that mapping, because getting it wrong reads six
+// bytes of unrelated configuration and reports them as a MAC.
+describe('Shimmer3Client InfoMem + getMacAddress', () => {
+  const MAC_BYTES = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+
+  /** Handshake replying with `fwMinor`, then serving InfoMem reads. */
+  async function withFirmware(
+    fwId: number,
+    fwMinor: number,
+    macBytes: number[] = MAC_BYTES,
+  ): Promise<{ t: LoopbackTransport; client: Shimmer3Client; reads: number[] }> {
+    const t = newTransport();
+    const reads: number[] = [];
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+      else if (op === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, fwId, 0, 0, 0, fwMinor, 0]), 0);
+      else if (op === OPCODES.GET_INFOMEM_COMMAND) {
+        const len = bytes[1];
+        const addr = bytes[2] | (bytes[3] << 8);
+        reads.push(addr);
+        setTimeout(() => tr.notify([OPCODES.INFOMEM_RESPONSE, len, ...macBytes.slice(0, len)]), 0);
+      }
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    return { t, client, reads };
+  }
+
+  it('reads the MAC at the FLAT address on modern LogAndStream', async () => {
+    const { client, reads } = await withFirmware(3, 16); // LogAndStream 0.16 >= 0.5.16
+    await expect(client.getMacAddress()).resolves.toBe('123456789ABC');
+    expect(reads).toEqual([224]); // flat C page (128) + 96
+  });
+
+  it('reads the MAC at the LEGACY address on pre-0.5.16 LogAndStream', async () => {
+    const { client, reads } = await withFirmware(3, 5); // 0.5.0 < 0.5.16
+    await expect(client.getMacAddress()).resolves.toBe('123456789ABC');
+    expect(reads).toEqual([0x1880 + 96]); // legacy C page base
+  });
+
+  it('rejects an unprovisioned MAC rather than reporting all-FF', async () => {
+    const { client } = await withFirmware(3, 16, [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    await expect(client.getMacAddress()).rejects.toThrow(/unprovisioned/i);
+  });
+
+  it('reassembles an InfoMem read dribbled one byte at a time', async () => {
+    const t = newTransport();
+    const payload = Array.from({ length: 40 }, (_, i) => i);
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+      else if (op === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 16, 0]), 0);
+      else if (op === OPCODES.GET_INFOMEM_COMMAND)
+        dribble(tr, [OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    const got = await client.readInfoMem(224, payload.length);
+    expect(Array.from(got)).toEqual(payload);
+  });
+
+  it('rejects out-of-range InfoMem reads before writing', async () => {
+    const { t, client } = await withFirmware(3, 16);
+    const before = t.writes.length;
+    await expect(client.readInfoMem(-1, 8)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0x10000, 8)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0, 129)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readInfoMem(0, 0)).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(before);
+  });
+
+  it('refuses to guess the layout before the handshake has run', async () => {
+    const client = new Shimmer3Client({ debug: false });
+    await expect(client.getMacAddress()).rejects.toThrow(/handshake/i);
+  });
+});

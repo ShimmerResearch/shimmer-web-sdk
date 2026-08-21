@@ -220,6 +220,13 @@ export const CONFIG_TIME_LENGTH = 4;
 export const MAC_LENGTH = 6;
 export const MAX_SYNC_NODES = 21;
 
+/**
+ * MAC values reported by a device whose InfoMem has never been provisioned
+ * (erased flash reads back all-FF; a zeroed page reads back all-zero). Neither
+ * is a real address, so a client should reject rather than surface them.
+ */
+export const INVALID_MAC_IDS: readonly string[] = Object.freeze(['FFFFFFFFFFFF', '000000000000']);
+
 export const BIT_SHIFT = Object.freeze({
   GSR_RANGE: 1,
   EXP_POWER: 0,

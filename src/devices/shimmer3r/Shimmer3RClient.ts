@@ -31,7 +31,7 @@ import {
   type InertialGroup,
   type KinematicCalibration,
 } from '../calibration/index.js';
-import { MAC_LENGTH } from '../infomem/layout.js';
+import { MAC_LENGTH, INVALID_MAC_IDS } from '../infomem/layout.js';
 import {
   SD_TRANSFER_OPCODES,
   SD_STATUS,
@@ -65,8 +65,6 @@ import {
 // in the Shimmer Java driver: idxMacAddress = 128+96 (=224), length 6 bytes.
 // 224+6 stays within one 128-byte InfoMem segment, so a single read suffices.
 const INFOMEM_MAC_OFFSET = 224;
-// Devices that have not been provisioned report an all-FF or all-zero MAC.
-const INVALID_MAC_IDS = ['FFFFFFFFFFFF', '000000000000'];
 
 // ---------------------------------------------------------------------------
 // Internal schema type

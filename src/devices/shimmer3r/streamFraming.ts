@@ -96,13 +96,20 @@ export function shimmer3rControlMessageLength(buf: Uint8Array): number {
     return buf.length < total ? NEED_MORE : total;
   }
 
-  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE) {
-    // [0x68][length][data…]; the firmware caps a read at 128 bytes, so a larger
-    // "length" is garbage rather than a giant response.
+  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
+    // [opcode][length][data…]; the firmware caps both a daughter-card and an
+    // InfoMem read at 128 bytes, so a larger "length" is garbage rather than a
+    // giant response.
+    //
+    // Framing these means the whole response arrives as ONE message, so
+    // `_readLengthPrefixedResponse`'s continuation path — which treats later
+    // chunks as raw opcode-less payload — never engages on a byte stream. That
+    // matters: those continuation bytes have no opcode, so the drain could not
+    // frame them and would resync straight past the tail of the record.
     if (buf.length < 2) return NEED_MORE;
-    const dcLen = buf[1];
-    if (dcLen > 128) return RESYNC;
-    const total = 2 + dcLen;
+    const memLen = buf[1];
+    if (memLen > 128) return RESYNC;
+    const total = 2 + memLen;
     return buf.length < total ? NEED_MORE : total;
   }
 
