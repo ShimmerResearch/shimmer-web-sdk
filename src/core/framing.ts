@@ -100,6 +100,12 @@ export interface DrainOptions<T = Uint8Array> {
    * delivered — so a stray 0x02 following a genuine INQUIRY_RESPONSE in the same
    * read would still look "awaited" and get framed, swallowing the bytes behind
    * it instead of being dropped.
+   *
+   * **Must not throw.** An exception here escapes `drainByteStream`, so the
+   * caller never receives {@link DrainResult.rest} and never advances its
+   * accumulator — every message in that read would be delivered again on the
+   * next one. All three in-tree callers dispatch through an emit helper that
+   * swallows handler exceptions, which is what makes this safe today.
    */
   onMessage?: (msg: T) => void;
   /** Notified for every byte dropped, so callers can log without duplicating the loop. */
