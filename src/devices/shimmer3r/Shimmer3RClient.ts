@@ -1602,12 +1602,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Measure raw BLE link throughput with the firmware's data-rate test
+   * Measure raw link throughput with the firmware's data-rate test
    * (SET_DATA_RATE_TEST): the device free-runs 5-byte counter packets as
-   * fast as the link drains them and we count notification bytes for
-   * `durationMs`. This measures the pipe itself (connection interval, MTU,
-   * module buffering) independent of the SD/file-transfer protocol, so it
-   * gives an upper bound for transfer rates on a given host/adapter/OS.
+   * fast as the link drains them and we count received bytes for
+   * `durationMs`. This measures the pipe itself (BLE connection interval and
+   * MTU, or RFCOMM/serial buffering) independent of the SD/file-transfer
+   * protocol, so it gives an upper bound for transfer rates on a given
+   * host/adapter/OS — and a direct BLE-vs-classic-Bluetooth comparison.
    * The device must be idle (the firmware NACKs the test while sensing).
    */
   async runDataRateTest(
