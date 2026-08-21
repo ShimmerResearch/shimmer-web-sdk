@@ -404,8 +404,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
 
     this._ctrlBuf = concatU8(this._ctrlBuf, chunk);
-    const { messages, rest, stopped } = drainByteStream(this._ctrlBuf, {
+    /* Dispatch as extracted, not in a batch afterwards: _coalesceAckWithResponse
+     * reads `_expectingAck`, which _handleFramedChunk decrements synchronously
+     * when it consumes an ACK. Batching would evaluate the coalescing decision
+     * for a second ACK+response pair in the same read against a stale count. */
+    const { rest, stopped } = drainByteStream(this._ctrlBuf, {
       messageLength: shimmer3rControlMessageLength,
+      onMessage: (msg) => this._handleFramedChunk(msg),
       // DATA_PACKET belongs to the stream plane even before `_streaming` is set
       // (the window between START_STREAMING and its ACK). Its length comes from
       // the schema, so stop framing and let the stream parser own the rest.
@@ -415,16 +420,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._log(`serial resync: dropping unframeable byte 0x${byte.toString(16)}`),
     });
 
-    // Buffers are settled before anything is dispatched, so a handler can never
-    // observe a half-updated accumulator.
     if (stopped) {
       this._ctrlBuf = new Uint8Array(0);
       this._rxBuf = concatU8(this._rxBuf, rest);
+      this._parseStreamIfPossible();
     } else {
       this._ctrlBuf = rest;
     }
-    for (const msg of messages) this._handleFramedChunk(msg);
-    if (stopped) this._parseStreamIfPossible();
   }
 
   /**

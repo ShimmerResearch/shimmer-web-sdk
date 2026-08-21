@@ -200,6 +200,43 @@ describe('drainByteStream', () => {
     });
   });
 
+  describe('onMessage dispatch ordering', () => {
+    // The whole point of the hook: hooks that read caller state must see updates
+    // a handler makes. Both Shimmer clients decrement gate counters synchronously
+    // inside the handler that receives a message.
+    it('dispatches each message before inspecting the next head', () => {
+      // This gate allows exactly one framed message, and the handler closes it.
+      // Collect-then-dispatch would inspect both heads while the gate was still
+      // open, framing two.
+      let allow = 1;
+      const seen: number[][] = [];
+      const r = drain([ONE_BYTE, ONE_BYTE], {
+        inspect: () => (allow > 0 ? 'frame' : 'drop'),
+        onMessage: (m) => {
+          allow -= 1;
+          seen.push(Array.from(m));
+        },
+      });
+      expect(seen).toEqual([[ONE_BYTE]]);
+      // The second byte was gated away, not framed.
+      expect(Array.from(r.rest)).toEqual([]);
+    });
+
+    it('leaves messages empty when onMessage handles dispatch', () => {
+      const seen: number[][] = [];
+      const r = drain([ONE_BYTE, 0xa0, 0x01, 7], {
+        onMessage: (m) => void seen.push(Array.from(m)),
+      });
+      expect(seen).toEqual([[ONE_BYTE], [0xa0, 0x01, 7]]);
+      expect(r.messages).toEqual([]);
+    });
+
+    it('still collects into messages when onMessage is omitted', () => {
+      const r = drain([ONE_BYTE, 0xa0, 0x01, 7]);
+      expect(asArrays(r.messages)).toEqual([[ONE_BYTE], [0xa0, 0x01, 7]]);
+    });
+  });
+
   it('is pure: the input buffer is never mutated', () => {
     const input = new Uint8Array([ONE_BYTE, 0xa0, 0x01, 7]);
     const copy = Array.from(input);

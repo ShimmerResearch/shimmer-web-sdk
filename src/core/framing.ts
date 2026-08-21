@@ -87,6 +87,21 @@ export interface DrainOptions<T = Uint8Array> {
    * the awaiting caller had registered its handler.
    */
   coalesce?: (msg: Uint8Array, rest: Uint8Array) => number;
+  /**
+   * Dispatch each message the moment it is extracted, before the next head byte
+   * is inspected. When omitted, messages are collected into
+   * {@link DrainResult.messages} and the caller dispatches them afterwards.
+   *
+   * **Use this whenever `inspect` or `coalesce` read state that a handler
+   * mutates synchronously.** Both Shimmer clients do: delivering a response
+   * decrements the gate counters (`_awaitInq`/`_awaitCmd`) or the expected-ACK
+   * count inside the handler, not on a later microtask. Collecting first would
+   * evaluate every hook against the state as it was before *any* message was
+   * delivered — so a stray 0x02 following a genuine INQUIRY_RESPONSE in the same
+   * read would still look "awaited" and get framed, swallowing the bytes behind
+   * it instead of being dropped.
+   */
+  onMessage?: (msg: T) => void;
   /** Notified for every byte dropped, so callers can log without duplicating the loop. */
   onDrop?: (byte: number, reason: DropReason) => void;
 }
@@ -112,13 +127,21 @@ export interface DrainResult<T = Uint8Array> {
  * Byte-at-a-time resynchronisation is the deliberate choice over flushing the
  * buffer on garbage: a corrupt byte then costs one byte, not every valid message
  * queued behind it.
+ *
+ * Pass {@link DrainOptions.onMessage} to have each message dispatched as it is
+ * extracted. That ordering matters whenever `inspect` or `coalesce` consult state
+ * a handler mutates synchronously — see that option's note.
  */
 export function drainByteStream<T = Uint8Array>(
   buf: Uint8Array,
   opts: DrainOptions<T>,
 ): DrainResult<T> {
-  const { messageLength, decode, inspect, coalesce, onDrop } = opts;
+  const { messageLength, decode, inspect, coalesce, onMessage, onDrop } = opts;
   const messages: T[] = [];
+  const deliver = (m: T): void => {
+    if (onMessage) onMessage(m);
+    else messages.push(m);
+  };
   let rest: Uint8Array = buf;
   let stopped = false;
 
@@ -170,11 +193,11 @@ export function drainByteStream<T = Uint8Array>(
         rest = rest.subarray(1);
         continue;
       }
-      messages.push(decoded);
+      deliver(decoded);
     } else {
       // No decode: T is its default, Uint8Array. The cast is the price of one
       // signature serving both the raw and the decoded case.
-      messages.push(payload as unknown as T);
+      deliver(payload as unknown as T);
     }
     rest = rest.subarray(consumed);
   }

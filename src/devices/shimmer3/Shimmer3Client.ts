@@ -358,9 +358,17 @@ export class Shimmer3Client extends BaseShimmerClient {
    * ACK/response machinery below.
    */
   private _drainControl(): void {
-    const { messages, rest } = drainByteStream(this._rxBuf, {
+    /* Dispatch each message as it is extracted, NOT in a batch afterwards: the
+     * `_awaitInq`/`_awaitCmd` gates in _inspectControlHead are decremented
+     * synchronously inside the waiter handlers that _emitTemp invokes. Draining
+     * first and emitting later would inspect every head byte against the gate
+     * state as it was before any response was delivered, so a stray 0x02 sharing
+     * a read with a genuine INQUIRY_RESPONSE would still look awaited and get
+     * framed - swallowing the ACK behind it. */
+    const { rest } = drainByteStream(this._rxBuf, {
       messageLength: shimmer3ControlMessageLength,
       inspect: (buf) => this._inspectControlHead(buf),
+      onMessage: (msg) => this._emitTemp(msg),
       onDrop: (byte, reason) =>
         this._log(
           reason === 'resync'
@@ -369,7 +377,6 @@ export class Shimmer3Client extends BaseShimmerClient {
         ),
     });
     this._rxBuf = rest;
-    for (const msg of messages) this._emitTemp(msg);
   }
 
   /**
