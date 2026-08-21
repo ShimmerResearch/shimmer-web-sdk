@@ -98,8 +98,13 @@ import {
 
 const client = new Shimmer3Client({
   transport: new WebSerialTransport({
-    // Chrome hides Bluetooth serial ports from the picker unless the origin
-    // names their service class.
+    // BOTH are needed, and they do different jobs:
+    //   allowedBluetoothServiceClassIds *permits* Bluetooth ports to be
+    //     surfaced at all — Chrome hides them otherwise;
+    //   filters *narrows* the picker to that service class.
+    // With the permission alone the picker lists every COM port and every
+    // paired Bluetooth device.
+    filters: [{ bluetoothServiceClassId: SHIMMER3_SPP_UUID }],
     allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID],
     kind: 'rfcomm',
   }),

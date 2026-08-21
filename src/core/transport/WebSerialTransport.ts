@@ -17,10 +17,20 @@ export interface WebSerialTransportOptions {
   /** `requestPort` filters. */
   filters?: SerialPortFilter[] | null;
   /**
-   * Service class IDs the port picker may surface Bluetooth (RFCOMM/SPP) ports
-   * for — pass `[SHIMMER3_SPP_UUID]` to reach a Shimmer paired over classic
-   * Bluetooth. Chrome hides Bluetooth serial ports from the picker unless the
-   * origin names their service class, so `filters` alone is not enough.
+   * Service class IDs the port picker is *permitted* to surface Bluetooth
+   * (RFCOMM/SPP) ports for — pass `[SHIMMER3_SPP_UUID]` to reach a Shimmer
+   * paired over classic Bluetooth. Chrome hides Bluetooth serial ports entirely
+   * unless the origin names their service class, so `filters` alone is not
+   * enough.
+   *
+   * **This permits; it does not narrow.** On its own it makes the picker offer
+   * every COM port *and* every paired Bluetooth device. To narrow the list, also
+   * pass {@link filters} with the same service class:
+   *
+   * ```ts
+   * filters: [{ bluetoothServiceClassId: SHIMMER3_SPP_UUID }],
+   * allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID],
+   * ```
    */
   allowedBluetoothServiceClassIds?: BluetoothServiceClassId[] | null;
   /**
