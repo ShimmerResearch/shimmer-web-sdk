@@ -4,12 +4,12 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
-| Device                  | Class                | Transport                                |
-| ----------------------- | -------------------- | ---------------------------------------- |
-| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth                            |
-| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP (injected transport only)     |
-| Shimmer in dock/Base    | `WiredShimmerClient` | Dock FTDI UART (injected transport only) |
-| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial                |
+| Device                  | Class                | Transport                                         |
+| ----------------------- | -------------------- | ------------------------------------------------- |
+| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth, Web Serial (USB or Bluetooth port) |
+| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP — Web Serial over a paired COM port    |
+| Shimmer in dock/Base    | `WiredShimmerClient` | Dock FTDI UART (injected transport only)          |
+| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial                         |
 
 ## Quick Start
 
@@ -82,13 +82,45 @@ callback (never merge or re-split chunks), and fire `onDisconnect` on link loss.
 ### Classic-Bluetooth Shimmer3 (`Shimmer3Client`)
 
 The classic (pre-3R) Shimmer3 speaks the same LiteProtocol but over an **RFCOMM/SPP
-byte stream** rather than BLE. Because Web Bluetooth cannot open an RFCOMM socket,
-classic Shimmer3 is **impossible in a browser** — `Shimmer3Client` therefore
-_requires_ an injected transport and `connect()` throws without one. A platform
-that can open SPP (e.g. a React Native Android module calling
-`createRfcommSocketToServiceRecord`, SPP UUID `SHIMMER3_SPP_UUID`) supplies the
-transport; the transport should report `capabilities.framed = false` since RFCOMM
-has no message boundaries.
+byte stream** rather than BLE. Web Bluetooth cannot open an RFCOMM socket, so
+`Shimmer3Client` _requires_ an injected transport and `connect()` throws without
+one — but a browser can still reach the device. Pairing a Shimmer over classic
+Bluetooth makes the OS expose it as a **virtual COM port** (Windows `COMx`,
+macOS `/dev/cu.*-SPPDev`), and Web Serial can open that port, so
+`WebSerialTransport` is a working SPP transport:
+
+```ts
+import {
+  Shimmer3Client,
+  WebSerialTransport,
+  SHIMMER3_SPP_UUID,
+} from '@shimmerresearch/shimmer-web-sdk';
+
+const client = new Shimmer3Client({
+  transport: new WebSerialTransport({
+    // BOTH are needed, and they do different jobs:
+    //   allowedBluetoothServiceClassIds *permits* Bluetooth ports to be
+    //     surfaced at all — Chrome hides them otherwise;
+    //   filters *narrows* the picker to that service class.
+    // With the permission alone the picker lists every COM port and every
+    // paired Bluetooth device.
+    filters: [{ bluetoothServiceClassId: SHIMMER3_SPP_UUID }],
+    allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID],
+    kind: 'rfcomm',
+  }),
+});
+await client.connect();
+```
+
+The sensor must already be paired with the host (the page cannot do that), and
+`open()` is what brings the RFCOMM link up — so it blocks, and eventually fails,
+when the sensor is asleep or out of range. `WebSerialTransport` bounds that with
+`openTimeoutMs` (15 s by default).
+
+On a non-browser platform, anything that can open SPP (e.g. a React Native
+Android module calling `createRfcommSocketToServiceRecord` with
+`SHIMMER3_SPP_UUID`) works equally well. Either way the transport should report
+`capabilities.framed = false`, since RFCOMM has no message boundaries.
 
 ```ts
 import { Shimmer3Client, SensorBitmapShimmer3 } from '@shimmerresearch/shimmer-web-sdk';

@@ -21,6 +21,8 @@
  *   status: [0x8A][0xC6][sessionId][status][nextOffset u32][crc16 u16]
  */
 
+import { NEED_MORE, RESYNC } from '../../../core/framing.js';
+
 export const SD_TRANSFER_OPCODES = {
   // Command opcodes must avoid the CYW20820 EZ-Serial SOF bytes 0x80/0xC0/
   // 0xD0 (the firmware's UART RX demux would route them to the EZ-Serial
@@ -415,6 +417,46 @@ function oneShotLength(buf: Uint8Array): number {
   }
 }
 
+/**
+ * Total length of the SD-transfer message at the head of `buf`, or
+ * {@link NEED_MORE} / {@link RESYNC}.
+ *
+ * The single source of truth for SD frame spans: {@link tryExtractSdMessage}
+ * uses it to slice a message before CRC-checking it, and the Shimmer3R client's
+ * unframed-transport drain uses it to decide how many bytes of a serial byte
+ * stream belong to one SD message. CRC validity is deliberately not considered
+ * here — a frame with a bad CRC still occupies the same span, and it is the
+ * extractor's job to reject it.
+ */
+export function sdMessageSpan(buf: Uint8Array): number {
+  if (buf.length === 0) return NEED_MORE;
+
+  if (buf[0] === SD_INSTREAM_BYTE) {
+    if (buf.length < 2) return NEED_MORE;
+
+    if (buf[1] === SD_TRANSFER_OPCODES.FILE_DATA_RESPONSE) {
+      if (buf.length < DATA_FRAME_HEADER_LEN) return NEED_MORE;
+      const len = u16(buf, 5);
+      if (len === 0 || len > SD_BLOCK_PAYLOAD_MAX) return RESYNC;
+      const total = DATA_FRAME_HEADER_LEN + len + FRAME_CRC_LEN;
+      return buf.length < total ? NEED_MORE : total;
+    }
+
+    if (buf[1] === SD_TRANSFER_OPCODES.FILE_STATUS_RESPONSE) {
+      return buf.length < STATUS_FRAME_LEN ? NEED_MORE : STATUS_FRAME_LEN;
+    }
+
+    /* An instream response that is not part of the SD-transfer protocol
+     * (e.g. an unsolicited status response) — resync past it. */
+    return RESYNC;
+  }
+
+  const len = oneShotLength(buf);
+  if (len === -1) return RESYNC;
+  if (len === 0 || buf.length < len) return NEED_MORE;
+  return len;
+}
+
 export interface SdExtractResult {
   /** Bytes to drop from the front of the buffer (0 = need more data). */
   consumed: number;
@@ -430,22 +472,18 @@ export interface SdExtractResult {
  * (e.g. unsolicited instream status responses) cannot jam the stream.
  */
 export function tryExtractSdMessage(buf: Uint8Array): SdExtractResult {
-  if (buf.length === 0) return { consumed: 0 };
+  const span = sdMessageSpan(buf);
+  if (span === NEED_MORE) return { consumed: 0 };
+  if (span === RESYNC) return { consumed: 1 };
 
   if (buf[0] === SD_INSTREAM_BYTE) {
-    if (buf.length < 2) return { consumed: 0 };
-
     if (buf[1] === SD_TRANSFER_OPCODES.FILE_DATA_RESPONSE) {
-      if (buf.length < DATA_FRAME_HEADER_LEN) return { consumed: 0 };
       const len = u16(buf, 5);
-      if (len === 0 || len > SD_BLOCK_PAYLOAD_MAX) return { consumed: 1 };
-      const total = DATA_FRAME_HEADER_LEN + len + FRAME_CRC_LEN;
-      if (buf.length < total) return { consumed: 0 };
       const crcOk =
         sdCrc16(buf, DATA_FRAME_HEADER_LEN + len) === u16(buf, DATA_FRAME_HEADER_LEN + len);
       if (!crcOk) return { consumed: 1, crcError: true };
       return {
-        consumed: total,
+        consumed: span,
         msg: {
           kind: 'data',
           sessionId: buf[2],
@@ -456,23 +494,14 @@ export function tryExtractSdMessage(buf: Uint8Array): SdExtractResult {
       };
     }
 
-    if (buf[1] === SD_TRANSFER_OPCODES.FILE_STATUS_RESPONSE) {
-      if (buf.length < STATUS_FRAME_LEN) return { consumed: 0 };
-      const crcOk = sdCrc16(buf, 8) === u16(buf, 8);
-      if (!crcOk) return { consumed: 1, crcError: true };
-      return {
-        consumed: STATUS_FRAME_LEN,
-        msg: { kind: 'status', sessionId: buf[2], status: buf[3], nextOffset: u32(buf, 4), crcOk },
-      };
-    }
-
-    /* An instream response that is not part of the SD-transfer protocol
-     * (e.g. an unsolicited status response) — resync past it. */
-    return { consumed: 1 };
+    // FILE_STATUS_RESPONSE — the only other span sdMessageSpan accepts here.
+    const crcOk = sdCrc16(buf, 8) === u16(buf, 8);
+    if (!crcOk) return { consumed: 1, crcError: true };
+    return {
+      consumed: span,
+      msg: { kind: 'status', sessionId: buf[2], status: buf[3], nextOffset: u32(buf, 4), crcOk },
+    };
   }
 
-  const len = oneShotLength(buf);
-  if (len === -1) return { consumed: 1 };
-  if (len === 0 || buf.length < len) return { consumed: 0 };
-  return { consumed: len, msg: { kind: 'oneshot', opcode: buf[0], body: buf.slice(0, len) } };
+  return { consumed: span, msg: { kind: 'oneshot', opcode: buf[0], body: buf.slice(0, span) } };
 }

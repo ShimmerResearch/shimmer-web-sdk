@@ -24,6 +24,12 @@ import {
   type KinematicCalibration,
 } from '../calibration/index.js';
 import {
+  resolveInfoMemLayout,
+  INFOMEM_PAGE_SIZE,
+  MAC_LENGTH,
+  INVALID_MAC_IDS,
+} from '../infomem/layout.js';
+import {
   ACK,
   NACK,
   NEED_MORE,
@@ -212,9 +218,11 @@ export class Shimmer3Client extends BaseShimmerClient {
   /**
    * Open the RFCOMM connection and run the classic-Shimmer3 connect handshake.
    *
-   * A transport is REQUIRED (constructor option or this parameter); classic
-   * Bluetooth cannot run in a browser, so there is no default. Calling without
-   * one throws.
+   * A transport is REQUIRED (constructor option or this parameter): Web
+   * Bluetooth cannot open an RFCOMM socket, so there is no default. In a browser
+   * the working transport is a {@link WebSerialTransport} over the virtual COM
+   * port the OS creates for a Shimmer paired over classic Bluetooth. Calling
+   * without one throws.
    *
    * Handshake (ported from ShimmerBluetooth#initialize → readShimmerVersionNew →
    * readFWVersion):
@@ -228,9 +236,11 @@ export class Shimmer3Client extends BaseShimmerClient {
     const t = transport ?? this._injectedTransport;
     if (!t) {
       throw new Error(
-        'Shimmer3Client requires an injected transport: classic Bluetooth (RFCOMM/SPP) ' +
-          'is not available in browsers. Pass a ShimmerTransport via the constructor ' +
-          '({ transport }) or connect(transport).',
+        'Shimmer3Client requires an injected transport: Web Bluetooth cannot open an ' +
+          'RFCOMM/SPP socket. In a browser, pair the sensor over classic Bluetooth and ' +
+          'pass a WebSerialTransport over the COM port the OS creates for it ' +
+          '(allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID]); elsewhere pass any ' +
+          'ShimmerTransport via the constructor ({ transport }) or connect(transport).',
       );
     }
     this._transport = t;
@@ -617,6 +627,104 @@ export class Shimmer3Client extends BaseShimmerClient {
       throw new Error(`Daughter-card mem read returned ${data.length} of ${length} bytes.`);
     }
     return data;
+  }
+
+  /**
+   * Read the device configuration memory (InfoMem) via GET_INFOMEM_COMMAND.
+   *
+   * `address` is a **wire** address, not an index into the 384-byte InfoMem
+   * image: older firmware addresses the D/C/B pages at 0x1800/0x1880/0x1900
+   * while newer firmware and all Shimmer3Rs use a flat 0/128/256. Use
+   * {@link resolveInfoMemLayout} to pick the right page base for the connected
+   * device — {@link getMacAddress} shows the pattern. Max 128 bytes per read
+   * (one page), which the firmware enforces too.
+   */
+  async readInfoMem(address: number, length: number): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
+      throw new Error('InfoMem address must be an integer in 0..65535.');
+    }
+    if (!Number.isInteger(length) || length < 1 || length > 128) {
+      throw new Error('InfoMem read length must be an integer in 1..128.');
+    }
+    /* One read must stay inside one page, or the firmware returns
+     * page-boundary-dependent junk for the overhang. Every page base is
+     * 128-aligned in both addressing modes (legacy 0x1800/0x1880/0x1900 and
+     * flat 0/128/256), so the offset within the page is just address % 128
+     * regardless of which mode the connected firmware uses. */
+    if ((address % INFOMEM_PAGE_SIZE) + length > INFOMEM_PAGE_SIZE) {
+      throw new Error(
+        `InfoMem read ${length}B @ ${address} crosses a ${INFOMEM_PAGE_SIZE}-byte page ` +
+          'boundary; split it into one read per page.',
+      );
+    }
+
+    this._emitStatus(`GET_INFOMEM ${length}B @ ${address} → waiting for RSP…`);
+    const cmd = new Uint8Array([
+      OPCODES.GET_INFOMEM_COMMAND,
+      length & 0xff,
+      address & 0xff,
+      (address >> 8) & 0xff,
+    ]);
+    await this._write(cmd);
+    const rsp = await this._waitForResponse(
+      OPCODES.INFOMEM_RESPONSE,
+      SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    );
+
+    /* Response is [INFOMEM_RSP][length][data...]; the opcode and length bytes
+     * are skipped when present and consistent. No reassembly needed — the
+     * byte-stream framer already delivers the whole response as one message. */
+    let off = 0;
+    if (rsp[off] === OPCODES.INFOMEM_RESPONSE) off++;
+    if (rsp.length > off && rsp[off] === length && rsp.length >= off + 1 + length) off++;
+
+    const data = rsp.slice(off, off + length);
+    if (data.length < length) {
+      throw new Error(`InfoMem read returned ${data.length} of ${length} bytes.`);
+    }
+    return data;
+  }
+
+  /**
+   * Read the device's Bluetooth MAC as a 12-char uppercase hex string.
+   *
+   * The MAC lives in InfoMem rather than behind a command of its own, so this
+   * resolves the layout for the connected device first: `idxMacAddress` (224) is
+   * an index into the InfoMem image, which only equals the wire address on
+   * firmware that uses flat page addressing. Older firmware needs the C-page
+   * base instead, hence the page/offset split below.
+   *
+   * Requires a completed {@link connect} handshake — the layout depends on the
+   * hardware and firmware version it reads.
+   */
+  async getMacAddress(): Promise<string> {
+    const fw = this.firmwareVersion;
+    const hw = this.deviceVersion?.hardwareVersion;
+    if (!fw || hw === undefined) {
+      throw new Error('getMacAddress requires a completed connect handshake.');
+    }
+
+    const layout = resolveInfoMemLayout({
+      hardwareVersion: hw,
+      firmwareId: fw.firmwareIdentifier,
+      firmwareVersion: { major: fw.major, minor: fw.minor, internal: fw.internal },
+    });
+    const pageBases = [layout.addrD, layout.addrC, layout.addrB];
+    const page = Math.floor(layout.idxMacAddress / INFOMEM_PAGE_SIZE);
+    const address = pageBases[page] + (layout.idxMacAddress % INFOMEM_PAGE_SIZE);
+
+    const bytes = await this.readInfoMem(address, MAC_LENGTH);
+    const mac = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+
+    if (INVALID_MAC_IDS.includes(mac)) {
+      throw new Error(`Device reported an unprovisioned MAC (${mac}).`);
+    }
+    this._emitStatus(`Device MAC: ${mac}`);
+    return mac;
   }
 
   /**
