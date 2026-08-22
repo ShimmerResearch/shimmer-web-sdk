@@ -76,6 +76,20 @@ export {
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
 export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
+// Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
+// the COM port a classic-Bluetooth pairing creates) — needed only when writing
+// a custom transport; the clients apply it themselves.
+//
+// NEED_MORE / RESYNC are the canonical sentinels every framer returns. The
+// SHIMMER3_* and WIRED_* aliases further down are the older per-device copies,
+// kept for compatibility and identical in value.
+export { NEED_MORE, RESYNC } from './core/framing.js';
+export {
+  shimmer3rControlMessageLength,
+  SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
+  SHIMMER3R_INQ_CHANNELS_OFFSET,
+} from './devices/shimmer3r/streamFraming.js';
 export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
 export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
 export {
@@ -133,6 +147,7 @@ export {
   parseFreeSpaceRsp,
   parseDeleteRsp,
   tryExtractSdMessage,
+  sdMessageSpan,
 } from './devices/shimmer3r/sdTransfer/protocol.js';
 export type {
   SdDirEntry,

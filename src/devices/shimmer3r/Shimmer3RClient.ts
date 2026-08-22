@@ -21,6 +21,8 @@ import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './pr
 import { msToRtcBytesLE } from '../dock/protocol.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { NEED_MORE, RESYNC } from '../../core/framing.js';
+import { shimmer3rControlMessageLength } from './streamFraming.js';
 import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
@@ -29,7 +31,7 @@ import {
   type InertialGroup,
   type KinematicCalibration,
 } from '../calibration/index.js';
-import { MAC_LENGTH } from '../infomem/layout.js';
+import { MAC_LENGTH, INVALID_MAC_IDS } from '../infomem/layout.js';
 import {
   SD_TRANSFER_OPCODES,
   SD_STATUS,
@@ -63,8 +65,6 @@ import {
 // in the Shimmer Java driver: idxMacAddress = 128+96 (=224), length 6 bytes.
 // 224+6 stays within one 128-byte InfoMem segment, so a single read suffices.
 const INFOMEM_MAC_OFFSET = 224;
-// Devices that have not been provisioned report an all-FF or all-zero MAC.
-const INVALID_MAC_IDS = ['FFFFFFFFFFFF', '000000000000'];
 
 // ---------------------------------------------------------------------------
 // Internal schema type
@@ -171,6 +171,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _expectingAck = 0;
   private _streaming = false;
   private _lastTs = 0;
+  /** True while the active transport is a byte stream with no message framing. */
+  private _unframed = false;
+  /** Re-framing accumulator, used only when {@link _unframed}. */
+  private _ctrlBuf: Uint8Array = new Uint8Array(0);
 
   // Cached device configuration
   enabledSensors = 0x000000;
@@ -258,6 +262,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async connect(transport?: ShimmerTransport): Promise<void> {
     const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
     this._transport = t;
+    // A byte-stream transport needs its message boundaries rebuilt; BLE gets
+    // them from the notification boundaries and takes the untouched path.
+    this._unframed = t.capabilities.framed === false;
+    this._ctrlBuf = new Uint8Array(0);
     // The firmware's SD session counter restarts with the connection
     this._sdKnownSession = null;
     this._notifyUnsub = t.onNotify(this._handleNotify);
@@ -284,6 +292,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._transport = null;
       this.device = null;
       this._rxBuf = new Uint8Array(0);
+      this._ctrlBuf = new Uint8Array(0);
+      this._unframed = false;
       this.schema = null;
       this._streaming = false;
       this.ExpPower = 0;
@@ -304,7 +314,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Notify handler (fed raw notification chunks by the transport)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Transport entry point. A framed transport (BLE) delivers one firmware
+   * message per call and goes straight to {@link _handleFramedChunk}; an
+   * unframed one (Web Serial over USB or over a classic-Bluetooth COM port)
+   * is re-framed first, then funnelled through the very same handler.
+   */
   private _handleNotify = (chunk: Uint8Array): void => {
+    if (this._unframed) {
+      this._handleUnframedChunk(chunk);
+      return;
+    }
+    this._handleFramedChunk(chunk);
+  };
+
+  private _handleFramedChunk = (chunk: Uint8Array): void => {
     this._log('Notify len=', chunk.length, 'data=', chunk);
 
     // 1) Consume an expected ACK
@@ -353,6 +377,107 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // Unframed (byte-stream) transports
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Re-frame an unframed transport's read into whole firmware messages, then
+   * replay them through {@link _handleFramedChunk} so every command, waiter and
+   * SD handler above behaves exactly as it does over BLE.
+   *
+   * Without this a serial read can split a response down the middle (the waiter
+   * resolves with a truncated buffer) or carry two messages at once (the second
+   * is swallowed as the first's ACK remainder).
+   */
+  private _handleUnframedChunk(chunk: Uint8Array): void {
+    this._log('Serial rx len=', chunk.length, 'data=', chunk);
+
+    // While a stream is live every byte is schema-defined stream data, whose
+    // length this protocol layer cannot know — hand it straight to the parser,
+    // which accumulates and so is already fragmentation-proof.
+    if (this._streaming) {
+      this._rxBuf = concatU8(this._rxBuf, chunk);
+      this._parseStreamIfPossible();
+      return;
+    }
+
+    this._ctrlBuf = concatU8(this._ctrlBuf, chunk);
+    for (const msg of this._extractUnframedMessages()) this._handleFramedChunk(msg);
+  }
+
+  /**
+   * Pull every complete message out of {@link _ctrlBuf}, leaving the incomplete
+   * tail behind. Extraction is finished before anything is dispatched so a
+   * handler can never observe a half-updated buffer.
+   */
+  private _extractUnframedMessages(): Uint8Array[] {
+    const out: Uint8Array[] = [];
+    let buf: Uint8Array = this._ctrlBuf;
+
+    for (;;) {
+      if (buf.length === 0) break;
+
+      // DATA_PACKET belongs to the stream plane even before `_streaming` is set
+      // (the window between START_STREAMING and its ACK). Its length comes from
+      // the schema, so stop framing and let the stream parser own the rest.
+      if (buf[0] === OPCODES.DATA_PACKET) {
+        this._rxBuf = concatU8(this._rxBuf, buf);
+        buf = new Uint8Array(0);
+        this._parseStreamIfPossible();
+        break;
+      }
+
+      const len = shimmer3rControlMessageLength(buf);
+      if (len === NEED_MORE) break;
+      if (len === RESYNC) {
+        this._log(`serial resync: dropping unframeable byte 0x${buf[0].toString(16)}`);
+        buf = buf.subarray(1);
+        continue;
+      }
+      if (buf.length < len) break; // defensive: framer should have said NEED_MORE
+
+      const msg = new Uint8Array(buf.subarray(0, len));
+      buf = buf.subarray(len);
+
+      // Emulate BLE's coalescing: the module packs an ACK and the response the
+      // firmware wrote straight after it into ONE notification, and the waiters
+      // rely on that — `_waitForAck` hands the remainder over synchronously via
+      // `_lastAckRemainder`. Emitted as two separate messages, the response
+      // would arrive before the caller's `await` continuation had registered its
+      // response handler, and be dropped. Two ACKs are never merged: the second
+      // would masquerade as the first's response body.
+      if (msg.length === 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED && this._expectingAck > 0) {
+        const nextLen = shimmer3rControlMessageLength(buf);
+        if (
+          nextLen !== NEED_MORE &&
+          nextLen !== RESYNC &&
+          buf.length >= nextLen &&
+          buf[0] !== OPCODES.ACK_COMMAND_PROCESSED
+        ) {
+          out.push(concatU8(msg, buf.subarray(0, nextLen)));
+          buf = buf.subarray(nextLen);
+          continue;
+        }
+      }
+
+      out.push(msg);
+    }
+
+    this._ctrlBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
+    return out;
+  }
+
+  /** Run the schema parser if one has been built, swallowing parse errors. */
+  private _parseStreamIfPossible(): void {
+    if (!this.schema) return;
+    try {
+      this._parseBySchema();
+    } catch (e) {
+      this._log('parseBySchema error:', e);
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Configuration commands
@@ -1475,12 +1600,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Measure raw BLE link throughput with the firmware's data-rate test
+   * Measure raw link throughput with the firmware's data-rate test
    * (SET_DATA_RATE_TEST): the device free-runs 5-byte counter packets as
-   * fast as the link drains them and we count notification bytes for
-   * `durationMs`. This measures the pipe itself (connection interval, MTU,
-   * module buffering) independent of the SD/file-transfer protocol, so it
-   * gives an upper bound for transfer rates on a given host/adapter/OS.
+   * fast as the link drains them and we count received bytes for
+   * `durationMs`. This measures the pipe itself (BLE connection interval and
+   * MTU, or RFCOMM/serial buffering) independent of the SD/file-transfer
+   * protocol, so it gives an upper bound for transfer rates on a given
+   * host/adapter/OS — and a direct BLE-vs-classic-Bluetooth comparison.
    * The device must be idle (the firmware NACKs the test while sensing).
    */
   async runDataRateTest(
@@ -1520,8 +1646,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
       } catch {
         /* the stop ACK can be indistinguishable from residual test bytes */
       }
-      // Drop any test bytes that were mistaken for stream data
+      // Drop any test bytes that were mistaken for stream data, or that are
+      // still sitting in the re-framing accumulator on an unframed transport.
       this._rxBuf = new Uint8Array(0);
+      this._ctrlBuf = new Uint8Array(0);
     }
   }
 

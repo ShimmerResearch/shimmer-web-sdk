@@ -396,13 +396,14 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     return SHIMMER3_INQ_CHANNELS_OFFSET + numChannels; // 9 + numChannels
   }
 
-  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE) {
-    // Variable length: [0x68][length][data...]. Firmware caps daughter-card
-    // memory reads at 128 bytes — treat larger "lengths" as garbage and resync.
+  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
+    // Variable length: [opcode][length][data...]. Firmware caps both a
+    // daughter-card memory read and an InfoMem read at 128 bytes — treat larger
+    // "lengths" as garbage and resync.
     if (buf.length < 2) return NEED_MORE;
-    const dcLen = buf[1];
-    if (dcLen > 128) return RESYNC;
-    return 2 + dcLen;
+    const memLen = buf[1];
+    if (memLen > 128) return RESYNC;
+    return 2 + memLen;
   }
 
   const payload = SHIMMER3_RESPONSE_PAYLOAD_LENGTHS[opcode];
