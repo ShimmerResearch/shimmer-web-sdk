@@ -83,7 +83,14 @@ export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
 // NEED_MORE / RESYNC are the canonical sentinels every framer returns. The
 // SHIMMER3_* and WIRED_* aliases further down are the older per-device copies,
 // kept for compatibility and identical in value.
-export { NEED_MORE, RESYNC } from './core/framing.js';
+export { NEED_MORE, RESYNC, drainByteStream } from './core/framing.js';
+export type {
+  MessageLengthFn,
+  DrainVerdict,
+  DropReason,
+  DrainOptions,
+  DrainResult,
+} from './core/framing.js';
 export {
   shimmer3rControlMessageLength,
   SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS,
