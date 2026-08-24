@@ -36,15 +36,15 @@ const UA = {
 const desktop = (): NavigatorLike => ({
   userAgent: UA.windowsChrome,
   maxTouchPoints: 0,
-  serial: {},
-  bluetooth: {},
+  serial: { requestPort() {} },
+  bluetooth: { requestDevice() {} },
 });
 /** Android Chrome 138+: both APIs present, but serial serves RFCOMM only. */
 const android = (): NavigatorLike => ({
   userAgent: UA.androidChrome,
   maxTouchPoints: 5,
-  serial: {},
-  bluetooth: {},
+  serial: { requestPort() {} },
+  bluetooth: { requestDevice() {} },
 });
 /** iOS Safari: neither API. */
 const iosSafari = (): NavigatorLike => ({ userAgent: UA.iphoneSafari, maxTouchPoints: 5 });
@@ -52,7 +52,7 @@ const iosSafari = (): NavigatorLike => ({ userAgent: UA.iphoneSafari, maxTouchPo
 const iosBluefy = (): NavigatorLike => ({
   userAgent: UA.iphoneSafari,
   maxTouchPoints: 5,
-  bluetooth: {},
+  bluetooth: { requestDevice() {} },
 });
 
 /**
@@ -142,7 +142,10 @@ describe('describePlatformSupport', () => {
 
   it('does not flag Bluetooth-only when Web Serial is absent entirely', () => {
     // No serial API means there is no restriction to describe, only an absence.
-    const s = describePlatformSupport({ userAgent: UA.androidChrome, bluetooth: {} });
+    const s = describePlatformSupport({
+      userAgent: UA.androidChrome,
+      bluetooth: { requestDevice() {} },
+    });
     expect(s.isAndroid).toBe(true);
     expect(s.serialBluetoothOnly).toBe(false);
   });
@@ -151,7 +154,7 @@ describe('describePlatformSupport', () => {
     const s = describePlatformSupport({
       userAgentData: { platform: 'Android' },
       userAgent: 'anything at all',
-      serial: {},
+      serial: { requestPort() {} },
     });
     expect(s.isAndroid).toBe(true);
   });
@@ -338,8 +341,8 @@ describe('advice never prescribes a link the device may not have', () => {
   it('does not tell an Android wired-serial caller to use classic Bluetooth', () => {
     const s = describePlatformSupport({
       userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/138.0 Mobile',
-      serial: {},
-      bluetooth: {},
+      serial: { requestPort() {} },
+      bluetooth: { requestDevice() {} },
       maxTouchPoints: 5,
     });
     const msg = transportAdvice(s, 'wiredSerial');
@@ -351,7 +354,12 @@ describe('advice never prescribes a link the device may not have', () => {
   it('qualifies every cross-link suggestion it makes', () => {
     const cases: Array<[NavigatorLike, 'ble' | 'classicBluetooth' | 'wiredSerial']> = [
       [
-        { userAgent: UA.androidChrome, serial: {}, bluetooth: {}, maxTouchPoints: 5 },
+        {
+          userAgent: UA.androidChrome,
+          serial: { requestPort() {} },
+          bluetooth: { requestDevice() {} },
+          maxTouchPoints: 5,
+        },
         'wiredSerial',
       ],
       [{ userAgent: UA.iphoneSafari, maxTouchPoints: 5 }, 'classicBluetooth'],
@@ -363,5 +371,56 @@ describe('advice never prescribes a link the device may not have', () => {
       // "instead" alone is fine; an unqualified imperative is not.
       expect(msg).not.toMatch(/^(Pair|Connect|Use) the sensor over/);
     }
+  });
+});
+
+describe('capability means callable, not merely present', () => {
+  /*
+   * The regression this pins: a console guard was changed from
+   * `!navigator.bluetooth` to `!support.webBluetooth`, and a `bluetooth` of
+   * `null` satisfied "the property is defined" — so the guard stopped firing and
+   * `navigator.bluetooth.requestDevice(...)` threw synchronously, which is the
+   * very thing that guard exists to prevent. A capability flag callers gate on
+   * must be false whenever calling would throw.
+   */
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['an object without the entry point', {}],
+    ['a non-object', 'yes'],
+    ['an entry point that is not a function', { requestDevice: true, requestPort: true }],
+  ])('reports both APIs unavailable when navigator gives %s', (_label, api) => {
+    const s = describePlatformSupport({
+      userAgent: UA.windowsChrome,
+      maxTouchPoints: 0,
+      serial: api,
+      bluetooth: api,
+    } as NavigatorLike);
+    expect(s.webSerial).toBe(false);
+    expect(s.webBluetooth).toBe(false);
+  });
+
+  it('still produces advice for an unusable API rather than null', () => {
+    // The other half of the same bug: a guard that fires must have words to show.
+    const s = describePlatformSupport({
+      userAgent: UA.windowsChrome,
+      maxTouchPoints: 0,
+      bluetooth: null,
+      serial: null,
+    } as NavigatorLike);
+    expect(transportAdvice(s, 'ble')).toBeTruthy();
+    expect(transportAdvice(s, 'wiredSerial')).toBeTruthy();
+    expect(transportAdvice(s, 'classicBluetooth')).toBeTruthy();
+  });
+
+  it('accepts a real-shaped navigator', () => {
+    const s = describePlatformSupport({
+      userAgent: UA.windowsChrome,
+      maxTouchPoints: 0,
+      serial: { requestPort() {} },
+      bluetooth: { requestDevice() {} },
+    } as NavigatorLike);
+    expect(s.webSerial).toBe(true);
+    expect(s.webBluetooth).toBe(true);
   });
 });
