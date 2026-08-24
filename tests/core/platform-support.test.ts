@@ -424,3 +424,43 @@ describe('capability means callable, not merely present', () => {
     expect(s.webBluetooth).toBe(true);
   });
 });
+
+describe('Android classic-Bluetooth advice covers the LE-bond trap', () => {
+  /*
+   * Hardware-confirmed failure mode, and the common one: a dual-mode sensor
+   * advertising both radios invites Android to create an LE bond, which looks
+   * paired to the user but leaves no BR/EDR link key and so no classic SDP
+   * record. Web Serial enumerates by cached SDP service classes, so the sensor is
+   * simply absent from the picker.
+   *
+   * dumpsys showed bredr_linkkey_known:F / le_linkkey_known:T with an all-zeros
+   * UUID list; re-pairing with the sensor's BLE radio off flipped it to
+   * bredr_linkkey_known:T with SPP cached and it appeared at once. "Pair it
+   * first" alone would have sent that user back to a settings screen that already
+   * said Paired.
+   */
+  const androidNav = {
+    userAgent: UA.androidChrome,
+    maxTouchPoints: 5,
+    serial: { requestPort() {} },
+    bluetooth: { requestDevice() {} },
+  };
+
+  it('does not stop at "pair it first"', () => {
+    const msg = transportAdvice(describePlatformSupport(androidNav), 'classicBluetooth');
+    expect(msg).toMatch(/already paired and still missing/i);
+  });
+
+  it('names the cause and both remedies', () => {
+    const msg = transportAdvice(describePlatformSupport(androidNav), 'classicBluetooth') ?? '';
+    expect(msg).toMatch(/bonded it over BLE/i);
+    expect(msg).toMatch(/unpair/i);
+    // The two ways out: re-pair classic-only, or force it from a terminal app.
+    expect(msg).toMatch(/classic Bluetooth only/i);
+    expect(msg).toMatch(/serial-terminal app/i);
+  });
+
+  it('says nothing extra on desktop, where this cannot happen', () => {
+    expect(transportAdvice(describePlatformSupport(desktop()), 'classicBluetooth')).toBeNull();
+  });
+});

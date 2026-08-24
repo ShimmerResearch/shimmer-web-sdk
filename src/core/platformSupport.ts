@@ -226,7 +226,22 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
    * front. Worth a note even though nothing is wrong.
    */
   if (need === 'classicBluetooth' && support.isAndroid) {
-    return 'Pair the sensor in Android Settings → Bluetooth first: Android Chrome exposes Web Serial for paired Bluetooth devices only, so the picker stays empty until it is paired.';
+    /*
+     * "Pair it first" is necessary but not sufficient, and the insufficient case
+     * is the common one. A dual-mode sensor advertising both radios invites
+     * Android to create an **LE** bond, which satisfies the user ("it's paired")
+     * while leaving no BR/EDR link key and therefore no classic SDP record. Web
+     * Serial enumerates paired devices by their cached SDP service classes, so a
+     * sensor bonded that way is absent from the picker no matter how long you
+     * stare at Bluetooth settings.
+     *
+     * Confirmed on hardware: `dumpsys bluetooth_manager` showed the sensor as
+     * `bredr_linkkey_known:F, le_linkkey_known:T` with an all-zeros UUID list,
+     * while every device that DID list had a BR/EDR key and SPP cached. Pairing
+     * again with the sensor's BLE radio disabled flipped it to
+     * `bredr_linkkey_known:T` with `SPP,…` cached, and it appeared immediately.
+     */
+    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If it is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find: unpair it, then pair again with the sensor advertising classic Bluetooth only, or connect once from a classic serial-terminal app to force the classic bond.';
   }
   return null;
 }
