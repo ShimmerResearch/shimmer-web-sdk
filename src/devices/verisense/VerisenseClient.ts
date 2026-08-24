@@ -119,6 +119,7 @@ export type {
   VerisenseClientOptions,
   VerisenseCommandResponse,
 } from './VerisenseTypes.js';
+import { describePlatformSupport, transportAdvice } from '../../core/platformSupport.js';
 
 // Thrown by connectWithRetry() when disconnect() is called while a connect
 // attempt is in flight. Must NOT match any of the retryable-error patterns
@@ -614,8 +615,17 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     } = {},
   ): Promise<boolean> {
     const injected = opts.transport ?? this._injectedTransport;
-    if (!injected && !('serial' in navigator)) {
-      throw new Error('Web Serial not supported. Use Chrome/Edge on HTTPS or http://localhost.');
+    /*
+     * Snapshot first: testing `navigator` directly throws with no global
+     * navigator (Node, React Native), which would make the descriptive error
+     * below unreachable. Verisense docks over a wired USB serial port, never
+     * RFCOMM, so the advice is the wired one.
+     */
+    const serialSupport = describePlatformSupport();
+    if (!injected && !serialSupport.webSerial) {
+      throw new Error(
+        transportAdvice(serialSupport, 'wiredSerial') ?? 'Web Serial is not available.',
+      );
     }
 
     if (this._transportKind === 'ble' && this.device?.gatt?.connected) {
