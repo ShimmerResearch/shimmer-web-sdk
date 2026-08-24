@@ -264,3 +264,47 @@ describe('Shimmer3RClient control plane over a byte stream', () => {
     await expect(client.readFwVersion()).resolves.toEqual(FW_PARSED);
   });
 });
+
+describe('connect status text follows the transport', () => {
+  /*
+   * These messages used to be emitted unconditionally, so an RFCOMM session
+   * announced "GATT connected", "RX/TX obtained" and "Notifications started" —
+   * none of which exist on a serial link. While debugging a Shimmer3R missing
+   * from Android's classic-Bluetooth picker that log read as proof the button had
+   * fallen back to BLE, and it had not. A log that misreports the mechanism is
+   * worse than a terser one, so the wording is pinned.
+   */
+  const bleOnly = ['GATT connected', 'RX/TX obtained', 'Notifications started'];
+
+  async function statusesFor(kind: 'ble' | 'rfcomm' | 'serial', framed: boolean) {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { LoopbackTransport } = await import('../../src/core/transport/LoopbackTransport.js');
+    const t = new LoopbackTransport({ capabilities: { framed } });
+    // LoopbackTransport hardcodes kind 'loopback'; stand in for the real ones.
+    Object.defineProperty(t, 'kind', { value: kind, configurable: true });
+    const c = new Shimmer3RClient({ debug: false });
+    const seen: string[] = [];
+    c.onStatus = (m) => seen.push(m);
+    await c.connect(t);
+    return seen;
+  }
+
+  it('keeps the BLE vocabulary on a BLE transport', async () => {
+    const seen = await statusesFor('ble', true);
+    for (const m of bleOnly) expect(seen).toContain(m);
+    expect(seen).toContain('Requesting Bluetooth device…');
+  });
+
+  it('never claims GATT or notifications on an RFCOMM transport', async () => {
+    const seen = await statusesFor('rfcomm', false);
+    for (const m of bleOnly) expect(seen).not.toContain(m);
+    expect(seen.join('\n')).not.toMatch(/GATT|notification/i);
+    expect(seen).toContain('Opening rfcomm link…');
+    expect(seen).toContain('Connected over rfcomm (byte stream, re-framing)');
+  });
+
+  it('names the framing, since that is the real behavioural difference', async () => {
+    const framed = await statusesFor('serial', true);
+    expect(framed).toContain('Connected over serial (framed)');
+  });
+});
