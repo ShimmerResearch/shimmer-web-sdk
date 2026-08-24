@@ -271,13 +271,36 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
-    this._emitStatus('Requesting Bluetooth device…');
+    /*
+     * Status text follows the transport rather than assuming BLE. These four
+     * messages used to be emitted unconditionally, so a classic-Bluetooth session
+     * reported "GATT connected", "RX/TX obtained" and "Notifications started" -
+     * none of which exist on an RFCOMM link, which has no GATT server, no
+     * characteristics and no notifications.
+     *
+     * That is not cosmetic. Debugging a Shimmer3R that would not appear in
+     * Android's classic-Bluetooth picker, this log read as proof the button had
+     * silently fallen back to BLE; only port.getInfo() reporting an SPP service
+     * class showed the link was in fact correct and the words were wrong. A log
+     * that misreports the mechanism costs more than one with less detail.
+     */
+    const overBle = t.kind === 'ble';
+    this._emitStatus(overBle ? 'Requesting Bluetooth device…' : `Opening ${t.kind} link…`);
     await t.connect();
     if (t instanceof WebBluetoothTransport) this.device = t.device;
     this._emitStatus(`Selected: ${this._deviceLabel()}`);
-    this._emitStatus('GATT connected');
-    this._emitStatus('RX/TX obtained');
-    this._emitStatus('Notifications started');
+    if (overBle) {
+      this._emitStatus('GATT connected');
+      this._emitStatus('RX/TX obtained');
+      this._emitStatus('Notifications started');
+    } else {
+      /* Naming the framing is worth a line: it is the one behavioural difference
+       * between these transports inside this client, and the drain is where an
+       * unframed link goes wrong. */
+      this._emitStatus(
+        `Connected over ${t.kind} (${this._unframed ? 'byte stream, re-framing' : 'framed'})`,
+      );
+    }
   }
 
   override async disconnect(): Promise<void> {
