@@ -171,8 +171,17 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
   }
 
   if (availability === 'unlikely') {
-    /* Only reachable for a wired port on Android — see serialBluetoothOnly. */
-    return 'Android Chrome exposes Web Serial for paired Bluetooth devices only, so a wired USB/dock connection will most likely find nothing (wired serial support is still rolling out). Pair the sensor over classic Bluetooth instead.';
+    /*
+     * Only reachable for a wired port on Android — see serialBluetoothOnly.
+     *
+     * The classic-Bluetooth alternative is conditional, not prescribed. This
+     * advice is device-agnostic (TransportNeed says nothing about the sensor),
+     * and a Verisense reaches the host over wired USB serial or BLE and has no
+     * RFCOMM at all — so telling every Android caller to "pair over classic
+     * Bluetooth instead" sends wired-only users after a connection that cannot
+     * exist. Same failure as promising BLE on iOS above.
+     */
+    return 'Android Chrome exposes Web Serial for paired Bluetooth devices only, so a wired USB/dock connection will most likely find nothing (wired serial support is still rolling out). A sensor that supports classic Bluetooth can be paired and reached that way instead.';
   }
 
   /*

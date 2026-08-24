@@ -55,6 +55,31 @@ const iosBluefy = (): NavigatorLike => ({
   bluetooth: {},
 });
 
+/**
+ * Run `fn` with `globalThis.navigator` replaced (or removed, when `value` is
+ * undefined), then restore exactly what was there.
+ *
+ * Assignment is not enough: in this environment `globalThis.navigator` is a
+ * getter-only property, so `globalThis.navigator = x` throws
+ * "Cannot set property navigator of #<Object> which has only a getter". An
+ * earlier version restored by assignment and only passed because a preceding
+ * test had already deleted the getter - the suite was order-dependent and each
+ * of these tests failed when run alone. Save the descriptor, define over it,
+ * put it back.
+ */
+function withGlobalNavigator<T>(value: unknown | undefined, fn: () => T): T {
+  const g = globalThis as { navigator?: unknown };
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  try {
+    if (value === undefined) delete g.navigator;
+    else Object.defineProperty(globalThis, 'navigator', { value, configurable: true });
+    return fn();
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else delete g.navigator;
+  }
+}
+
 describe('describePlatformSupport', () => {
   it('reads capabilities off navigator, not the user-agent', () => {
     const s = describePlatformSupport(desktop());
@@ -75,13 +100,8 @@ describe('describePlatformSupport', () => {
   it('survives no global navigator at all (Node, React Native)', () => {
     /* Passing {} does NOT cover this: readNavigator returns any supplied object
      * before it ever consults globalThis, so the no-global path needs the global
-     * genuinely removed. Restored in a finally so one failure cannot leak into
-     * the rest of the suite. */
-    const g = globalThis as { navigator?: unknown };
-    const had = 'navigator' in g;
-    const original = g.navigator;
-    try {
-      delete g.navigator;
+     * genuinely removed. */
+    withGlobalNavigator(undefined, () => {
       const s = describePlatformSupport();
       expect(s.webSerial).toBe(false);
       expect(s.webBluetooth).toBe(false);
@@ -89,10 +109,7 @@ describe('describePlatformSupport', () => {
       expect(s.isIOS).toBe(false);
       // And the advice path must still produce words rather than throwing.
       expect(transportAdvice(s, 'wiredSerial')).toBeTruthy();
-    } finally {
-      if (had) g.navigator = original;
-      else delete g.navigator;
-    }
+    });
   });
 
   it.each([
@@ -276,12 +293,8 @@ describe('WebSerialTransport advice when Web Serial is absent', () => {
   };
 
   async function messageFor(opts: Record<string, unknown>): Promise<string> {
-    const g = globalThis as { navigator?: unknown };
-    const had = 'navigator' in g;
-    const original = g.navigator;
-    try {
-      g.navigator = withoutSerial;
-      const { WebSerialTransport } = await import('../../src/core/transport/WebSerialTransport.js');
+    const { WebSerialTransport } = await import('../../src/core/transport/WebSerialTransport.js');
+    return withGlobalNavigator(withoutSerial, async () => {
       const t = new WebSerialTransport(opts as never);
       try {
         await t.connect();
@@ -289,10 +302,7 @@ describe('WebSerialTransport advice when Web Serial is absent', () => {
       } catch (e) {
         return (e as Error).message;
       }
-    } finally {
-      if (had) g.navigator = original;
-      else delete g.navigator;
-    }
+    });
   }
 
   it('calls it classic Bluetooth when a service class is allowed', async () => {
@@ -315,5 +325,43 @@ describe('WebSerialTransport advice when Web Serial is absent', () => {
   it('calls a plain USB filter a wired port', async () => {
     const msg = await messageFor({ filters: [{ usbVendorId: 0x1915 }] });
     expect(msg).toMatch(/wired dock/);
+  });
+});
+
+describe('advice never prescribes a link the device may not have', () => {
+  /*
+   * TransportNeed is device-agnostic, so no message may assume a fallback radio
+   * exists. Two sensors make this concrete: a classic-only Shimmer3 (RN42, no
+   * BLE) and a Verisense (wired USB serial + BLE, no RFCOMM at all). Advice that
+   * prescribes rather than qualifies will be wrong for one of them.
+   */
+  it('does not tell an Android wired-serial caller to use classic Bluetooth', () => {
+    const s = describePlatformSupport({
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/138.0 Mobile',
+      serial: {},
+      bluetooth: {},
+      maxTouchPoints: 5,
+    });
+    const msg = transportAdvice(s, 'wiredSerial');
+    // Qualified, not prescribed - a Verisense has no RFCOMM to fall back to.
+    expect(msg).toMatch(/A sensor that supports classic Bluetooth/);
+    expect(msg).not.toMatch(/Pair the sensor over classic Bluetooth instead/);
+  });
+
+  it('qualifies every cross-link suggestion it makes', () => {
+    const cases: Array<[NavigatorLike, 'ble' | 'classicBluetooth' | 'wiredSerial']> = [
+      [
+        { userAgent: UA.androidChrome, serial: {}, bluetooth: {}, maxTouchPoints: 5 },
+        'wiredSerial',
+      ],
+      [{ userAgent: UA.iphoneSafari, maxTouchPoints: 5 }, 'classicBluetooth'],
+      [{ userAgent: UA.iphoneSafari, maxTouchPoints: 5, bluetooth: {} }, 'classicBluetooth'],
+      [{ userAgent: UA.iphoneSafari, maxTouchPoints: 5 }, 'wiredSerial'],
+    ];
+    for (const [nav, need] of cases) {
+      const msg = transportAdvice(describePlatformSupport(nav), need);
+      // "instead" alone is fine; an unqualified imperative is not.
+      expect(msg).not.toMatch(/^(Pair|Connect|Use) the sensor over/);
+    }
   });
 });
