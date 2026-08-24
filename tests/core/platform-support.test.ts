@@ -260,3 +260,60 @@ describe('SHIMMER3_SPP_SERIAL_OPTIONS', () => {
     expect(opts.filters).toEqual([{ bluetoothServiceClassId: SHIMMER3_SPP_UUID }]);
   });
 });
+
+/*
+ * The advice a WebSerialTransport produces when Web Serial is missing depends on
+ * how it was configured. Classifying that from the truthiness of the allow-list
+ * alone is wrong in two directions, so it is pinned here: the message a user sees
+ * on iOS differs in kind, not just wording, between a wired dock and classic
+ * Bluetooth.
+ */
+describe('WebSerialTransport advice when Web Serial is absent', () => {
+  const SPP = '00001101-0000-1000-8000-00805f9b34fb';
+  const withoutSerial = {
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)',
+    maxTouchPoints: 5,
+  };
+
+  async function messageFor(opts: Record<string, unknown>): Promise<string> {
+    const g = globalThis as { navigator?: unknown };
+    const had = 'navigator' in g;
+    const original = g.navigator;
+    try {
+      g.navigator = withoutSerial;
+      const { WebSerialTransport } = await import('../../src/core/transport/WebSerialTransport.js');
+      const t = new WebSerialTransport(opts as never);
+      try {
+        await t.connect();
+        throw new Error('expected connect() to reject');
+      } catch (e) {
+        return (e as Error).message;
+      }
+    } finally {
+      if (had) g.navigator = original;
+      else delete g.navigator;
+    }
+  }
+
+  it('calls it classic Bluetooth when a service class is allowed', async () => {
+    const msg = await messageFor({ allowedBluetoothServiceClassIds: [SPP] });
+    expect(msg).toMatch(/Classic Bluetooth cannot be reached from iOS/);
+  });
+
+  it('does NOT call an empty allow-list Bluetooth', async () => {
+    // [] is truthy, so a truthiness test would misclassify this as Bluetooth.
+    const msg = await messageFor({ allowedBluetoothServiceClassIds: [] });
+    expect(msg).toMatch(/wired dock/);
+  });
+
+  it('recognises a Bluetooth filter even with no allow-list', async () => {
+    // The half-configured case: filter set, permission missing.
+    const msg = await messageFor({ filters: [{ bluetoothServiceClassId: SPP }] });
+    expect(msg).toMatch(/Classic Bluetooth cannot be reached from iOS/);
+  });
+
+  it('calls a plain USB filter a wired port', async () => {
+    const msg = await messageFor({ filters: [{ usbVendorId: 0x1915 }] });
+    expect(msg).toMatch(/wired dock/);
+  });
+});
