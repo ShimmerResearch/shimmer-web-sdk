@@ -20,12 +20,14 @@
  *
  * The awkward case that shaped the API is Android. Chrome 138+ implements Web
  * Serial there, but deliberately only for Bluetooth RFCOMM port emulation —
- * wired ports are a separate feature still rolling out. So Web Serial is fully
- * present and usable there — `webSerial` is `true`, correctly — while the dock is
- * still unreachable, and no amount of feature detection can tell the two apart. That is why {@link transportAvailability}
- * returns three states rather than a boolean: `'unlikely'` is the honest answer
- * for a wired port on Android, and it maps to "leave the button enabled and warn"
- * rather than "disable", so devices that do gain wired support are not locked out.
+ * wired ports are a separate feature still rolling out. So `navigator.serial` is
+ * present and callable, and `webSerial` is correctly `true`: the API is usable,
+ * but only for RFCOMM. A wired dock still will not appear in the picker, and no
+ * amount of feature detection separates the two. That is why
+ * {@link transportAvailability} returns three states rather than a boolean:
+ * `'unlikely'` is the honest answer for a wired port on Android, and it maps to
+ * "leave the button enabled and warn" rather than "disable", so devices that do
+ * gain wired support are not locked out.
  *
  * iOS is the opposite shape — a harder "no" than an unimplemented API. Every iOS
  * browser is WebKit, which ships neither API, and iOS exposes no
