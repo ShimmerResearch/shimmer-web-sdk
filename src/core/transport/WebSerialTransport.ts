@@ -4,6 +4,7 @@ import type {
   TransportCapabilities,
   Unsubscribe,
 } from './types.js';
+import { describePlatformSupport, transportAdvice } from '../platformSupport.js';
 
 /** Constructor options for {@link WebSerialTransport}. */
 export interface WebSerialTransportOptions {
@@ -132,7 +133,15 @@ export class WebSerialTransport implements ShimmerTransport {
 
   async connect(): Promise<void> {
     if (!('serial' in navigator)) {
-      throw new Error('Web Serial not supported. Use Chrome/Edge on HTTPS or http://localhost.');
+      /*
+       * Platform-specific wording, because "use a desktop browser" is wrong on
+       * Android (Chrome 138+ serves RFCOMM ports) and misleading on iOS, where no
+       * browser will ever have this. transportAdvice picks by platform; the guard
+       * itself stays a capability check.
+       */
+      const support = describePlatformSupport();
+      const need = this._allowedBluetoothServiceClassIds ? 'classicBluetooth' : 'wiredSerial';
+      throw new Error(transportAdvice(support, need) ?? 'Web Serial is not available.');
     }
 
     if (!this._port) {
