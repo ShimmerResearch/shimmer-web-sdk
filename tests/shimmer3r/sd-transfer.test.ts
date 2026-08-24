@@ -299,8 +299,8 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
 
     switch (cmd[0]) {
       case 0x2e: {
-        // GET_FW_VERSION → LogAndStream (3), v1.01.009
-        send([ACK, 0x2f, 3, 0, 1, 0, 1, 9]);
+        // GET_FW_VERSION → LogAndStream (3), v1.01.011 — the corruption-free gate
+        send([ACK, 0x2f, 3, 0, 1, 0, 1, 11]);
         return;
       }
       case OP.LIST_DIR_COMMAND: {
@@ -621,7 +621,7 @@ describe('Shimmer3RClient SD commands over an UNFRAMED transport', () => {
       fwId: 3,
       major: 1,
       minor: 1,
-      patch: 9,
+      patch: 11,
     });
   });
 

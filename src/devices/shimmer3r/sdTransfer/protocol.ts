@@ -2,7 +2,9 @@
  * Wire protocol for Shimmer3R SD-card file transfer over BLE.
  *
  * Mirrors the firmware implementation in
- * `log-and-stream-common/Comms/shimmer_sd_file_transfer.{c,h}` (FW >= v1.01.009).
+ * `log-and-stream-common/Comms/shimmer_sd_file_transfer.{c,h}` (FW >= v1.01.011;
+ * v1.01.009/.010 speak the protocol but corrupt every block — see
+ * Shimmer3RClient.supportsSdTransfer).
  *
  * Command/response shapes (all multi-byte fields little-endian):
  *
