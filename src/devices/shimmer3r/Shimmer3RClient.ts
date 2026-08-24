@@ -1727,6 +1727,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   };
 
+  /**
+   * Enforce the {@link supportsSdTransfer} gate on every SD entry point, so a
+   * caller that skips the advisory check cannot pull silently-corrupted data
+   * off a v1.01.009/.010 device. Must complete BEFORE the synchronous
+   * single-slot checks (`_sdExpect`, `_sdFrameListener`): those are
+   * check-then-set atomically only while no await sits between them.
+   * (The first call costs one GET_FW_VERSION round trip; readFwVersion
+   * caches it for the rest of the connection.)
+   */
+  private async _ensureSdTransferSupported(): Promise<void> {
+    if (!(await this.supportsSdTransfer())) {
+      throw new SdTransferError(
+        'SD file transfer requires firmware v1.01.011 or later — v1.01.009/.010 corrupt transferred data',
+        SD_STATUS.UNSUPPORTED_FW,
+      );
+    }
+  }
+
   /** Send an SD command and await its reassembled one-shot response. */
   private async _sdCommand(
     cmd: Uint8Array,
@@ -1737,6 +1755,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) {
       throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
     }
+    await this._ensureSdTransferSupported();
     if (this._sdExpect) {
       // A shared expectation slot: concurrent SD commands would race on it,
       // so refuse deterministically — callers are expected to sequence
@@ -1836,7 +1855,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
-  /** Ask the firmware to abandon the in-flight read window, if any. */
+  /** Ask the firmware to abandon the in-flight read window, if any.
+   * Deliberately NOT gated on {@link supportsSdTransfer}: it runs in cleanup
+   * paths (abort signals, disconnects) where an extra version probe could
+   * fail, and old firmware just ignores the unknown opcode. */
   async sdAbortTransfer(): Promise<void> {
     if (!this._transport) return;
     await this._writeExpectingAck(buildAbortCmd(), 2000);
@@ -1864,6 +1886,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) {
       throw new SdTransferError('SD transfer is unavailable while streaming', SD_STATUS.BUSY);
     }
+    await this._ensureSdTransferSupported();
     if (this._sdFrameListener) {
       // The frame/CRC listeners are single-slot instance fields, so a second
       // overlapping window would hijack the first one's frames. Refuse

@@ -52,6 +52,9 @@ export const SD_STATUS = {
   SD_UNAVAILABLE: 0xf0,
   BUSY: 0xf1,
   BAD_ARGS: 0xf2,
+  /** Host-side only, never on the wire: the connected firmware's version is
+   * below the transfer gate (see Shimmer3RClient.supportsSdTransfer). */
+  UNSUPPORTED_FW: 0xff,
 } as const;
 
 /** Codes carried in SD_FILE_STATUS_RESPONSE frames. */
@@ -152,6 +155,8 @@ export function sdStatusToString(status: number): string {
       return 'device busy (sensing/logging/streaming)';
     case SD_STATUS.BAD_ARGS:
       return 'bad arguments';
+    case SD_STATUS.UNSUPPORTED_FW:
+      return 'firmware too old for SD file transfer (update required)';
     default:
       return `FatFs error ${status}`;
   }
