@@ -61,9 +61,16 @@ export type TransportNeed = 'ble' | 'classicBluetooth' | 'wiredSerial';
 export type Availability = 'available' | 'unlikely' | 'unavailable';
 
 export interface PlatformSupport {
-  /** `'serial' in navigator`. Capability, safe to gate on. */
+  /**
+   * `navigator.serial.requestPort` is callable. Safe to gate on — false for a
+   * `serial` that is missing, `null`, or present without the entry point.
+   */
   readonly webSerial: boolean;
-  /** `'bluetooth' in navigator`. Capability, safe to gate on. */
+  /**
+   * `navigator.bluetooth.requestDevice` is callable. Safe to gate on — false for
+   * a `bluetooth` that is missing, `null`, or present without the entry point,
+   * all of which would otherwise throw synchronously on first use.
+   */
   readonly webBluetooth: boolean;
   /** UA hint. Advice only — never gate on this. */
   readonly isAndroid: boolean;
@@ -80,6 +87,21 @@ function readNavigator(nav?: NavigatorLike): NavigatorLike {
   if (nav) return nav;
   const g = globalThis as { navigator?: NavigatorLike };
   return g.navigator ?? {};
+}
+
+/**
+ * Whether an API entry point is actually callable.
+ *
+ * Deliberately stricter than "the property exists". A `navigator.bluetooth` that
+ * is `null`, or an object without `requestDevice`, satisfies `'bluetooth' in
+ * navigator` while still throwing a synchronous TypeError the moment anything
+ * calls it — so treating the property's presence as the capability hands callers
+ * a flag they cannot safely gate on, which is the entire job of these fields.
+ * Reported as unavailable instead: an API that cannot be called is, for every
+ * purpose here, absent.
+ */
+function callable(api: unknown, method: string): boolean {
+  return typeof (api as Record<string, unknown> | null | undefined)?.[method] === 'function';
 }
 
 /**
@@ -100,10 +122,10 @@ export function describePlatformSupport(nav?: NavigatorLike): PlatformSupport {
    * with a stray touch-capable peripheral.
    */
   const isIOS = /iPad|iPhone|iPod/.test(ua) || (/Mac/.test(ua) && (n.maxTouchPoints ?? 0) > 1);
-  const webSerial = 'serial' in n && n.serial !== undefined;
+  const webSerial = callable(n.serial, 'requestPort');
   return {
     webSerial,
-    webBluetooth: 'bluetooth' in n && n.bluetooth !== undefined,
+    webBluetooth: callable(n.bluetooth, 'requestDevice'),
     isAndroid,
     isIOS,
     serialBluetoothOnly: webSerial && isAndroid,
