@@ -23,9 +23,9 @@ const ACK = OPCODES.ACK_COMMAND_PROCESSED; // 0xff
 const NACK = OPCODES.NACK_COMMAND_PROCESSED; // 0xfe
 const FWVER = OPCODES.FW_VERSION_RESPONSE; // 0x2f
 
-/** LogAndStream v1.01.009 — the SD-transfer feature gate. */
-const FW_RSP = [FWVER, 3, 0, 1, 0, 1, 9];
-const FW_PARSED = { fwId: 3, major: 1, minor: 1, patch: 9 };
+/** LogAndStream v1.01.011 — the SD-transfer feature gate. */
+const FW_RSP = [FWVER, 3, 0, 1, 0, 1, 11];
+const FW_PARSED = { fwId: 3, major: 1, minor: 1, patch: 11 };
 
 function u16le(v: number): number[] {
   return [v & 0xff, (v >> 8) & 0xff];
