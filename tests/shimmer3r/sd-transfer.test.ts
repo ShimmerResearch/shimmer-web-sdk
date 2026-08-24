@@ -506,9 +506,9 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
     const { client } = await makeClient(makeCard(), { fwPatch });
     await expect(client.supportsSdTransfer()).resolves.toBe(false);
     await expect(client.sdListDir('data')).rejects.toThrow(/v1\.01\.011/);
-    await expect(
-      client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1024),
-    ).rejects.toThrow(/v1\.01\.011/);
+    await expect(client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1024)).rejects.toThrow(
+      /v1\.01\.011/,
+    );
   });
 
   it('sdListDir reassembles responses fragmented into 20-byte notifications', async () => {
