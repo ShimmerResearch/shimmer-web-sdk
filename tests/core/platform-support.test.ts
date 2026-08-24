@@ -63,13 +63,36 @@ describe('describePlatformSupport', () => {
     expect(s.serialBluetoothOnly).toBe(false);
   });
 
-  it('reports nothing available with no navigator at all (Node, React Native)', () => {
+  it('reports nothing available for an empty navigator', () => {
     const s = describePlatformSupport({});
     expect(s.webSerial).toBe(false);
     expect(s.webBluetooth).toBe(false);
-    // Must not throw, and must not claim a platform it cannot identify.
+    // Must not claim a platform it cannot identify.
     expect(s.isAndroid).toBe(false);
     expect(s.isIOS).toBe(false);
+  });
+
+  it('survives no global navigator at all (Node, React Native)', () => {
+    /* Passing {} does NOT cover this: readNavigator returns any supplied object
+     * before it ever consults globalThis, so the no-global path needs the global
+     * genuinely removed. Restored in a finally so one failure cannot leak into
+     * the rest of the suite. */
+    const g = globalThis as { navigator?: unknown };
+    const had = 'navigator' in g;
+    const original = g.navigator;
+    try {
+      delete g.navigator;
+      const s = describePlatformSupport();
+      expect(s.webSerial).toBe(false);
+      expect(s.webBluetooth).toBe(false);
+      expect(s.isAndroid).toBe(false);
+      expect(s.isIOS).toBe(false);
+      // And the advice path must still produce words rather than throwing.
+      expect(transportAdvice(s, 'wiredSerial')).toBeTruthy();
+    } finally {
+      if (had) g.navigator = original;
+      else delete g.navigator;
+    }
   });
 
   it.each([
@@ -195,6 +218,16 @@ describe('transportAdvice', () => {
     const s = describePlatformSupport({ userAgent: UA.windowsChrome, maxTouchPoints: 0 });
     expect(transportAdvice(s, 'classicBluetooth')).toMatch(/Android/);
   });
+
+  it('never promises BLE as a substitute for classic Bluetooth on iOS', () => {
+    /* A classic-only Shimmer3 (RN42 has no BLE radio) cannot be reached from iOS
+     * by any route, so the advice must not send that user chasing BLE. */
+    for (const nav of [iosSafari(), iosBluefy()]) {
+      const msg = transportAdvice(describePlatformSupport(nav), 'classicBluetooth');
+      expect(msg).toMatch(/A sensor that also supports BLE/);
+      expect(msg).toMatch(/classic-Bluetooth-only sensor cannot be used from iOS/);
+    }
+  });
 });
 
 describe('SHIMMER3_SPP_SERIAL_OPTIONS', () => {
@@ -211,8 +244,13 @@ describe('SHIMMER3_SPP_SERIAL_OPTIONS', () => {
     expect(SHIMMER3_SPP_SERIAL_OPTIONS.kind).toBe('rfcomm');
   });
 
-  it('is frozen, so a call site cannot mutate the shared default', () => {
+  it('is frozen at every level, not just the outer object', () => {
+    // Object.freeze is shallow: freezing only the wrapper would still let a JS
+    // caller push into arrays that every other caller shares.
     expect(Object.isFrozen(SHIMMER3_SPP_SERIAL_OPTIONS)).toBe(true);
+    expect(Object.isFrozen(SHIMMER3_SPP_SERIAL_OPTIONS.filters)).toBe(true);
+    expect(Object.isFrozen(SHIMMER3_SPP_SERIAL_OPTIONS.filters[0])).toBe(true);
+    expect(Object.isFrozen(SHIMMER3_SPP_SERIAL_OPTIONS.allowedBluetoothServiceClassIds)).toBe(true);
   });
 
   it('spreads cleanly with extra per-call-site options', () => {

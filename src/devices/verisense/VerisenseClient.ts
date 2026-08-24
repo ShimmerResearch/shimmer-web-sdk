@@ -615,10 +615,16 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     } = {},
   ): Promise<boolean> {
     const injected = opts.transport ?? this._injectedTransport;
-    if (!injected && !('serial' in navigator)) {
-      /* Verisense docks over a wired USB serial port, never RFCOMM. */
+    /*
+     * Snapshot first: testing `navigator` directly throws with no global
+     * navigator (Node, React Native), which would make the descriptive error
+     * below unreachable. Verisense docks over a wired USB serial port, never
+     * RFCOMM, so the advice is the wired one.
+     */
+    const serialSupport = describePlatformSupport();
+    if (!injected && !serialSupport.webSerial) {
       throw new Error(
-        transportAdvice(describePlatformSupport(), 'wiredSerial') ?? 'Web Serial is not available.',
+        transportAdvice(serialSupport, 'wiredSerial') ?? 'Web Serial is not available.',
       );
     }
 

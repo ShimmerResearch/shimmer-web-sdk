@@ -49,8 +49,13 @@ import { SHIMMER3_SPP_UUID as SPP_UUID } from './protocol.js';
  * paired in system settings first. See `describePlatformSupport`.
  */
 export const SHIMMER3_SPP_SERIAL_OPTIONS = Object.freeze({
-  filters: [{ bluetoothServiceClassId: SPP_UUID }] as const,
-  allowedBluetoothServiceClassIds: [SPP_UUID] as const,
+  /*
+   * Frozen at every level, not just the outer object. Object.freeze is shallow,
+   * so freezing only the wrapper would still let a JavaScript caller push into
+   * the arrays of a default that every other caller shares.
+   */
+  filters: Object.freeze([Object.freeze({ bluetoothServiceClassId: SPP_UUID })]),
+  allowedBluetoothServiceClassIds: Object.freeze([SPP_UUID]),
   kind: 'rfcomm',
 } as const);
 

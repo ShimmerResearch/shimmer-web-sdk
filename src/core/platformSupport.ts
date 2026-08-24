@@ -147,16 +147,22 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
   if (availability === 'unavailable') {
     if (support.isIOS) {
       /*
-       * On iOS the only route is BLE, so the advice depends on whether this
-       * browser has it. If Web Bluetooth is present we are inside Bluefy or
-       * WebBLE already, and recommending them would be telling the user to
-       * install what they are using.
+       * On iOS the only possible route is BLE, so the advice turns on whether
+       * this browser has it. If Web Bluetooth is present we are already inside
+       * Bluefy or WebBLE, and recommending them would tell the user to install
+       * what they are using.
+       *
+       * Deliberately conditional on the *sensor* too. BLE is not a substitute
+       * for classic Bluetooth in general - a classic-only Shimmer3 (the RN42
+       * fleet has no BLE radio at all) cannot be reached from iOS by any route.
+       * Promising "connect over BLE instead" would send exactly the user who
+       * needs classic Bluetooth off after something that cannot work for them.
        */
       const route = support.webBluetooth
-        ? 'Connect over BLE instead.'
-        : 'Bluefy or WebBLE (App Store) bundle their own BLE stack and can run this page.';
+        ? 'A sensor that also supports BLE can be reached that way instead.'
+        : 'A sensor that also supports BLE can be reached with Bluefy or WebBLE (App Store), which bundle their own BLE stack.';
       return need === 'classicBluetooth'
-        ? `Classic Bluetooth cannot be reached from iOS at all: iOS gives apps no classic-Bluetooth serial access (Core Bluetooth is BLE-only, and SPP requires MFi licensing). ${route}`
+        ? `Classic Bluetooth cannot be reached from iOS at all: iOS gives apps no classic-Bluetooth serial access (Core Bluetooth is BLE-only, and SPP requires MFi licensing). ${route} A classic-Bluetooth-only sensor cannot be used from iOS.`
         : `Web Serial is not available on iOS — WebKit does not implement it, so a wired dock cannot be opened. ${route}`;
     }
     return need === 'classicBluetooth'

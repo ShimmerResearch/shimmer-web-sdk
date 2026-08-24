@@ -16,7 +16,7 @@ export interface WebSerialTransportOptions {
   parity?: ParityType;
   flowControl?: FlowControlType;
   /** `requestPort` filters. */
-  filters?: SerialPortFilter[] | null;
+  filters?: readonly SerialPortFilter[] | null;
   /**
    * Service class IDs the port picker is *permitted* to surface Bluetooth
    * (RFCOMM/SPP) ports for — pass `[SHIMMER3_SPP_UUID]` to reach a Shimmer
@@ -33,7 +33,7 @@ export interface WebSerialTransportOptions {
    * allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID],
    * ```
    */
-  allowedBluetoothServiceClassIds?: BluetoothServiceClassId[] | null;
+  allowedBluetoothServiceClassIds?: readonly BluetoothServiceClassId[] | null;
   /**
    * Read buffer size handed to `port.open`. Defaults to the browser's own
    * default (8 KiB in Chrome); raise it for bulk transfers so a slow turn of
@@ -92,8 +92,8 @@ export class WebSerialTransport implements ShimmerTransport {
     flowControl: FlowControlType;
     bufferSize?: number;
   };
-  private readonly _filters: SerialPortFilter[] | null;
-  private readonly _allowedBluetoothServiceClassIds: BluetoothServiceClassId[] | null;
+  private readonly _filters: readonly SerialPortFilter[] | null;
+  private readonly _allowedBluetoothServiceClassIds: readonly BluetoothServiceClassId[] | null;
   private readonly _openTimeoutMs: number;
   private readonly _signals: { dataTerminalReady: boolean; requestToSend: boolean };
 
@@ -132,14 +132,19 @@ export class WebSerialTransport implements ShimmerTransport {
   }
 
   async connect(): Promise<void> {
-    if (!('serial' in navigator)) {
-      /*
-       * Platform-specific wording, because "use a desktop browser" is wrong on
-       * Android (Chrome 138+ serves RFCOMM ports) and misleading on iOS, where no
-       * browser will ever have this. transportAdvice picks by platform; the guard
-       * itself stays a capability check.
-       */
-      const support = describePlatformSupport();
+    /*
+     * Snapshot before the guard rather than testing `navigator` directly: with no
+     * global navigator at all (Node, React Native) `'serial' in navigator` throws
+     * before any message can be produced, so the descriptive error below would be
+     * unreachable exactly where it is most needed.
+     *
+     * Platform-specific wording, because "use a desktop browser" is wrong on
+     * Android (Chrome 138+ serves RFCOMM ports) and misleading on iOS, where no
+     * browser will ever have this. The gate is still a capability check - the
+     * platform only chooses the words.
+     */
+    const support = describePlatformSupport();
+    if (!support.webSerial) {
       const need = this._allowedBluetoothServiceClassIds ? 'classicBluetooth' : 'wiredSerial';
       throw new Error(transportAdvice(support, need) ?? 'Web Serial is not available.');
     }
@@ -153,9 +158,16 @@ export class WebSerialTransport implements ShimmerTransport {
       // Unknown dictionary members are ignored by WebIDL, so naming the
       // Bluetooth service classes is safe on browsers that predate them.
       const request: SerialPortRequestOptions = {};
-      if (this._filters) request.filters = this._filters;
+      /*
+       * Copied, not aliased. The public options accept `readonly` arrays so a
+       * frozen shared default (SHIMMER3_SPP_SERIAL_OPTIONS) can be spread
+       * straight in, but SerialPortRequestOptions is a WebIDL dictionary typed
+       * with mutable arrays - and passing a frozen array into it would also let
+       * the caller's constant be reached by anything that mutates the request.
+       */
+      if (this._filters) request.filters = [...this._filters];
       if (this._allowedBluetoothServiceClassIds) {
-        request.allowedBluetoothServiceClassIds = this._allowedBluetoothServiceClassIds;
+        request.allowedBluetoothServiceClassIds = [...this._allowedBluetoothServiceClassIds];
       }
       this._port = await serial.requestPort(Object.keys(request).length ? request : undefined);
     }
