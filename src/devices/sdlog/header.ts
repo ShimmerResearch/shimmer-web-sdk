@@ -212,10 +212,33 @@ function parseImuRanges(bytes: Uint8Array, hw: number): SdLogImuRanges {
   return { lnAccel, wrAccel, gyro, mag, altAccel: 0, altMag: 0 };
 }
 
+/** Header byte range holding the MAC address, in on-wire (forward) order. */
+const MAC_OFFSET = 24;
+const MAC_LEN = 6;
+/** Bytes of an SD-log file needed before {@link readSdLogMacAddress} can read the MAC. */
+export const SDLOG_MAC_HEADER_BYTES = MAC_OFFSET + MAC_LEN;
+
 function macFromBytes(b: Uint8Array): string {
   let s = '';
-  for (let i = 24; i <= 29; i++) s += b[i].toString(16).padStart(2, '0');
+  for (let i = MAC_OFFSET; i < MAC_OFFSET + MAC_LEN; i++) s += b[i].toString(16).padStart(2, '0');
   return s;
+}
+
+/**
+ * Read just the MAC address from the head of an SD-log file, without parsing
+ * (or validating) the rest of the header.
+ *
+ * Unlike {@link parseSdLogHeader} this never throws and needs only the first
+ * {@link SDLOG_MAC_HEADER_BYTES} bytes, so it can run against a short probe
+ * read of a file still on the card. Returns 12 lowercase hex characters, or
+ * `null` when the bytes are too few or the field is unprogrammed (all `00` or
+ * all `ff`).
+ */
+export function readSdLogMacAddress(bytes: Uint8Array): string | null {
+  if (bytes.length < SDLOG_MAC_HEADER_BYTES) return null;
+  const field = bytes.subarray(MAC_OFFSET, MAC_OFFSET + MAC_LEN);
+  if (field.every((b) => b === 0x00) || field.every((b) => b === 0xff)) return null;
+  return macFromBytes(bytes);
 }
 
 /**

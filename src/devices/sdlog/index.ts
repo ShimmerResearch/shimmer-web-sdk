@@ -32,7 +32,7 @@ export type {
 export { isNewImuSensors } from './header.js';
 export { decodeSdLogValue, SDLOG_DATA_TYPE_BYTES } from './channels.js';
 export type { SdLogDataType, SdLogChannelSpec } from './channels.js';
-export { parseSdLogHeader } from './header.js';
+export { parseSdLogHeader, readSdLogMacAddress, SDLOG_MAC_HEADER_BYTES } from './header.js';
 export { decodeSdLogFile, decodeSdSession } from './decode.js';
 export type { SdLogDecodeOptions, SdLogDecodeResult } from './decode.js';
 export { parseSdSessionName, parseSdTrialFolderName } from './naming.js';

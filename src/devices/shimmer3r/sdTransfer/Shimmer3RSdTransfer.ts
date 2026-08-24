@@ -10,7 +10,7 @@
 import type { Shimmer3RClient } from '../Shimmer3RClient.js';
 import { ensureDirectoryPath } from '../../verisense/protocolDataFlow.js';
 import { toArrayBuffer } from '../../../core/arrayBuffer.js';
-import { parseSdSessionName } from '../../sdlog/naming.js';
+import { readSdLogMacAddress, SDLOG_MAC_HEADER_BYTES } from '../../sdlog/header.js';
 import {
   SD_XFER,
   SdTransferError,
@@ -26,14 +26,43 @@ import {
  *   `data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
  * - `consensysBackup` nests that same tree under the two levels Consensys
  *   expects inside its workspace `Backup` folder:
- *   `<import-stamp>/<ShimmerName>/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
+ *   `<import-stamp>/<MAC>/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
  *   so the download can be imported via
  *   *Application Settings -> Manage Data -> Import Data From Backup Directory*.
+ *
+ * Consensys keys the device level by MAC address (12 lowercase hex), not by
+ * Shimmer name -- a tree filed under the name is silently not matched to a
+ * device on import.
  */
 export type SdDestinationLayout = 'card' | 'consensysBackup';
 
-/** Device-name folder used when a session folder is not `<Name>-<NNN>`. */
-export const CONSENSYS_UNKNOWN_DEVICE = 'Unknown_Shimmer';
+/** Device folder used when no MAC can be established at all. */
+export const CONSENSYS_UNKNOWN_MAC = 'xxxxxxxxxxxx';
+
+/**
+ * Last-resort device folder for a session whose header MAC could not be read.
+ *
+ * Mirrors the desktop export tool: the four hex characters a Shimmer name
+ * carries are the low two bytes of its MAC, so `Shimmer_5AA4-002` degrades to
+ * `xxxxxxxx5aa4` -- enough for a human to spot and correct the folder by hand.
+ */
+export function consensysMacPlaceholder(sessionDir: string | undefined): string {
+  const m = /Shimmer_([0-9A-Fa-f]{4})/.exec(sessionDir ?? '');
+  return m ? `xxxxxxxx${m[1].toLowerCase()}` : CONSENSYS_UNKNOWN_MAC;
+}
+
+/**
+ * Normalise a MAC to the 12-lowercase-hex form Consensys names folders with,
+ * accepting the separator-carrying forms users paste (`E7:47:AA:7D:2F:31`).
+ * Throws for anything that is not six hex bytes.
+ */
+export function normalizeConsensysMac(mac: string): string {
+  const hex = mac.replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+  if (hex.length !== 12) {
+    throw new Error(`deviceMac must be 12 hex characters (got '${mac}').`);
+  }
+  return hex;
+}
 
 /**
  * Format an import-time folder name as Consensys does: `yyyy-MM-dd_HH.mm.ss`
@@ -50,22 +79,17 @@ export function formatSdImportStamp(date: Date = new Date()): string {
 /**
  * Map a card directory chain to its Consensys Backup destination.
  *
- * The device name is taken from the session folder (`<ShimmerName>-<NNN>`)
- * rather than from the connected device, so sessions recorded under a previous
- * device name - or on a card that has been moved between devices - still file
- * under the name they were recorded with, which is what Consensys shows.
+ * `macAddress` is the device level Consensys matches on. {@link downloadSdTree}
+ * resolves it per session folder from that session's own log header rather
+ * than from the connected device, so a card moved between devices still files
+ * each session under the device that recorded it.
  */
-export function consensysBackupSegments(cardDirSegments: string[], importStamp: string): string[] {
-  let shimmerName = CONSENSYS_UNKNOWN_DEVICE;
-  const sessionDir = cardDirSegments[cardDirSegments.length - 1];
-  if (sessionDir) {
-    try {
-      shimmerName = parseSdSessionName(sessionDir).shimmerName;
-    } catch {
-      /* not a <ShimmerName>-<NNN> folder - fall back to the placeholder */
-    }
-  }
-  return [importStamp, shimmerName, ...cardDirSegments];
+export function consensysBackupSegments(
+  cardDirSegments: string[],
+  importStamp: string,
+  macAddress: string,
+): string[] {
+  return [importStamp, macAddress, ...cardDirSegments];
 }
 
 export interface SdRemoteFile {
@@ -124,6 +148,15 @@ export interface DownloadSdTreeOptions {
    * Defaults to the current local time via {@link formatSdImportStamp}.
    */
   importStamp?: string;
+  /**
+   * MAC address for the `consensysBackup` device folder, in any hex form.
+   *
+   * Set this only to override the per-session MAC read from each log header --
+   * for example when the card is known to hold one device's data and the
+   * headers are unreadable. Leave unset for the header-derived default, which
+   * files correctly even when a card carries sessions from several devices.
+   */
+  deviceMac?: string;
   signal?: AbortSignal;
   onProgress?: (p: SdTransferProgress) => void;
 }
@@ -131,6 +164,11 @@ export interface DownloadSdTreeOptions {
 export interface SdTransferSummary {
   /** Import folder used for `consensysBackup`; undefined for `card`. */
   importStamp?: string;
+  /**
+   * Device (MAC) folder chosen for each on-card session directory under
+   * `consensysBackup`, keyed by the session's card path; empty for `card`.
+   */
+  deviceFolders?: Record<string, string>;
   filesDownloaded: number;
   filesSkipped: number;
   filesFailed: { path: string; error: string }[];
@@ -191,9 +229,13 @@ export async function downloadSdTree(
   const maxRetriesPerFile = opts.maxRetriesPerFile ?? 3;
   const layout = opts.layout ?? 'card';
   const importStamp = opts.importStamp ?? formatSdImportStamp();
+  const consensys = layout === 'consensysBackup';
+  // Validated up front so a malformed override fails before any card traffic
+  const deviceMacOverride = opts.deviceMac ? normalizeConsensysMac(opts.deviceMac) : undefined;
 
   const summary: SdTransferSummary = {
-    importStamp: layout === 'consensysBackup' ? importStamp : undefined,
+    importStamp: consensys ? importStamp : undefined,
+    deviceFolders: consensys ? {} : undefined,
     filesDownloaded: 0,
     filesSkipped: 0,
     filesFailed: [],
@@ -225,14 +267,60 @@ export async function downloadSdTree(
     });
   };
 
+  /**
+   * Read the head of an on-card file just far enough to recover its MAC.
+   *
+   * One short window per session directory, so the cost is negligible against
+   * the session itself. A file too short or too damaged to yield a MAC is not
+   * an error here -- the caller falls back to the name-derived placeholder.
+   */
+  const probeHeaderMac = async (filePath: string): Promise<string | null> => {
+    const probeLen = Math.max(SDLOG_MAC_HEADER_BYTES, blockPayloadLen);
+    const head = new Uint8Array(SDLOG_MAC_HEADER_BYTES);
+    let filled = 0;
+    try {
+      await client.sdReadFileWindow(filePath, 0, probeLen, {
+        blockPayloadLen,
+        stallTimeoutMs: opts.stallTimeoutMs,
+        signal: opts.signal,
+        onBlock: (payload, absOffset) => {
+          if (absOffset >= head.length) return;
+          const slice = payload.subarray(0, head.length - absOffset);
+          head.set(slice, absOffset);
+          filled = Math.max(filled, absOffset + slice.length);
+        },
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') throw e;
+      return null;
+    }
+    return readSdLogMacAddress(head.subarray(0, filled));
+  };
+
+  /** MAC folder per on-card session directory; one probe per directory. */
+  const macByDir = new Map<string, string>();
+  const deviceFolderFor = async (dirSegments: string[], filePath: string): Promise<string> => {
+    const key = dirSegments.join('/');
+    const cached = macByDir.get(key);
+    if (cached !== undefined) return cached;
+    const mac =
+      deviceMacOverride ??
+      (await probeHeaderMac(filePath)) ??
+      consensysMacPlaceholder(dirSegments[dirSegments.length - 1]);
+    macByDir.set(key, mac);
+    if (summary.deviceFolders) summary.deviceFolders[key] = mac;
+    return mac;
+  };
+
   for (const file of tree.files) {
     throwIfAborted(opts.signal);
     const segments = file.path.split('/');
     const name = segments.pop() as string;
 
     try {
-      const destSegments =
-        layout === 'consensysBackup' ? consensysBackupSegments(segments, importStamp) : segments;
+      const destSegments = consensys
+        ? consensysBackupSegments(segments, importStamp, await deviceFolderFor(segments, file.path))
+        : segments;
       const dir = await ensureDirectoryPath(destRoot, destSegments);
       const handle = await dir.getFileHandle(name, { create: true });
       const existingSize = (await handle.getFile()).size;

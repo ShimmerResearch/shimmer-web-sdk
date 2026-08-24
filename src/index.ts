@@ -166,7 +166,9 @@ export {
   deleteDownloadedFromCard,
   formatSdImportStamp,
   consensysBackupSegments,
-  CONSENSYS_UNKNOWN_DEVICE,
+  consensysMacPlaceholder,
+  normalizeConsensysMac,
+  CONSENSYS_UNKNOWN_MAC,
 } from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 export type {
   SdDestinationLayout,
@@ -375,6 +377,8 @@ export {
   decodeSdLogValue,
   SDLOG_DATA_TYPE_BYTES,
   parseSdLogHeader,
+  readSdLogMacAddress,
+  SDLOG_MAC_HEADER_BYTES,
   decodeSdLogFile,
   decodeSdSession,
   parseSdSessionName,

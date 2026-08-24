@@ -19,7 +19,9 @@ import {
   enumerateSdTree,
   formatSdImportStamp,
   consensysBackupSegments,
-  CONSENSYS_UNKNOWN_DEVICE,
+  consensysMacPlaceholder,
+  normalizeConsensysMac,
+  CONSENSYS_UNKNOWN_MAC,
 } from '../../src/devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 
 const ACK = 0xff;
@@ -414,6 +416,16 @@ function asciiBytes(n: number): Uint8Array {
   return out;
 }
 
+/**
+ * A log file of `n` bytes whose header carries `mac` (12 hex) at bytes 24..29,
+ * where the Consensys device folder is read from.
+ */
+function logBytes(n: number, mac: string): Uint8Array {
+  const out = asciiBytes(n);
+  for (let i = 0; i < 6; i++) out[24 + i] = parseInt(mac.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // In-memory File System Access mocks
 // ---------------------------------------------------------------------------
@@ -795,34 +807,38 @@ describe('Consensys Backup layout', () => {
     expect(formatSdImportStamp(new Date(2025, 0, 2, 3, 4, 5))).toBe('2025-01-02_03.04.05');
   });
 
-  it('nests the card tree under <stamp>/<ShimmerName>, taking the name from the session folder', () => {
+  it('nests the card tree under <stamp>/<MAC>', () => {
     expect(
       consensysBackupSegments(
         ['data', 'sync_1750856068', 'Shimmer_5AA4-002'],
         '2025-06-25_15.30.36',
+        'e747aa7d5aa4',
       ),
     ).toEqual([
       '2025-06-25_15.30.36',
-      'Shimmer_5AA4',
+      'e747aa7d5aa4',
       'data',
       'sync_1750856068',
       'Shimmer_5AA4-002',
     ]);
   });
 
-  it('falls back to a placeholder device folder when the session folder is not <Name>-<NNN>', () => {
-    expect(consensysBackupSegments(['data', 'oddly_named'], 'S')).toEqual([
-      'S',
-      CONSENSYS_UNKNOWN_DEVICE,
-      'data',
-      'oddly_named',
-    ]);
+  it('derives a placeholder MAC from the name suffix, or a full placeholder', () => {
+    expect(consensysMacPlaceholder('Shimmer_5AA4-002')).toBe('xxxxxxxx5aa4');
+    expect(consensysMacPlaceholder('oddly_named')).toBe(CONSENSYS_UNKNOWN_MAC);
+    expect(consensysMacPlaceholder(undefined)).toBe(CONSENSYS_UNKNOWN_MAC);
   });
 
-  it('downloads into a Consensys-importable tree and reports the import stamp', async () => {
+  it('normalises a separator-carrying MAC and rejects a malformed one', () => {
+    expect(normalizeConsensysMac('E7:47:AA:7D:2F:31')).toBe('e747aa7d2f31');
+    expect(normalizeConsensysMac('e747aa7d2f31')).toBe('e747aa7d2f31');
+    expect(() => normalizeConsensysMac('e747aa')).toThrow(/12 hex/);
+  });
+
+  it('downloads into a Consensys-importable tree keyed by the header MAC', async () => {
     const card = new VirtualCard();
-    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/000', asciiBytes(700));
-    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/001', asciiBytes(120));
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/000', logBytes(700, 'e747aa7d5aa4'));
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-002/001', logBytes(120, 'e747aa7d5aa4'));
     const { client } = await makeClient(card);
     const dest = new MemDir();
 
@@ -834,23 +850,26 @@ describe('Consensys Backup layout', () => {
 
     expect(summary.filesDownloaded).toBe(2);
     expect(summary.importStamp).toBe('2025-06-25_15.30.36');
+    expect(summary.deviceFolders).toEqual({
+      'data/sync_1750856068/Shimmer_5AA4-002': 'e747aa7d5aa4',
+    });
 
-    // Backup/<stamp>/<ShimmerName>/data/<trial>/<session>/<file>
+    // Backup/<stamp>/<MAC>/data/<trial>/<session>/<file>
     const sessionDir = dest.atPath(
-      '2025-06-25_15.30.36/Shimmer_5AA4/data/sync_1750856068/Shimmer_5AA4-002',
+      '2025-06-25_15.30.36/e747aa7d5aa4/data/sync_1750856068/Shimmer_5AA4-002',
     );
     expect(sessionDir).toBeDefined();
-    expect(sessionDir?.files.get('000')?.data).toEqual(asciiBytes(700));
-    expect(sessionDir?.files.get('001')?.data).toEqual(asciiBytes(120));
+    expect(sessionDir?.files.get('000')?.data).toEqual(logBytes(700, 'e747aa7d5aa4'));
+    expect(sessionDir?.files.get('001')?.data).toEqual(logBytes(120, 'e747aa7d5aa4'));
 
     // The raw card mirror must NOT be created at the destination root
     expect(dest.dirs.has('data')).toBe(false);
   });
 
-  it('files sessions from two devices on one card under their own name folders', async () => {
+  it('files sessions from two devices on one card under their own MAC folders', async () => {
     const card = new VirtualCard();
-    card.addFile('data/sync_1750856068/Shimmer_5AA4-000/000', asciiBytes(64));
-    card.addFile('data/sync_1750856068/Shimmer_BEEF-001/000', asciiBytes(64));
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-000/000', logBytes(64, 'e747aa7d5aa4'));
+    card.addFile('data/sync_1750856068/Shimmer_BEEF-001/000', logBytes(64, 'e747aa7dbeef'));
     const { client } = await makeClient(card);
     const dest = new MemDir();
 
@@ -860,9 +879,57 @@ describe('Consensys Backup layout', () => {
     });
 
     expect(Array.from(dest.atPath('STAMP')?.dirs.keys() ?? []).sort()).toEqual([
-      'Shimmer_5AA4',
-      'Shimmer_BEEF',
+      'e747aa7d5aa4',
+      'e747aa7dbeef',
     ]);
+  });
+
+  it('falls back to the name-derived placeholder when the header carries no MAC', async () => {
+    const card = new VirtualCard();
+    // A zeroed MAC field is the unprogrammed/short-file case the placeholder
+    // exists for; the name suffix is the only hint left
+    card.addFile('data/sync_1/Shimmer_5AA4-000/000', new Uint8Array(64));
+    card.addFile('data/sync_1/oddly_named/000', new Uint8Array(64));
+    const { client } = await makeClient(card);
+    const dest = new MemDir();
+
+    await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+      layout: 'consensysBackup',
+      importStamp: 'STAMP',
+    });
+
+    expect(Array.from(dest.atPath('STAMP')?.dirs.keys() ?? []).sort()).toEqual([
+      'xxxxxxxx5aa4',
+      CONSENSYS_UNKNOWN_MAC,
+    ]);
+  });
+
+  it('deviceMac overrides the header MAC for every session', async () => {
+    const card = new VirtualCard();
+    card.addFile('data/sync_1/Shimmer_5AA4-000/000', logBytes(64, 'e747aa7d5aa4'));
+    card.addFile('data/sync_1/Shimmer_BEEF-001/000', logBytes(64, 'e747aa7dbeef'));
+    const { client } = await makeClient(card);
+    const dest = new MemDir();
+
+    await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+      layout: 'consensysBackup',
+      importStamp: 'STAMP',
+      deviceMac: 'AA:BB:CC:DD:EE:FF',
+    });
+
+    expect(Array.from(dest.atPath('STAMP')?.dirs.keys() ?? [])).toEqual(['aabbccddeeff']);
+  });
+
+  it('rejects a malformed deviceMac before touching the card', async () => {
+    const { client } = await makeClient(makeCard());
+    const dest = new MemDir();
+    await expect(
+      downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+        layout: 'consensysBackup',
+        deviceMac: 'not-a-mac',
+      }),
+    ).rejects.toThrow(/12 hex/);
+    expect(dest.dirs.size).toBe(0);
   });
 
   it('still mirrors the card layout by default', async () => {
@@ -870,6 +937,7 @@ describe('Consensys Backup layout', () => {
     const dest = new MemDir();
     const summary = await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {});
     expect(summary.importStamp).toBeUndefined();
+    expect(summary.deviceFolders).toBeUndefined();
     expect(dest.dirs.has('data')).toBe(true);
   });
 });
