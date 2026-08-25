@@ -60,7 +60,7 @@
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
-    "rollup": "^4.62.4",
+    "rollup": "^4.62.5",
     "rollup-plugin-dts": "^6.5.1",
     "tslib": "^2.6.2",
     "typedoc": "^0.28.20",
