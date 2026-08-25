@@ -451,9 +451,12 @@ describe('Android classic-Bluetooth advice covers the LE-bond trap', () => {
     expect(msg).toMatch(/already paired and still missing/i);
   });
 
-  it('names the cause and both remedies', () => {
+  it('names the cause and the one remedy that works', () => {
     const msg = transportAdvice(describePlatformSupport(androidNav), 'classicBluetooth') ?? '';
     expect(msg).toMatch(/bonded it over BLE/i);
+    /* The LE-bond diagnosis only applies to a sensor that has a BLE radio to
+     * bond with — the advice is device-agnostic and classic-only sensors exist. */
+    expect(msg).toMatch(/also has a BLE radio/i);
     expect(msg).toMatch(/unpair/i);
     // The remedy that actually works, in order: BLE off, unpair, pair, BLE on.
     expect(msg).toMatch(/disable the sensor’s BLE radio/i);
