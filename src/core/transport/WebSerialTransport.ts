@@ -243,8 +243,8 @@ export class WebSerialTransport implements ShimmerTransport {
             reject(
               new Error(
                 `Timed out after ${this._openTimeoutMs} ms opening the serial port. ` +
-                  'For a Bluetooth COM port: check the sensor is powered, in range, ' +
-                  'and still paired with this PC.',
+                  'For a Bluetooth serial port: check the sensor is powered, in range, ' +
+                  'and still paired with this host.',
               ),
             );
           }, this._openTimeoutMs);
