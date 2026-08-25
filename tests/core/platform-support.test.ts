@@ -455,9 +455,14 @@ describe('Android classic-Bluetooth advice covers the LE-bond trap', () => {
     const msg = transportAdvice(describePlatformSupport(androidNav), 'classicBluetooth') ?? '';
     expect(msg).toMatch(/bonded it over BLE/i);
     expect(msg).toMatch(/unpair/i);
-    // The two ways out: re-pair classic-only, or force it from a terminal app.
-    expect(msg).toMatch(/classic Bluetooth only/i);
-    expect(msg).toMatch(/serial-terminal app/i);
+    // The remedy that actually works, in order: BLE off, unpair, pair, BLE on.
+    expect(msg).toMatch(/disable the sensor’s BLE radio/i);
+    expect(msg).toMatch(/re-enable BLE/i);
+    // And it must say the cycle is not per-session, or nobody will accept it.
+    expect(msg).toMatch(/once per phone/i);
+    /* Must NOT suggest a terminal app: tested on hardware and impossible —
+     * Android keeps classic pairing in Settings and those apps redirect to it. */
+    expect(msg).not.toMatch(/terminal app/i);
   });
 
   it('says nothing extra on desktop, where this cannot happen', () => {

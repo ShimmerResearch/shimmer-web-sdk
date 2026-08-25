@@ -240,8 +240,19 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
      * while every device that DID list had a BR/EDR key and SPP cached. Pairing
      * again with the sensor's BLE radio disabled flipped it to
      * `bredr_linkkey_known:T` with `SPP,…` cached, and it appeared immediately.
+     *
+     * The remedy names the BLE-off/on cycle specifically because the obvious
+     * alternative does not exist: an earlier version of this message suggested
+     * forcing the bond from a classic serial-terminal app, and that was tested
+     * and does not work. Android keeps classic pairing in Settings, and those
+     * apps redirect to it and only list devices already bonded. Sending users
+     * after a route that cannot work is worse than a longer instruction.
+     *
+     * Re-enabling BLE afterwards is safe and was verified: the BR/EDR link key
+     * and the cached `SPP` record both survive, so the sensor keeps working over
+     * both radios and the dance is once per phone, not once per session.
      */
-    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If it is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find: unpair it, then pair again with the sensor advertising classic Bluetooth only, or connect once from a classic serial-terminal app to force the classic bond.';
+    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If it is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find. To fix it: disable the sensor’s BLE radio, unpair it on the phone, pair again from Bluetooth settings, then re-enable BLE — the classic bond survives, so this is once per phone.';
   }
   return null;
 }
