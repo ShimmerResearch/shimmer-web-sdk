@@ -226,7 +226,38 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
    * front. Worth a note even though nothing is wrong.
    */
   if (need === 'classicBluetooth' && support.isAndroid) {
-    return 'Pair the sensor in Android Settings → Bluetooth first: Android Chrome exposes Web Serial for paired Bluetooth devices only, so the picker stays empty until it is paired.';
+    /*
+     * "Pair it first" is necessary but not sufficient, and the insufficient case
+     * is the common one. A dual-mode sensor advertising both radios invites
+     * Android to create an **LE** bond, which satisfies the user ("it's paired")
+     * while leaving no BR/EDR link key and therefore no classic SDP record. Web
+     * Serial enumerates paired devices by their cached SDP service classes, so a
+     * sensor bonded that way is absent from the picker no matter how long you
+     * stare at Bluetooth settings.
+     *
+     * Confirmed on hardware: `dumpsys bluetooth_manager` showed the sensor as
+     * `bredr_linkkey_known:F, le_linkkey_known:T` with an all-zeros UUID list,
+     * while every device that DID list had a BR/EDR key and SPP cached. Pairing
+     * again with the sensor's BLE radio disabled flipped it to
+     * `bredr_linkkey_known:T` with `SPP,…` cached, and it appeared immediately.
+     *
+     * The remedy names the BLE-off/on cycle specifically because the obvious
+     * alternative does not exist: an earlier version of this message suggested
+     * forcing the bond from a classic serial-terminal app, and that was tested
+     * and does not work. Android keeps classic pairing in Settings, and those
+     * apps redirect to it and only list devices already bonded. Sending users
+     * after a route that cannot work is worse than a longer instruction.
+     *
+     * Re-enabling BLE afterwards is safe and was verified: the BR/EDR link key
+     * and the cached `SPP` record both survive, so the sensor keeps working over
+     * both radios and the dance is once per phone, not once per session.
+     *
+     * The "also has a BLE radio" qualifier is load-bearing: this advice is
+     * device-agnostic, and a classic-only sensor (the RN42 Shimmer3 fleet) cannot
+     * have taken an LE bond — for it, "paired but missing" has some other cause,
+     * and the BLE-off dance is a dead end.
+     */
+    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If a sensor that also has a BLE radio is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find. To fix it: disable the sensor’s BLE radio, unpair it on the phone, pair again from Bluetooth settings, then re-enable BLE — the classic bond survives, so this is once per phone.';
   }
   return null;
 }
