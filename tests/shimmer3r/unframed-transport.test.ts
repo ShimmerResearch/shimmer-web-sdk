@@ -277,8 +277,6 @@ describe('connect status text follows the transport', () => {
   const bleOnly = ['GATT connected', 'RX/TX obtained', 'Notifications started'];
 
   async function statusesFor(kind: 'ble' | 'rfcomm' | 'serial', framed: boolean) {
-    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
-    const { LoopbackTransport } = await import('../../src/core/transport/LoopbackTransport.js');
     const t = new LoopbackTransport({ capabilities: { framed } });
     // LoopbackTransport hardcodes kind 'loopback'; stand in for the real ones.
     Object.defineProperty(t, 'kind', { value: kind, configurable: true });
