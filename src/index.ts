@@ -19,6 +19,19 @@ export { SDK_VERSION } from './version.js';
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
 
+// Platform capability + guidance (gate on capability, message on platform)
+export {
+  describePlatformSupport,
+  transportAvailability,
+  transportAdvice,
+} from './core/platformSupport.js';
+export type {
+  PlatformSupport,
+  NavigatorLike,
+  TransportNeed,
+  Availability,
+} from './core/platformSupport.js';
+
 // Transport abstraction (pluggable byte pipes)
 export {
   WebBluetoothTransport,
@@ -119,7 +132,7 @@ export {
   buildBlankBrandRecord,
 } from './devices/brandRecord.js';
 export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
-// Shimmer3R SD-card file transfer (FW >= v1.01.009)
+// Shimmer3R SD-card file transfer (FW >= v1.01.011)
 export {
   SD_TRANSFER_OPCODES,
   SD_STATUS,
@@ -188,6 +201,7 @@ export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js
 export {
   SHIMMER3_DEFAULTS,
   SHIMMER3_SPP_UUID,
+  SHIMMER3_SPP_SERIAL_OPTIONS,
   SHIMMER3_SAMPLING_CLOCK_FREQ,
 } from './devices/shimmer3/constants.js';
 export {
