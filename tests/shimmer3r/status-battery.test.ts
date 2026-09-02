@@ -294,6 +294,21 @@ describe('Shimmer3RClient.getStatus', () => {
     expect(t.writes).toHaveLength(3);
   });
 
+  it('rejects a truncated answer from a KNOWN Shimmer3R rather than guessing', async () => {
+    // Once the platform has been read, two status bytes is a contract, not an
+    // assumption. A one-byte answer is a truncated message; returning it would
+    // report `usbPluggedIn: null` — "this hardware has no such field" — for a
+    // sensor that does have the field. Failing is the honest answer.
+    const { client } = await framed((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND)
+        setTimeout(() => tr.notify([ACK, DEVVER, 10]), 0);
+      else if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
+        setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0]), 0);
+    });
+    expect(await client.readDeviceVersion()).toEqual({ hardwareVersion: 10 });
+    await expect(client.getStatus()).rejects.toThrow(/Instream response 0x71 timeout/);
+  }, 3000);
+
   it('throws when not connected', async () => {
     const client = new Shimmer3RClient({ debug: false });
     await expect(client.getStatus()).rejects.toThrow(/Not connected/);
@@ -340,6 +355,65 @@ describe('Shimmer3RClient.onDeviceStatus', () => {
     t.notify([0x11, 0x01]);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0]).toMatchObject({ docked: true, streaming: true });
+  });
+
+  /** Connect, then tell the client which platform it is talking to. */
+  async function framedKnowing(
+    hw: number,
+  ): Promise<{ t: LoopbackTransport; client: Shimmer3RClient }> {
+    const ctx = await framed((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND)
+        setTimeout(() => tr.notify([ACK, DEVVER, hw]), 0);
+    });
+    expect(await ctx.client.readDeviceVersion()).toEqual({ hardwareVersion: hw });
+    return ctx;
+  }
+
+  it('drops a truncated push instead of reporting usbPluggedIn as null', async () => {
+    // A Shimmer3R's push carries TWO status bytes. A three-byte one is a
+    // framing failure, and surfacing it would say `usbPluggedIn: null`, which
+    // means "this hardware has no such field" — not "the byte never arrived".
+    // A caller has no way to tell those apart, so the truncated push must not
+    // become a status at all.
+    const { t, client } = await framedKnowing(10);
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([INSTREAM, STATUS, 0x21]);
+    expect(spy).not.toHaveBeenCalled();
+
+    // …and the complete push still lands, so the guard is not just "off".
+    t.notify([INSTREAM, STATUS, 0x21, 0x01]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: true });
+  });
+
+  it('drops a truncated ACK-prefixed push too', async () => {
+    const { t, client } = await framedKnowing(10);
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([ACK, INSTREAM, STATUS, 0x21]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still reports a Shimmer3 one-byte push, which is complete, not truncated', async () => {
+    const { t, client } = await framedKnowing(3);
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([INSTREAM, STATUS, 0x21]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: null });
+  });
+
+  it('reports a one-byte push while the platform is still unknown', async () => {
+    // Two bytes is only this client's opening guess until readDeviceVersion
+    // answers, so it must not be enforced as a contract yet: an app that never
+    // probes would otherwise lose every push a Shimmer3 sends.
+    const { t, client } = await framed(() => {});
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([INSTREAM, STATUS, 0x21]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: null });
   });
 
   it('leaves other instream traffic alone', async () => {

@@ -206,6 +206,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _statusReadsInFlight = 0;
 
+  /**
+   * How many status payload bytes a STATUS_RESPONSE must carry before it is
+   * worth parsing.
+   *
+   * Once {@link readDeviceVersion} has answered, {@link _statusPayloadBytes} is
+   * a contract — the firmware sends exactly that many — so a shorter message is
+   * a truncated one, not a shorter platform. Parsing it anyway would report
+   * `usbPluggedIn: null`, which means "this hardware has no such field" and NOT
+   * "the byte did not arrive"; the caller cannot tell those apart, so the
+   * shorter message must not be surfaced as a status at all.
+   *
+   * Before the platform is known the 2 is only a guess biased towards this
+   * client's namesake, so demanding it would reject — or time out on — the
+   * perfectly valid one-byte status a Shimmer3 sends.
+   */
+  private get _minStatusPayloadBytes(): 1 | 2 {
+    return this._deviceVersionCache ? this._statusPayloadBytes : 1;
+  }
+
   // Cached device configuration
   enabledSensors = 0x000000;
   samplingRateHz = 0;
@@ -250,6 +269,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * The answer to a {@link getStatus} call is NOT delivered here — that would
    * report every state twice.
+   *
+   * A push whose payload is short of the connected platform's status length is
+   * dropped (with a debug log) rather than parsed, so `usbPluggedIn: null` here
+   * always means "a Shimmer3, which has no such field" and never "the byte went
+   * missing". See {@link readDeviceVersion} for how that length is learnt.
    *
    * **Only fires while idle.** Once streaming, every inbound byte belongs to the
    * data plane and goes to the schema parser, which has no way to tell a status
@@ -475,11 +499,29 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // there. On a byte stream the drain has already split the ACK off, but over
     // BLE it shares the notification.
     const at = chunk[0] === OPCODES.ACK_COMMAND_PROCESSED ? 1 : 0;
-    if (chunk.length < at + 3) return;
     if (chunk[at] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
     if (chunk[at + 1] !== OPCODES.STATUS_RESPONSE) return;
     // Somebody's answer, not news: `getStatus` reports it to its own caller.
     if (this._statusReadsInFlight > 0) return;
+    // The payload must be ALL there, not merely started. A guard of `at + 3`
+    // let a push with one status byte through on a two-byte platform, and the
+    // parser then reported `usbPluggedIn: null` — indistinguishable, to the
+    // caller, from a Shimmer3 that has no such field.
+    const need = this._minStatusPayloadBytes;
+    if (chunk.length < at + 2 + need) {
+      // Dropped rather than surfaced: nobody asked for this message, so there
+      // is no caller waiting to be failed, and inventing a status is worse than
+      // missing one the firmware will push again on the next change. Logged
+      // because a short push means the framing is wrong, which is exactly the
+      // kind of thing whoever turned `debug` on is looking for.
+      this._log(
+        'Dropping truncated STATUS push:',
+        chunk.length - at - 2,
+        'payload byte(s), need',
+        need,
+      );
+      return;
+    }
     try {
       this.onDeviceStatus(
         parseShimmer3StatusBytes(chunk.subarray(at + 2, at + 2 + this._statusPayloadBytes)),
@@ -1789,6 +1831,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Shimmer3 answers with one status byte where a Shimmer3R sends two, and over
    * a byte stream the framer needs to know which before it can split the
    * message. Getting it wrong there consumes the ACK that follows.
+   *
+   * Calling it first also sharpens the failure mode here: with the platform
+   * known, an answer shorter than that platform's status is a truncated message
+   * and this rejects on timeout rather than returning a status whose
+   * `usbPluggedIn` is `null`. While the platform is unknown the short answer is
+   * still accepted, because it is indistinguishable from a Shimmer3's.
    */
   async getStatus(): Promise<Shimmer3DeviceStatus> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
@@ -1802,13 +1850,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
         new Uint8Array([OPCODES.GET_STATUS_COMMAND]),
         1500,
       );
+      // Read once, so the ACK-remainder shortcut and the waiter that backs it
+      // up agree on what counts as a whole message even if another caller
+      // learns the platform mid-await.
+      const need = this._minStatusPayloadBytes;
       const rsp =
         ackRemainder &&
-        ackRemainder.length >= 3 &&
+        ackRemainder.length >= 2 + need &&
         ackRemainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
         ackRemainder[1] === OPCODES.STATUS_RESPONSE
           ? ackRemainder
-          : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, 1, 1500);
+          : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, need, 1500);
       const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + this._statusPayloadBytes));
       this._emitStatus(
         `Status: docked=${status.docked} sensing=${status.sensing} ` +
