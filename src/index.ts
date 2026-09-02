@@ -83,7 +83,7 @@ export type {
 // Shimmer3R
 export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
-export { SensorBitmapShimmer3 } from './devices/shimmer3r/SensorBitmap.js';
+export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
 export {
   OPCODES,
@@ -121,11 +121,23 @@ export {
   CHANNEL_FORMATS,
   CHANNEL_FORMAT_OVERRIDES,
   UNKNOWN_CHANNEL_ASSUMED_BYTES,
+  isGenerationSensitiveChannel,
   channelFormatsFor,
   resolveChannelFormat,
   generationFromHardwareVersion,
 } from './devices/shimmer3r/channelFormats.js';
 export type { ChannelFormat, ShimmerGeneration } from './devices/shimmer3r/channelFormats.js';
+/**
+ * The generation-aware stream-schema builder both clients use. `trusted` on the
+ * result says whether the byte offsets can be relied on — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export { buildStreamSchema } from './devices/shimmer3r/streamSchema.js';
+export type {
+  StreamSchemaBase,
+  StreamSchemaField,
+  BuildStreamSchemaOptions,
+} from './devices/shimmer3r/streamSchema.js';
 export {
   calibrateU12AdcValue,
   calibrateShimmer3RAdcChannel,
