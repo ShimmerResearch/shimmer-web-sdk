@@ -5,7 +5,13 @@
  * @packageDocumentation
  */
 
-export type { InfoMemContext, InfoMemDeviceConfig } from './types.js';
+export type {
+  InfoMemContext,
+  InfoMemDeviceConfig,
+  InfoMemImuConfig,
+  InfoMemSdConfig,
+  InfoMemCalibrationBlocks,
+} from './types.js';
 
 export {
   // constants
@@ -17,6 +23,10 @@ export {
   INFOMEM_VALIDITY_BYTES,
   INFOMEM_ADDR_LEGACY,
   INFOMEM_ADDR_FLAT,
+  GENERAL_CALIBRATION_LENGTH,
+  MAX_SYNC_NODES,
+  BIT_SHIFT,
+  MASK,
   // predicates / resolution
   fwCompare,
   isSupportedMpl,

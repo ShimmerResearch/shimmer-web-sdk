@@ -346,6 +346,17 @@ export type {
   GenerateInfoMemOptions,
   DeviceWriteDivergentRanges,
 } from './devices/infomem/index.js';
+export {
+  GENERAL_CALIBRATION_LENGTH as INFOMEM_GENERAL_CALIBRATION_LENGTH,
+  MAX_SYNC_NODES as INFOMEM_MAX_SYNC_NODES,
+  BIT_SHIFT as INFOMEM_BIT_SHIFT,
+  MASK as INFOMEM_MASK,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemImuConfig,
+  InfoMemSdConfig,
+  InfoMemCalibrationBlocks,
+} from './devices/infomem/index.js';
 
 // Inertial (accel/gyro/mag) calibration — phase P3
 export {
