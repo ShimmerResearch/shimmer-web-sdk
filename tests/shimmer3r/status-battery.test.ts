@@ -425,3 +425,48 @@ describe('Shimmer3RClient.getBattery', () => {
     await expect(client.getBattery()).rejects.toThrow(/Instream response 0x94 timeout/);
   }, 3000);
 });
+
+// ---------------------------------------------------------------------------
+// NACK
+// ---------------------------------------------------------------------------
+
+describe('Shimmer3RClient NACK handling', () => {
+  const NACK = OPCODES.NACK_COMMAND_PROCESSED; // 0xFE
+
+  it('rejects a refused command at once instead of waiting out the ACK timeout', async () => {
+    // The firmware refuses several commands outright while sensing
+    // (ShimBt_isCmdBlockedWhileSensing). "ACK timeout" a second and a half
+    // later reads as a dead link; this reads as a refusal.
+    const { client } = await framed((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_GSR_RANGE_COMMAND) setTimeout(() => tr.notify([NACK]), 0);
+    });
+    const started = Date.now();
+    await expect(client.setGSRRange(2)).rejects.toThrow(/NACK received/);
+    // The setter's own ACK timeout is 1500 ms; failing fast is the point.
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('rejects a NACK dribbled over a byte stream too', async () => {
+    const { client } = await unframed((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_WR_ACCEL_RANGE_COMMAND) dribble3(tr, [NACK]);
+    });
+    await expect(client.setWrAccelRange(1)).rejects.toThrow(/NACK received/);
+  });
+
+  it('leaves the client usable — the next command still ACKs', async () => {
+    // A rejection must not leak the in-flight-command count, or every later
+    // command mistakes a stray byte for its own ACK.
+    const { client } = await framed((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_GSR_RANGE_COMMAND) setTimeout(() => tr.notify([NACK]), 0);
+      else setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await expect(client.setGSRRange(2)).rejects.toThrow(/NACK received/);
+    await expect(client.setWrAccelRange(3)).resolves.toMatchObject({ wrAccelRange: 3 });
+  });
+
+  it('ignores a stray 0xFE arriving with no command in flight', async () => {
+    const { t, client } = await framed((_bytes, tr) => setTimeout(() => tr.notify([ACK]), 0));
+    t.notify([NACK]);
+    await expect(client.setWrAccelRange(2)).resolves.toMatchObject({ wrAccelRange: 2 });
+  });
+});

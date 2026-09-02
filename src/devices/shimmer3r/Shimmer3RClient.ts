@@ -1618,6 +1618,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
+        // A NACK is the firmware's answer, so stop waiting for one that is not
+        // coming. Several commands are refused outright while the device is
+        // sensing (`ShimBt_isCmdBlockedWhileSensing`), and "NACK received" says
+        // that; "ACK timeout" a second and a half later reads as a dead link.
+        // Only reachable while a command is in flight — this handler is
+        // registered for exactly that window — so a stray 0xFE cannot fabricate
+        // one, and stream bytes never reach the control fan-out at all.
+        if (chunk[0] === OPCODES.NACK_COMMAND_PROCESSED) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          reject(new Error('NACK received'));
+          return;
+        }
         if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) {
           clearTimeout(t);
           this._offTemp(handler);
