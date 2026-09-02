@@ -105,6 +105,14 @@ export {
 } from './devices/shimmer3r/streamFraming.js';
 /** Per-platform length input the STATUS_RESPONSE span needs (Shimmer3R 2 bytes, Shimmer3 1). */
 export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
+/**
+ * Decode a STATUS_RESPONSE payload — what the sensor is doing right now
+ * (docked / sensing / logging / streaming / SD present / RTC set). Shared by
+ * both families: `Shimmer3RClient.getStatus` and the unsolicited pushes the
+ * firmware sends when any of those change.
+ */
+export { parseShimmer3StatusBytes } from './devices/shimmer3r/protocol.js';
+export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
 export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
 export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
 export {
