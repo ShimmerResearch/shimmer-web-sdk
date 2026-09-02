@@ -13,7 +13,7 @@
  * where a frame lacks a column rather than dropping the cell.
  */
 
-import type { FieldKind } from './types.js';
+import type { FieldKind, SensorField } from './types.js';
 import type { ObjectCluster } from './ObjectCluster.js';
 
 /**
@@ -101,14 +101,30 @@ export function objectClusterColumns(
  *
  * Matches on the column's kind EXACTLY, which `ObjectCluster.get` deliberately
  * does not — it treats a null `kind` as "any kind", so a kindless column would
- * pick up a raw field that shares its name.
+ * pick up a raw field that shares its name. Hence the index below is keyed by
+ * kind first: the three buckets can never see each other.
+ *
+ * The index is built once per call rather than scanning `oc.fields` per column,
+ * which made the projection O(columns × fields). This runs on the streaming
+ * path — a Shimmer3R can put twenty-odd channels through it at 1024 Hz, and
+ * both factors grow with the channel count together — so the quadratic term is
+ * the whole cost. Keyed by kind then name rather than by a joined string so
+ * there is no per-field key allocation to collect afterwards.
  */
 export function objectClusterRow(
   oc: ObjectCluster,
   columns: readonly ObjectClusterColumn[],
 ): (number | null)[] {
+  const byKind = new Map<FieldKind, Map<string, SensorField>>();
+  for (const field of oc.fields) {
+    let byName = byKind.get(field.kind);
+    if (!byName) byKind.set(field.kind, (byName = new Map<string, SensorField>()));
+    // First occurrence wins, as `Array.find` did and as
+    // {@link objectClusterColumns} promises when a frame repeats a name/kind.
+    if (!byName.has(field.name)) byName.set(field.name, field);
+  }
   return columns.map((column) => {
-    const field = oc.fields.find((f) => f.name === column.name && f.kind === column.kind);
+    const field = byKind.get(column.kind)?.get(column.name);
     return field ? field.value : null;
   });
 }

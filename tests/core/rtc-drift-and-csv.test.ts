@@ -241,6 +241,54 @@ describe('objectClusterRow', () => {
     expect(oc.get('A')?.value).toBe(7);
   });
 
+  it('writes null for a kindless column when only a raw field shares the name', () => {
+    // The other half of the exact-kind rule: with no kindless field at all,
+    // there must be no fallback to the raw one — the cell stays empty.
+    const oc = new ObjectCluster('raw only');
+    oc.add('A', 7, null, 'raw');
+    const cols = [{ name: 'A', kind: null, unit: null, header: 'A' }] as const;
+    expect(objectClusterRow(oc, cols)).toEqual([null]);
+  });
+
+  it('takes the FIRST of a repeated name/kind pair, not the last', () => {
+    // A repeat is a parser bug rather than a supported shape, but which one
+    // wins must not drift: `objectClusterColumns` documents the first
+    // occurrence, and a row that read the last would silently disagree with
+    // the header its own column set produced. Three values, so "first" cannot
+    // be mistaken for "last" by a two-element fixture.
+    const oc = new ObjectCluster('dup');
+    oc.add('A', 1, null, 'raw');
+    oc.add('A', 2, null, 'raw');
+    oc.add('A', 3, null, 'raw');
+    const cols = objectClusterColumns(oc);
+    expect(cols.map((c) => c.header)).toEqual(['A_RAW']);
+    expect(objectClusterRow(oc, cols)).toEqual([1]);
+  });
+
+  it('resolves a repeated name per kind, first within each kind', () => {
+    // The same name duplicated across BOTH kinds: each column takes the first
+    // field of its own kind, and the kinds do not contaminate each other.
+    const oc = new ObjectCluster('dup pairs');
+    oc.add('A', 1, null, 'raw');
+    oc.add('A', 10, 'g', 'cal');
+    oc.add('A', 2, null, 'raw');
+    oc.add('A', 20, 'g', 'cal');
+    oc.add('A', 100, 'ticks', null);
+    oc.add('A', 200, 'ticks', null);
+    const cols = objectClusterColumns(oc);
+    expect(cols.map((c) => c.header)).toEqual(['A_RAW', 'A_CAL', 'A']);
+    expect(objectClusterRow(oc, cols)).toEqual([1, 10, 100]);
+  });
+
+  it('reads columns in column order, not frame order', () => {
+    // The lookup is an index now, so prove it is still addressed by the column
+    // rather than by whatever position the field happened to land in.
+    const oc = frame(10, 1.5, 42);
+    const cols = objectClusterColumns(oc).slice().reverse();
+    expect(cols.map((c) => c.header)).toEqual(['GSR_CAL', 'GYRO_X_CAL', 'GYRO_X_RAW', 'TIMESTAMP']);
+    expect(objectClusterRow(oc, cols)).toEqual([42, 1.5, 10, 1234]);
+  });
+
   it('keeps a zero value distinct from a missing one', () => {
     const cols = objectClusterColumns(frame(0, 0, 0));
     expect(objectClusterRow(frame(0, 0), cols)).toEqual([1234, 0, 0, null]);
