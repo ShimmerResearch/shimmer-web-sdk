@@ -60,7 +60,11 @@ export type {
   FieldKind,
   InertialCalibration,
 } from './core/types.js';
-export { csvCell } from './core/csv.js';
+// CSV emission for decoded frames. Fix the column set once with
+// `objectClusterColumns`, then project every frame with `objectClusterRow`: a
+// per-frame column set shifts cells the moment a frame's field list differs.
+export { csvCell, csvRow, objectClusterColumns, objectClusterRow } from './core/csv.js';
+export type { ObjectClusterColumn, ObjectClusterColumnOptions } from './core/csv.js';
 export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
 export type {
   RtcDriftSampleInput,
