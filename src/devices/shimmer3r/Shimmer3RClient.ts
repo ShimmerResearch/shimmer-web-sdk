@@ -863,6 +863,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     headerBytes = 1,
     ackTimeoutMs = 1500,
     responseTimeoutMs = 2000,
+    expectedOffset?: number,
   ): Promise<Uint8Array> {
     const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs);
     const first =
@@ -872,8 +873,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     /* Bytes after the response opcode. */
     let acc = first[0] === respOpcode ? first.subarray(1) : first;
+
+    /* Whether a header is present is decided by reading it, because a response
+     * without one is a case this client supports (see the loopback test for an
+     * InfoMem reply with no length byte). That check is unavoidably a guess for
+     * a one-byte header: `[6][six bytes]` and `[six bytes beginning 0x06]` are
+     * not distinguishable, and guessing wrong slices real data off the front.
+     *
+     * The three-byte calibration header is not in that position, so it is not
+     * treated as if it were. Its two offset bytes echo the offset that was
+     * requested, and checking them alongside the length turns a coincidence on
+     * one byte into a coincidence on three. Previously only `buf[0]` was
+     * examined and the offset bytes were ignored entirely. */
+    const hasHeader = (buf: Uint8Array): boolean => {
+      if (buf.length < headerBytes || buf[0] !== expectedLen) return false;
+      if (headerBytes >= 3 && expectedOffset !== undefined) {
+        return (buf[1] | (buf[2] << 8)) === expectedOffset;
+      }
+      return true;
+    };
     const dataOf = (buf: Uint8Array): Uint8Array =>
-      buf.length >= headerBytes && buf[0] === expectedLen ? buf.subarray(headerBytes) : buf;
+      hasHeader(buf) ? buf.subarray(headerBytes) : buf;
 
     if (dataOf(acc).length >= expectedLen) {
       return dataOf(acc).slice(0, expectedLen);
@@ -1686,6 +1706,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
       length,
       'Calibration dump read',
       3,
+      1500,
+      2000,
+      offset,
     );
   }
 

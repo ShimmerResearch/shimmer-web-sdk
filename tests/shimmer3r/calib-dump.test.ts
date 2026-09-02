@@ -147,6 +147,21 @@ describe('Shimmer3RClient.readCalibDump — BLE notification reassembly', () => 
   });
 });
 
+describe('Shimmer3RClient.readCalibDump — header detection', () => {
+  it('keeps a payload whose first byte coincides with the requested length', async () => {
+    // The reply header is [len][offsetLo][offsetHi]. Deciding whether a header
+    // is present from the length byte alone is a coincidence away from being
+    // wrong, and being wrong slices three real bytes off the front of the
+    // dump. Here the first *payload* byte equals the length the client asked
+    // for, so a length-only check mistakes the payload for a header; the
+    // offset bytes are what rule it out.
+    const dump = dumpOf(4);
+    const fw = await scriptedFirmware({ framed: true, calibRam: ram(dump) });
+    const { bytes } = await fw.client.readCalibDump();
+    expect([...bytes]).toEqual([...dump]);
+  });
+});
+
 describe.each(SHAPES)('Shimmer3RClient.writeCalibDump — %s', (_name, framed) => {
   it('writes forward from offset 0 with exact per-chunk headers', async () => {
     const dump = dumpOf(8); // 274 bytes
