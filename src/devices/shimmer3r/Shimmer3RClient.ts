@@ -268,6 +268,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._ctrlBuf = new Uint8Array(0);
     // The firmware's SD session counter restarts with the connection
     this._sdKnownSession = null;
+    this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
@@ -304,6 +305,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   override async disconnect(): Promise<void> {
+    // Application-initiated teardown is not a fault, so `onDisconnect` stays
+    // silent — including when this call is the cleanup that follows a drop.
+    this._suppressDisconnectNotification();
     try {
       this._notifyUnsub?.();
       this._disconnectUnsub?.();
@@ -326,11 +330,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
-  /** Handle an unexpected / requested transport disconnect. */
-  private _handleTransportDisconnect = (): void => {
+  /** Handle an unexpected transport disconnect (the link dropped under us). */
+  private _handleTransportDisconnect = (reason?: Error): void => {
     this._streaming = false;
     this._sdKnownSession = null;
     this._emitStatus('Device disconnected');
+    this._emitDisconnect(reason);
   };
 
   // ---------------------------------------------------------------------------
