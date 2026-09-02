@@ -114,16 +114,26 @@ export interface InfoMemImuConfig {
    */
   pressureOversampling: number;
   /**
-   * Alt-mag (LIS3MDL) sampling rate, Shimmer3R only. ConfigSetupByte5 (idx
-   * 131) bits 0-5 (`maskLIS3MDLAltMagSamplingRate` 0x3F,
-   * SensorLIS3MDL.java:809; FW `altMagRate`). Raw LIS3MDL CTRL_REG1 code, e.g.
-   * 0x01 = 1000 Hz.
+   * Alt-mag (LIS3MDL) sampling rate. ConfigSetupByte5 (idx 131) bits 0-5
+   * (`maskLIS3MDLAltMagSamplingRate` 0x3F, SensorLIS3MDL.java:809; FW
+   * `altMagRate`). Raw LIS3MDL CTRL_REG1 code, e.g. 0x01 = 1000 Hz.
+   *
+   * The byte means this on **both** generations — the field sits outside every
+   * `#if` in the shared firmware's config struct (`Configuration/
+   * shimmer_config.h`, "Idx 131") — but only a Shimmer3R carries the LIS3MDL
+   * it configures, so on a Shimmer3 it is inert rather than absent. It is
+   * parsed and written back unconditionally so a read-modify-write preserves
+   * whatever the byte held; a host should offer it only where the hardware has
+   * the part, which is what the field schema's `appliesTo` expresses.
    */
   altMagRate: number;
   /**
-   * Alt-accel (ADXL371) sampling rate, Shimmer3R only. ConfigSetupByte4 bits
-   * 6-7 (`bitShiftADXL371AltAccelSamplingRate`, SensorADXL371.java:356; FW
+   * Alt-accel (ADXL371) sampling rate. ConfigSetupByte4 bits 6-7
+   * (`bitShiftADXL371AltAccelSamplingRate`, SensorADXL371.java:356; FW
    * `altAccelRate`). 0-3 = 320/640/1280/2560 Hz.
+   *
+   * As with {@link InfoMemImuConfig.altMagRate}, the byte carries this meaning
+   * on both generations and is inert on a Shimmer3, which has no ADXL371.
    */
   altAccelRate: number;
 }
