@@ -169,6 +169,21 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
  * (`TEMPERATURE_BMP390`, `PRESSURE_BMP280`) because it records it, whereas the
  * inquiry response does not say which sensor is fitted, so the streaming names
  * stay unqualified.
+ *
+ * The ADC block's Shimmer3R names are the firmware's logical indices
+ * (`EXTERNAL_ADC_0`…), which is what `devices/sdlog/channels.ts` already uses.
+ * The Java driver instead names the same channels after the STM32 ADC lines
+ * they sit on — `ExtAdc9`/`ExtAdc11`/`ExtAdc12`, `IntAdc17`/`IntAdc10`/
+ * `IntAdc16` (`Configuration.java:594-601`, a second block of constants for the
+ * same ID values) — so a Shimmer3R CSV from the Java tools labels these columns
+ * differently. Same channel, same bytes, different vocabulary.
+ *
+ * HARDWARE-VERIFY: every width and byte order here is read out of the firmware
+ * sources cited above and pinned by unit tests, but no packet from a real sensor
+ * with pressure/temperature enabled has been decoded yet, on either generation.
+ * The endianness in particular is inferred from the sensors' register order
+ * (BMP180/BMP280 burst MSB first over I²C; BMP390/BMP581 LSB first over SPI)
+ * and agrees with the Java driver's `u16r`/`u24r` vs `u24` type strings.
  */
 export const CHANNEL_FORMAT_OVERRIDES: Readonly<
   Record<ShimmerGeneration, Readonly<Record<number, ChannelFormat>>>
