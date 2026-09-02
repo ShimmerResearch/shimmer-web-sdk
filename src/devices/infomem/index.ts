@@ -40,7 +40,11 @@ export type { InfoMemLayout } from './layout.js';
 
 export { parseInfoMem, INFOMEM_SAMPLING_CLOCK_FREQ } from './parse.js';
 
-export { generateInfoMem, deviceWriteDivergentRanges } from './generate.js';
+export {
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
+} from './generate.js';
 export type { GenerateInfoMemOptions, DeviceWriteDivergentRanges } from './generate.js';
 
 export {

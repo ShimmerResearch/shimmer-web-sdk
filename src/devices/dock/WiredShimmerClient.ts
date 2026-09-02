@@ -37,6 +37,7 @@ import {
   parseInfoMem,
   generateInfoMem,
   deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
   INFOMEM_SIZE,
   INFOMEM_PAGE_SIZE,
   type InfoMemContext,
@@ -776,29 +777,4 @@ export class WiredShimmerClient extends BaseShimmerClient {
       }
     });
   }
-}
-
-/**
- * Byte-compare `written` against `readback` over the full InfoMem, ignoring the
- * ranges that a device write intentionally leaves diverged (the MAC bytes,
- * forced to 0xFF, and the config-delay/flag byte the firmware may rewrite).
- */
-function compareInfoMemExcluding(
-  written: Uint8Array,
-  readback: Uint8Array,
-  ranges: {
-    mac: { start: number; length: number };
-    configDelayFlag: { start: number; length: number };
-  },
-): boolean {
-  if (written.length !== readback.length) return false;
-  const excluded = new Set<number>();
-  for (const r of [ranges.mac, ranges.configDelayFlag]) {
-    for (let i = 0; i < r.length; i++) excluded.add(r.start + i);
-  }
-  for (let i = 0; i < written.length; i++) {
-    if (excluded.has(i)) continue;
-    if (written[i] !== readback[i]) return false;
-  }
-  return true;
 }

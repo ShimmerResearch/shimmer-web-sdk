@@ -386,6 +386,7 @@ export {
   parseInfoMem,
   generateInfoMem,
   deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
   resolveInfoMemLayout,
   checkConfigBytesValid,
   fwCompare,
@@ -453,6 +454,7 @@ export {
   getDefaultCalibration,
   parseCalibDump,
   generateCalibDump,
+  MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
 } from './devices/calibration/index.js';

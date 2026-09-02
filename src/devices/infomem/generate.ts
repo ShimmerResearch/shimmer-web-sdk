@@ -447,6 +447,39 @@ export function deviceWriteDivergentRanges(ctx: InfoMemContext): DeviceWriteDive
   };
 }
 
+/**
+ * Byte-compare `written` against `readback` over the full InfoMem, ignoring the
+ * ranges a device write intentionally leaves diverged — pass
+ * {@link deviceWriteDivergentRanges} for the context that was written.
+ *
+ * This is what makes a write-back verify meaningful. A read-back after a device
+ * write is NEVER byte-identical to what was sent: the firmware overwrites the
+ * MAC bytes with the address it reads from its own Bluetooth transceiver, and
+ * it rewrites the config-delay / config-file-creation flag byte as it
+ * regenerates its SD configuration. Comparing the whole image would therefore
+ * report a mismatch on every successful write, and comparing nothing would
+ * report success on a corrupt one.
+ *
+ * Shared by the dock and radio config-write paths so both draw the exclusion
+ * line in exactly the same place.
+ */
+export function compareInfoMemExcluding(
+  written: Uint8Array,
+  readback: Uint8Array,
+  ranges: DeviceWriteDivergentRanges,
+): boolean {
+  if (written.length !== readback.length) return false;
+  const excluded = new Set<number>();
+  for (const r of [ranges.mac, ranges.configDelayFlag]) {
+    for (let i = 0; i < r.length; i++) excluded.add(r.start + i);
+  }
+  for (let i = 0; i < written.length; i++) {
+    if (excluded.has(i)) continue;
+    if (written[i] !== readback[i]) return false;
+  }
+  return true;
+}
+
 function exgBank(bank: Uint8Array): Uint8Array {
   if (bank.length === EXG_BANK_LENGTH) return bank;
   const b = new Uint8Array(EXG_BANK_LENGTH);
