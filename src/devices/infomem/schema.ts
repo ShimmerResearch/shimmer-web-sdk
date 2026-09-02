@@ -111,27 +111,59 @@ const SHIMMER3_ONLY: readonly Shimmer3Generation[] = ['shimmer3-old-imu', 'shimm
 const S3R_ONLY: readonly Shimmer3Generation[] = ['shimmer3r'];
 const OLD_IMU_ONLY: readonly Shimmer3Generation[] = ['shimmer3-old-imu'];
 const NEW_IMU_ONLY: readonly Shimmer3Generation[] = ['shimmer3-new-imu'];
+/** The generations whose wide-range accelerometer is NOT an LSM303AH. */
+const LSM303DLHC_AND_LIS2DW12: readonly Shimmer3Generation[] = ['shimmer3-old-imu', 'shimmer3r'];
 
-/** `SensorLSM303.ListofLSM303AccelRange` / `SensorLIS2DW12.ListofLIS2DW12AccelRange` (identical). */
+/**
+ * `SensorLSM303.ListofLSM303AccelRange` labels (SensorLSM303.java:83-86) with the
+ * LSM303DLHC / LIS2DW12 config values, which are the plain `{0,1,2,3}`
+ * (SensorLSM303DLHC.java:325, SensorLIS2DW12.java:236).
+ *
+ * NOT valid for the LSM303AH — see {@link WR_ACCEL_RANGE_LSM303AH}.
+ */
 const WR_ACCEL_RANGE: readonly InfoMemFieldOption[] = [
-  [0, '± 2 g'],
-  [1, '± 4 g'],
-  [2, '± 8 g'],
-  [3, '± 16 g'],
+  [0, '± 2g'],
+  [1, '± 4g'],
+  [2, '± 8g'],
+  [3, '± 16g'],
 ];
 
-/** `SensorLSM303DLHC.ListofLSM303DLHCAccelRateHr` + `…ConfigValues` (note: no value 8). */
+/**
+ * The same four labels with the LSM303AH's config values, `{0,2,3,1}` —
+ * `SensorLSM303AH.ListofLSM303AccelRangeConfigValues` (SensorLSM303AH.java:174,
+ * enforced on write at SensorLSM303AH.java:504).
+ *
+ * That chip's FS bits do not run in range order: ±4g is code 2, ±8g code 3 and
+ * ±16g code 1. Using the index-ordered table above on a new-IMU board writes
+ * ±16g when the user picked ±4g, and miscalibrates every sample by 4×.
+ */
+const WR_ACCEL_RANGE_LSM303AH: readonly InfoMemFieldOption[] = [
+  [0, '± 2g'],
+  [2, '± 4g'],
+  [3, '± 8g'],
+  [1, '± 16g'],
+];
+
+/**
+ * `SensorLSM303DLHC.ListofLSM303DLHCAccelRateHr` + `…ConfigValues`
+ * (SensorLSM303DLHC.java:327-328).
+ *
+ * Nine entries, and the values SKIP 8: code 8 is the low-power-only 1620Hz
+ * setting, so in high-resolution mode 1344Hz is code 9. The low-power rates are
+ * a separate Java list (`…AccelRateLpm`, SensorLSM303DLHC.java:330-331) selected
+ * by the {@link SHIMMER3_INFOMEM_FIELD_SCHEMA} `wrAccelLpm` bit, exactly as the
+ * LSM303AH and LIS2DW12 fields below show only their high-rate list.
+ */
 const WR_ACCEL_RATE_LSM303DLHC: readonly InfoMemFieldOption[] = [
   [0, 'Power-down'],
-  [1, '1.0 Hz'],
-  [2, '10.0 Hz'],
-  [3, '25.0 Hz'],
-  [4, '50.0 Hz'],
-  [5, '100.0 Hz'],
-  [6, '200.0 Hz'],
-  [7, '400.0 Hz'],
-  [8, '1620.0 Hz (low-power only)'],
-  [9, '1344.0 Hz / 5376.0 Hz (low-power)'],
+  [1, '1.0Hz'],
+  [2, '10.0Hz'],
+  [3, '25.0Hz'],
+  [4, '50.0Hz'],
+  [5, '100.0Hz'],
+  [6, '200.0Hz'],
+  [7, '400.0Hz'],
+  [9, '1344.0Hz'],
 ];
 
 /** `SensorLSM303AH.ListofLSM303AHAccelRateHr` + `…ConfigValues`. */
@@ -302,12 +334,21 @@ const PRESSURE_OVERSAMPLING_BMP581: readonly InfoMemFieldOption[] = [
   [7, 'Highest Res'],
 ];
 
-/** `Configuration.Shimmer2.ListofGSRRange` (index 4 = auto). */
+/**
+ * `SensorGSR.ListofGSRRangeResistance` + `ListofGSRRangeConfigValues`
+ * (SensorGSR.java:115-120, 127) — the list `configOptionGsrRange`
+ * (SensorGSR.java:129-135) actually renders for a Shimmer3-family device.
+ * Value 4 is auto-range.
+ *
+ * NOT `Configuration.Shimmer2.ListofGSRRange` (Configuration.java:292), whose
+ * bands are 10k-56k / 56k-220k: that is the Shimmer2's hardware, and using its
+ * labels here mislabels ranges 0 and 1 of a Shimmer3.
+ */
 const GSR_RANGE: readonly InfoMemFieldOption[] = [
-  [0, '10 kOhm to 56 kOhm'],
-  [1, '56 kOhm to 220 kOhm'],
-  [2, '220 kOhm to 680 kOhm'],
-  [3, '680 kOhm to 4.7 MOhm'],
+  [0, '8kΩ to 63kΩ'],
+  [1, '63kΩ to 220kΩ'],
+  [2, '220kΩ to 680kΩ'],
+  [3, '680kΩ to 4.7MΩ'],
   [4, 'Auto Range'],
 ];
 
@@ -399,14 +440,27 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelRange',
     label: 'WR Accel Range',
-    desc: 'ConfigSetupByte0 bits 2-3 (bitShiftLSM303DLHCAccelRange=2, mask 0x03).',
+    desc: 'LSM303DLHC / LIS2DW12 range — ConfigSetupByte0 bits 2-3 (bitShiftLSM303DLHCAccelRange=2, mask 0x03).',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 2,
     width: 2,
     options: WR_ACCEL_RANGE,
     group: 'wrAccel',
-    appliesTo: ALL,
+    appliesTo: LSM303DLHC_AND_LIS2DW12,
+    configKey: 'imu.wrAccelRange',
+  },
+  {
+    key: 'wrAccelRange.lsm303ah',
+    label: 'WR Accel Range',
+    desc: 'LSM303AH (new-IMU Shimmer3) range — the same ConfigSetupByte0 bits 2-3, but the config values are {0,2,3,1}, not {0,1,2,3} (SensorLSM303AH.java:174).',
+    kind: 'bit',
+    layoutKey: 'idxConfigSetupByte0',
+    shift: 2,
+    width: 2,
+    options: WR_ACCEL_RANGE_LSM303AH,
+    group: 'wrAccel',
+    appliesTo: NEW_IMU_ONLY,
     configKey: 'imu.wrAccelRange',
   },
   {
