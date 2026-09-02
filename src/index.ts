@@ -117,8 +117,15 @@ export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.
  */
 export { parseShimmer3StatusBytes } from './devices/shimmer3r/protocol.js';
 export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
-export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
-export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
+export {
+  CHANNEL_FORMATS,
+  CHANNEL_FORMAT_OVERRIDES,
+  UNKNOWN_CHANNEL_ASSUMED_BYTES,
+  channelFormatsFor,
+  resolveChannelFormat,
+  generationFromHardwareVersion,
+} from './devices/shimmer3r/channelFormats.js';
+export type { ChannelFormat, ShimmerGeneration } from './devices/shimmer3r/channelFormats.js';
 export {
   calibrateU12AdcValue,
   calibrateShimmer3RAdcChannel,
