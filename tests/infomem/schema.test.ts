@@ -15,6 +15,31 @@ import {
   type InfoMemFieldDefinition,
   type Shimmer3Generation,
 } from '../../src/devices/infomem/index.js';
+import {
+  SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
+  SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
+  SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS,
+  SHIMMER3_BT_BAUD_RATE_OPTIONS,
+  SHIMMER3_GSR_RANGE_RESISTANCE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RATE_HPM_OPTIONS,
+  SHIMMER3_LIS2MDL_MAG_RATE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RANGE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303AH_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM6DSV_ACCEL_GYRO_RATE_OPTIONS,
+  SHIMMER3_LSM6DSV_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM6DSV_GYRO_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_GYRO_RANGE_OPTIONS,
+  type Shimmer3SensorOption,
+} from '../../src/devices/shimmer3/sensorOptions.js';
 import { CTX, fullFieldInfoMem } from './fixtures.js';
 
 const field = (key: string): InfoMemFieldDefinition => {
@@ -104,6 +129,69 @@ describe('SHIMMER3_INFOMEM_FIELD_SCHEMA — structural invariants', () => {
   });
 });
 
+describe('option tables come from devices/shimmer3/sensorOptions.ts', () => {
+  /**
+   * Every Java-derived table a field offers, and the shared table it must BE.
+   *
+   * `toBe`, not `toEqual`: the point is that the schema holds the SAME array
+   * object as `sensorOptions.ts`, so nobody can re-introduce a second
+   * transcription that drifts. Three used to disagree with the Java driver —
+   * the LSM303AH accel range (config values {0,2,3,1}, not {0,1,2,3}), the
+   * LSM303DLHC accel rate (a hand-merge of the high-resolution and low-power
+   * lists) and the GSR range (the Shimmer2 resistance bands).
+   */
+  const EXPECTED: ReadonlyArray<[string, readonly Shimmer3SensorOption[]]> = [
+    ['lnAccelRange', SHIMMER3_LSM6DSV_ACCEL_RANGE_OPTIONS],
+    ['wrAccelRange', SHIMMER3_LSM303DLHC_ACCEL_RANGE_OPTIONS],
+    ['wrAccelRange.lsm303ah', SHIMMER3_LSM303AH_ACCEL_RANGE_OPTIONS],
+    ['wrAccelRate.lsm303dlhc', SHIMMER3_LSM303DLHC_ACCEL_RATE_HR_OPTIONS],
+    ['wrAccelRate.lsm303ah', SHIMMER3_LSM303AH_ACCEL_RATE_HR_OPTIONS],
+    ['wrAccelRate.lis2dw12', SHIMMER3_LIS2DW12_ACCEL_RATE_HPM_OPTIONS],
+    ['gyroRange.mpu9x50', SHIMMER3_MPU9X50_GYRO_RANGE_OPTIONS],
+    ['gyroRange.lsm6dsv', SHIMMER3_LSM6DSV_GYRO_RANGE_OPTIONS],
+    ['imuRate.lsm6dsv', SHIMMER3_LSM6DSV_ACCEL_GYRO_RATE_OPTIONS],
+    ['magRange.lsm303dlhc', SHIMMER3_LSM303DLHC_MAG_RANGE_OPTIONS],
+    ['magRate.lsm303dlhc', SHIMMER3_LSM303DLHC_MAG_RATE_OPTIONS],
+    ['magRate.lis2mdl', SHIMMER3_LIS2MDL_MAG_RATE_OPTIONS],
+    ['altAccelRange.mpu9x50', SHIMMER3_MPU9X50_ACCEL_RANGE_OPTIONS],
+    ['altAccelRate.adxl371', SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS],
+    ['altMagRange.lis3mdl', SHIMMER3_LIS3MDL_ALT_MAG_RANGE_OPTIONS],
+    ['altMagRate.lis3mdl', SHIMMER3_LIS3MDL_ALT_MAG_RATE_OPTIONS],
+    ['pressureOversampling.bmpX80', SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS],
+    ['pressureOversampling.bmp390_581', SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS],
+    ['gsrRange', SHIMMER3_GSR_RANGE_RESISTANCE_OPTIONS],
+    ['btBaudRate', SHIMMER3_BT_BAUD_RATE_OPTIONS],
+  ];
+
+  for (const [key, shared] of EXPECTED) {
+    it(`${key} IS the shared table, not a copy`, () => {
+      expect(field(key).options).toBe(shared);
+    });
+  }
+
+  it('every option-bearing field is either a shared table or the local ON_OFF pair', () => {
+    const shared = new Set<unknown>(EXPECTED.map(([, table]) => table));
+    for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
+      if (!f.options) continue;
+      if (shared.has(f.options)) continue;
+      // The only table with no Java `Listof…` counterpart: a 1-bit flag.
+      expect(f.options, f.key).toEqual([
+        [0, 'Disabled'],
+        [1, 'Enabled'],
+      ]);
+    }
+  });
+
+  it('the chips that share one schema field really do share one Java table', () => {
+    // `wrAccelRange` serves the LSM303DLHC and the LIS2DW12; `magRate.lis2mdl`
+    // serves the LSM303AH and the LIS2MDL. Both pairs are separate Java lists
+    // with identical contents, so a divergence upstream must fail here rather
+    // than silently mislabel one generation.
+    expect(SHIMMER3_LIS2DW12_ACCEL_RANGE_OPTIONS).toEqual(SHIMMER3_LSM303DLHC_ACCEL_RANGE_OPTIONS);
+    expect(SHIMMER3_LSM303AH_MAG_RATE_OPTIONS).toEqual(SHIMMER3_LIS2MDL_MAG_RATE_OPTIONS);
+  });
+});
+
 describe('infoMemFieldsFor — generation gating', () => {
   const keysFor = (g: Shimmer3Generation): string[] => infoMemFieldsFor(g).map((f) => f.key);
 
@@ -140,6 +228,21 @@ describe('infoMemFieldsFor — generation gating', () => {
       const rates = keysFor(g).filter((k) => k.startsWith('wrAccelRate.'));
       expect(rates, g).toHaveLength(1);
     }
+  });
+
+  it('shows exactly one WR-accel-range variant per generation, and only new-IMU gets the LSM303AH one', () => {
+    for (const g of ['shimmer3-old-imu', 'shimmer3-new-imu', 'shimmer3r'] as const) {
+      const ranges = keysFor(g).filter(
+        (k) => k === 'wrAccelRange' || k.startsWith('wrAccelRange.'),
+      );
+      expect(ranges, g).toHaveLength(1);
+    }
+    // The LSM303AH's config values are {0,2,3,1}, so it must NOT share the
+    // index-ordered table the other two chips use (SensorLSM303AH.java:174).
+    expect(keysFor('shimmer3-new-imu')).toContain('wrAccelRange.lsm303ah');
+    expect(keysFor('shimmer3-old-imu')).toContain('wrAccelRange');
+    expect(keysFor('shimmer3r')).toContain('wrAccelRange');
+    expect(field('wrAccelRange.lsm303ah').options).not.toBe(field('wrAccelRange').options);
   });
 
   it('shows exactly one gyro-range and one IMU-rate variant per generation', () => {
