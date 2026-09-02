@@ -19,6 +19,10 @@ import {
 } from './calibration.js';
 import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
 import { msToRtcBytesLE } from '../dock/protocol.js';
+import {
+  parseShimmer3DeviceVersionResponse,
+  type Shimmer3DeviceVersion,
+} from '../shimmer3/protocol.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC } from '../../core/framing.js';
@@ -268,6 +272,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._ctrlBuf = new Uint8Array(0);
     // The firmware's SD session counter restarts with the connection
     this._sdKnownSession = null;
+    // Both version caches describe the device at the far end of the link, so a
+    // reconnect — possibly to a different sensor — must not inherit them.
+    this._fwVersionCache = null;
+    this._deviceVersionCache = null;
     this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
@@ -1592,6 +1600,31 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _fwVersionCache: { fwId: number; major: number; minor: number; patch: number } | null =
     null;
+  private _deviceVersionCache: Shimmer3DeviceVersion | null = null;
+
+  /**
+   * Read (and cache) the hardware version via GET_DEVICE_VERSION_COMMAND
+   * (0x3F → `[0x25][hw]`). 3 = Shimmer3, 10 = Shimmer3R.
+   *
+   * Worth asking even though this client is named for the Shimmer3R: the two
+   * platforms share this firmware and this command set, so a Shimmer3 reached
+   * over classic Bluetooth answers here too — and answers some commands with
+   * fewer bytes than a Shimmer3R does (see {@link getStatus}). Cached, so the
+   * gating call sites can ask freely.
+   */
+  async readDeviceVersion(): Promise<Shimmer3DeviceVersion> {
+    if (this._deviceVersionCache) return this._deviceVersionCache;
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const cmd = new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const rsp =
+      ackRemainder && ackRemainder[0] === OPCODES.DEVICE_VERSION_RESPONSE
+        ? ackRemainder
+        : await this._waitForResponse(OPCODES.DEVICE_VERSION_RESPONSE, 1500);
+    if (rsp.length < 2) throw new Error('short DEVICE_VERSION_RESPONSE');
+    this._deviceVersionCache = parseShimmer3DeviceVersionResponse(rsp);
+    return this._deviceVersionCache;
+  }
 
   /** Read (and cache) the firmware version via GET_FW_VERSION_COMMAND. */
   async readFwVersion(): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
