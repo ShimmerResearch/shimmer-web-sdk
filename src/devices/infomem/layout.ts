@@ -171,10 +171,24 @@ export interface InfoMemLayout {
   idxSensors1: number;
   idxSensors2: number;
   idxConfigSetupByte0: number;
+  idxConfigSetupByte1: number;
+  idxConfigSetupByte2: number;
   idxConfigSetupByte3: number;
   idxExg1: number;
   idxExg2: number;
   idxBtCommBaudRate: number;
+  /** LN-accel (KXRB5/KXTC9 on Shimmer3, LSM6DSV accel on Shimmer3R) 21-byte kinematic calib block. */
+  idxAnalogAccelCalibration: number;
+  /** Gyro (MPU9x50 on Shimmer3, LSM6DSV on Shimmer3R) 21-byte kinematic calib block. */
+  idxMPU9150GyroCalibration: number;
+  /** Mag (LSM303DLHC/AH on Shimmer3, LIS2MDL on Shimmer3R) 21-byte kinematic calib block. */
+  idxLSM303DLHCMagCalibration: number;
+  /** WR-accel (LSM303DLHC/AH on Shimmer3, LIS2DW12 on Shimmer3R) 21-byte kinematic calib block. */
+  idxLSM303DLHCAccelCalibration: number;
+  /** Alt-accel (ADXL371, Shimmer3R only) 21-byte kinematic calib block. */
+  idxADXL371AltAccelCalibration: number;
+  /** Alt-mag (LIS3MDL, Shimmer3R only) 21-byte kinematic calib block. */
+  idxLIS3MDLAltMagCalibration: number;
   idxDerivedSensors0: number;
   idxDerivedSensors1: number;
   idxDerivedSensors2: number;
@@ -187,9 +201,15 @@ export interface InfoMemLayout {
   // InfoMem C
   idxSensors3: number;
   idxSensors4: number;
+  idxConfigSetupByte4: number;
+  idxConfigSetupByte5: number;
+  idxConfigSetupByte6: number;
   idxSDShimmerName: number;
   idxSDEXPIDName: number;
   idxSDConfigTime0: number;
+  idxSDConfigTime1: number;
+  idxSDConfigTime2: number;
+  idxSDConfigTime3: number;
   idxSDMyTrialID: number;
   idxSDNumOfShimmers: number;
   idxSDExperimentConfig0: number;
@@ -206,12 +226,41 @@ export interface InfoMemLayout {
   // InfoMem B
   idxNode0: number;
 
+  /** `ConfigByteLayoutShimmer3.lengthGeneralCalibrationBytes` (@238) — always 21. */
+  lengthGeneralCalibrationBytes: number;
+
   // Feature gates (cached from ctx).
   supportsMpl: boolean;
   supportsEightByteDerived: boolean;
   supportsSdLogSync: boolean;
   isSdLoggingFirmware: boolean;
+  /** True for HW_ID.SHIMMER_3R — gates the Shimmer3R-only composite MSB bits. */
+  isShimmer3R: boolean;
 }
+
+/*
+ * MPL (MPU9150 DMP / sensor-fusion) InfoMem regions and bit fields are
+ * DELIBERATELY NOT MODELLED and must never appear in host UI:
+ *
+ *   `idxMPLAccelCalibration` = 128+5, `idxMPLMagCalibration` = 128+26,
+ *   `idxMPLGyroCalibration`  = 128+47, plus every `bitShiftMPL*` /
+ *   `bitShiftMPU9150DMP|LPF|MotCalCfg|MPLSamplingRate|MagSamplingRate` field
+ *   (ConfigByteLayoutShimmer3.java:226-248) written into ConfigSetupByte4/5/6
+ *   by `SensorMPU9X50.configBytesGenerate` (@905-931).
+ *
+ * They are MPU9150-DMP-only: `ShimmerVerObject#isSupportedMpl` restricts them
+ * to Shimmer3 + SDLog in [0.7.0, 0.8.0), which no supported/target device runs.
+ * The product decision is that these settings are never surfaced; their bytes
+ * must simply SURVIVE round-trip, which the read-modify-write generate path
+ * guarantees (anything not explicitly written keeps its base value).
+ *
+ * Note that on every supported firmware the MPL blocks are physically the same
+ * bytes as the Shimmer3R alt-IMU calibration blocks (MPL accel 133 ==
+ * ADXL371 alt-accel calib, MPL mag 154 == LIS3MDL alt-mag calib), and the
+ * firmware header marks the MPL gyro region as `unusedIdx175To186[12]`
+ * (shimmer_config.h) — i.e. the MPL region was reclaimed, further confirming
+ * it should not be modelled as MPL.
+ */
 
 // Field constant lengths / bit positions shared by parse + generate.
 export const EXG_BANK_LENGTH = 10;
@@ -227,9 +276,96 @@ export const MAX_SYNC_NODES = 21;
  */
 export const INVALID_MAC_IDS: readonly string[] = Object.freeze(['FFFFFFFFFFFF', '000000000000']);
 
+/** One 21-byte kinematic calibration block (`lengthGeneralCalibrationBytes`). */
+export const GENERAL_CALIBRATION_LENGTH = 21;
+
+/**
+ * Bit positions within the InfoMem config-setup bytes. Every entry cites its
+ * `ConfigByteLayoutShimmer3` declaration; where the Java DECLARATION comment
+ * ("//Config ByteN") disagrees with the byte the Java code actually indexes, or
+ * with the firmware `gConfigBytes` struct, the firmware wins and the
+ * disagreement is called out inline.
+ */
 export const BIT_SHIFT = Object.freeze({
+  // ---- ConfigSetupByte0 (idx 6) — firmware `gConfigBytes` idx 6 bitfield.
+  /** WR-accel sampling rate. `bitShiftLSM303DLHCAccelSamplingRate` (@124); FW `wrAccelRate` bits 4-7. */
+  WR_ACCEL_RATE: 4,
+  /** WR-accel range. `bitShiftLSM303DLHCAccelRange` (@126); FW `wrAccelRange` bits 2-3. */
+  WR_ACCEL_RANGE: 2,
+  /** WR-accel low-power mode (LSB). `bitShiftLSM303DLHCAccelLPM` (@129); FW `wrAccelLpModeLsb` bit 1. */
+  WR_ACCEL_LPM: 1,
+  /** WR-accel high-resolution mode. `bitShiftLSM303DLHCAccelHRM` (@132); FW `wrAccelHrMode` bit 0. */
+  WR_ACCEL_HRM: 0,
+
+  // ---- ConfigSetupByte1 (idx 7) — whole byte.
+  /** IMU (MPU9x50 / LSM6DSV) accel+gyro rate. `bitShiftMPU9150AccelGyroSamplingRate` (@139); FW `gyroRate`. */
+  IMU_RATE: 0,
+
+  // ---- ConfigSetupByte2 (idx 8).
+  /** Mag range. `bitShiftLSM303DLHCMagRange` (@143); FW `magRange` (S3) / `altMagRange` (S3R) bits 5-7. */
+  MAG_RANGE: 5,
+  /** Mag sampling rate. `bitShiftLSM303DLHCMagSamplingRate` (@145); FW `magRate` bits 2-4. */
+  MAG_RATE: 2,
+  /** Gyro range, LOW 2 bits. `bitShiftMPU9150GyroRange` (@147); FW `gyroRangeLsb` bits 0-1. */
+  GYRO_RANGE_LSB: 0,
+
+  // ---- ConfigSetupByte3 (idx 9).
+  /** Alt-accel range (S3 MPU9x50) / LN-accel range (S3R LSM6DSV). `bitShiftMPU9150AccelRange` (@150); FW bits 6-7. */
+  ALT_ACCEL_RANGE: 6,
+  /** Pressure oversampling, LOW 2 bits. `bitShiftBMPX80PressureResolution` (@152); FW `pressureOversamplingRatioLsb` bits 4-5. */
+  PRESSURE_OVERSAMPLING_LSB: 4,
   GSR_RANGE: 1,
   EXP_POWER: 0,
+
+  // ---- ConfigSetupByte4 (idx 130 on every supported firmware).
+  /**
+   * Alt-accel (ADXL371) sampling rate. `bitShiftADXL371AltAccelSamplingRate`
+   * (@161) used with `idxConfigSetupByte4` in SensorADXL371.java:356/370;
+   * FW `altAccelRate` bits 6-7 of idx 130. Java and firmware AGREE.
+   */
+  ALT_ACCEL_RATE: 6,
+  /**
+   * Gyro range MSB (3rd bit). `bitShiftLSM6DSVGyroRangeMSB` (@163) used with
+   * `idxConfigSetupByte4` in SensorLSM6DSV.java:980/1015; FW `gyroRangeMsb`
+   * bit 2 of idx 130. Java and firmware AGREE.
+   */
+  GYRO_RANGE_MSB: 2,
+  /**
+   * Pressure oversampling MSB (3rd bit). Java declares this as
+   * `bitShiftBMP390PressureResolution` under a "//Config Byte0" comment
+   * (@134-135) — that comment is WRONG: both SensorBMP390.java:499 and
+   * SensorBMP581.java:380 index `idxConfigSetupByte4`, and the firmware struct
+   * has `pressureOversamplingRatioMsb` as bit 0 of idx 130. FIRMWARE WINS →
+   * ConfigSetupByte4 bit 0, not ConfigSetupByte0.
+   */
+  PRESSURE_OVERSAMPLING_MSB: 0,
+  /**
+   * WR-accel low-power-mode MSB — FIRMWARE-ONLY (`wrAccelLpModeMsb`, bit 1 of
+   * idx 130). The Java driver has no equivalent field and never writes it, so
+   * the codec does not model it either; the bit survives round-trip untouched.
+   */
+  WR_ACCEL_LPM_MSB: 1,
+
+  // ---- ConfigSetupByte5 (idx 131 on every supported firmware).
+  /**
+   * Alt-mag (LIS3MDL) sampling rate. Java declares
+   * `bitShiftLIS3MDLAltMagSamplingRate` (@158) under a "//Config Byte4"
+   * comment — that comment is WRONG: SensorLIS3MDL.java:809/831 index
+   * `idxConfigSetupByte5`, and the firmware struct has `altMagRate` as bits
+   * 0-5 of idx 131. FIRMWARE WINS → ConfigSetupByte5 bits 0-5.
+   */
+  ALT_MAG_RATE: 0,
+  /**
+   * `bitShiftLIS2MDLMagRateMSB` (@167). NOT MODELLED: every use in
+   * SensorLIS2MDL.java (@581 generate, @602 parse) is COMMENTED OUT, and the
+   * firmware struct has idx 131 bits 6-7 as `unusedByte131Bit6/7` with no mag
+   * MSB anywhere. LIS2MDL mag rate is the plain 3-bit ConfigSetupByte2 field.
+   * Kept here only so the constant table is complete against the Java source;
+   * writing it would corrupt `altMagRate` bits 3-5.
+   */
+  LIS2MDL_MAG_RATE_MSB_UNUSED: 3,
+
+  // ---- SD / trial bits (idx 217/218/230).
   BUTTON_START: 5,
   DISABLE_BLUETOOTH: 3,
   SYNC_WHEN_LOGGING: 2,
@@ -240,12 +376,42 @@ export const BIT_SHIFT = Object.freeze({
 } as const);
 
 export const MASK = Object.freeze({
+  // ConfigSetupByte0
+  WR_ACCEL_RATE: 0x0f, // maskLSM303DLHCAccelSamplingRate @125
+  WR_ACCEL_RANGE: 0x03, // maskLSM303DLHCAccelRange @127
+  WR_ACCEL_LPM: 0x01, // maskLSM303DLHCAccelLPM @130
+  WR_ACCEL_HRM: 0x01, // maskLSM303DLHCAccelHRM @133
+  // ConfigSetupByte1
+  IMU_RATE: 0xff, // maskMPU9150AccelGyroSamplingRate @140
+  // ConfigSetupByte2
+  MAG_RANGE: 0x07, // maskLSM303DLHCMagRange @144
+  MAG_RATE: 0x07, // maskLSM303DLHCMagSamplingRate @146
+  GYRO_RANGE_LSB: 0x03, // maskMPU9150GyroRange @148
+  // ConfigSetupByte3
+  ALT_ACCEL_RANGE: 0x03, // maskMPU9150AccelRange @151
+  PRESSURE_OVERSAMPLING_LSB: 0x03, // maskBMPX80PressureResolution @153
   GSR_RANGE: 0x07,
   EXP_POWER: 0x01,
+  // ConfigSetupByte4
+  ALT_ACCEL_RATE: 0x03, // maskADXL371AltAccelSamplingRate @162
+  GYRO_RANGE_MSB: 0x01, // maskLSM6DSVGyroRangeMSB @164
+  PRESSURE_OVERSAMPLING_MSB: 0x01, // maskBMP390PressureResolution @136
+  WR_ACCEL_LPM_MSB: 0x01, // firmware-only, not written
+  // ConfigSetupByte5
+  ALT_MAG_RATE: 0x3f, // maskLIS3MDLAltMagSamplingRate @159
+  LIS2MDL_MAG_RATE_MSB_UNUSED: 0x07, // maskLIS2MDLMagRateMSB @166 (never written)
+  // Shared
   ONE_BIT: 0x01,
   DERIVED_BYTE: 0xff,
   SD_CFG_FILE_WRITE_FLAG: 0x01,
 } as const);
+
+/**
+ * Composite (split across two bytes) field widths. The low part lives in
+ * ConfigSetupByte2/3 and the high bit in ConfigSetupByte4; the high bit is only
+ * written on Shimmer3R, where the LSM6DSV / BMP390-BMP581 need the extra range.
+ */
+export const COMPOSITE_MSB_SHIFT = 2;
 
 /** Config-time bytes are big-endian: byte0 = MSB (shift 24) … byte3 = LSB. */
 export const CONFIG_TIME_BIT_SHIFTS = [24, 16, 8, 0] as const;
@@ -272,10 +438,19 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     idxSensors1: 4,
     idxSensors2: 5,
     idxConfigSetupByte0: 6,
+    idxConfigSetupByte1: 7,
+    idxConfigSetupByte2: 8,
     idxConfigSetupByte3: 9,
     idxExg1: 10,
     idxExg2: 20,
     idxBtCommBaudRate: 30,
+    // Kinematic calibration blocks — defaults (@95-99); branch 2 remaps all six.
+    idxAnalogAccelCalibration: 31,
+    idxMPU9150GyroCalibration: 52,
+    idxLSM303DLHCMagCalibration: 73,
+    idxLSM303DLHCAccelCalibration: 94,
+    idxADXL371AltAccelCalibration: 256,
+    idxLIS3MDLAltMagCalibration: 285,
     // Derived-sensor offsets default to 0 ("not present").
     idxDerivedSensors0: 0,
     idxDerivedSensors1: 0,
@@ -289,9 +464,18 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     // C page (128 + X).
     idxSensors3: 128 + 2,
     idxSensors4: 128 + 3,
+    // Defaults (@113-117): ConfigSetupByte4/5 sit BELOW Sensors3/4; branch 1
+    // swaps them so Sensors3/4 land at 128/129 and ConfigSetupByte4/5 at
+    // 130/131. ConfigSetupByte6 is 128+4 in both cases.
+    idxConfigSetupByte4: 128 + 0,
+    idxConfigSetupByte5: 128 + 1,
+    idxConfigSetupByte6: 128 + 4, // 132
     idxSDShimmerName: 128 + 59, // 187
     idxSDEXPIDName: 128 + 71, // 199
     idxSDConfigTime0: 128 + 83, // 211
+    idxSDConfigTime1: 128 + 84, // 212
+    idxSDConfigTime2: 128 + 85, // 213
+    idxSDConfigTime3: 128 + 86, // 214
     idxSDMyTrialID: 128 + 87, // 215
     idxSDNumOfShimmers: 128 + 88, // 216
     idxSDExperimentConfig0: 128 + 89, // 217
@@ -305,13 +489,21 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     idxSDConfigDelayFlag: 128 + 102, // 230
     idxBtFactoryReset: 0,
 
-    // B page.
+    // B page. Java `idxNode0` = 128+128 = 256 with `maxNumOfExperimentNodes`
+    // = 21 (→ 256..381). The firmware header's NV_* defines look different
+    // (NV_CENTER = 256, NV_NODE0 = 262) but its `gConfigBytes` struct lays out
+    // `syncNodeAddr1[6]`…`syncNodeAddr21[6]` starting at 256 with
+    // NV_NUM_BYTES_SYNC_CENTER_NODE_ADDRS = 126 = 21*6, so the struct AGREES
+    // with Java: slot 0 (the "center") is simply the first of the 21 slots.
     idxNode0: 128 + 128, // 256
+
+    lengthGeneralCalibrationBytes: GENERAL_CALIBRATION_LENGTH,
 
     supportsMpl: isSupportedMpl(ctx),
     supportsEightByteDerived: isSupportedEightByteDerivedSensors(ctx),
     supportsSdLogSync: isSupportedSdLogSync(ctx),
     isSdLoggingFirmware: isSdLoggingFirmware(ctx),
+    isShimmer3R: r,
   };
 
   // ---- Branch 1 (@330-343): 3R | SDLog>=0.8.42 | LogAndStream>=0.3.4 | Shimmer4 | StroKare
@@ -326,6 +518,9 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
   ) {
     layout.idxSensors3 = 128 + 0;
     layout.idxSensors4 = 128 + 1;
+    layout.idxConfigSetupByte4 = 128 + 2; // 130 — matches FW NV_CONFIG_SETUP_BYTE4
+    layout.idxConfigSetupByte5 = 128 + 3; // 131 — matches FW NV_CONFIG_SETUP_BYTE5
+    layout.idxConfigSetupByte6 = 128 + 4; // 132 — matches FW NV_CONFIG_SETUP_BYTE6
     layout.idxDerivedSensors0 = 115;
     layout.idxDerivedSensors1 = 116;
     layout.idxDerivedSensors2 = 117;
@@ -345,6 +540,18 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     layout.idxDerivedSensors0 = 31;
     layout.idxDerivedSensors1 = 32;
     layout.idxDerivedSensors2 = 33;
+    // Calibration blocks shift up by 3 to make room for DerivedSensors0-2, and
+    // the two alt-IMU blocks move from their (bogus, InfoMem-B-colliding)
+    // defaults into InfoMem C. All six match the firmware NV_* map exactly:
+    // NV_LN_ACCEL_CALIBRATION 34, NV_GYRO_CALIBRATION 55, NV_MAG_CALIBRATION
+    // 76, NV_WR_ACCEL_CALIBRATION 97, NV_ALT_ACCEL_CALIBRATION 128+5 = 133,
+    // NV_ALT_MAG_CALIBRATION 128+26 = 154.
+    layout.idxAnalogAccelCalibration = 34;
+    layout.idxMPU9150GyroCalibration = 55;
+    layout.idxLSM303DLHCMagCalibration = 76;
+    layout.idxLSM303DLHCAccelCalibration = 97;
+    layout.idxADXL371AltAccelCalibration = 133;
+    layout.idxLIS3MDLAltMagCalibration = 154;
   }
 
   // ---- Branch 4 — ADDRESS-BASE REMAP (@370-381): 3R | SDLog>=0.11.5 |
