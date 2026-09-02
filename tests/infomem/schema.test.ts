@@ -338,3 +338,72 @@ describe('schema composite fields agree with the codec', () => {
     }
   });
 });
+
+describe('every schema field writes ONLY into its own declared bytes', () => {
+  /** Bytes a field owns: its own span plus, for composites, the MSB byte. */
+  function ownedBytes(f: InfoMemFieldDefinition, layout: ReturnType<typeof resolveInfoMemLayout>) {
+    const idx = resolveFieldIndex(f, layout);
+    const spans: number[] = [];
+    const width =
+      f.kind === 'u16le' || f.kind === 'u16be'
+        ? 2
+        : f.kind === 'u32be'
+          ? 4
+          : f.kind === 'ascii12'
+            ? 12
+            : f.kind === 'bytes21'
+              ? 21
+              : f.kind === 'mac6[]'
+                ? 21 * 6
+                : 1;
+    for (let i = 0; i < width; i++) spans.push(idx + i);
+    if (f.msbLayoutKey !== undefined)
+      spans.push(resolveFieldIndex({ ...f, layoutKey: f.msbLayoutKey }, layout));
+    return new Set(spans);
+  }
+
+  /** A non-default value for each kind, guaranteed to change a zeroed image. */
+  function probeValue(f: InfoMemFieldDefinition): number | string | Uint8Array | string[] {
+    switch (f.kind) {
+      case 'bit': {
+        const bits = (f.width ?? 1) + (f.msbLayoutKey ? (f.msbWidth ?? 1) : 0);
+        return (1 << bits) - 1;
+      }
+      case 'u8':
+        return 0xa5;
+      case 'u16le':
+      case 'u16be':
+        return 0xbeef;
+      case 'u32be':
+        return 0x12345678;
+      case 'ascii12':
+        return 'PROBE';
+      case 'bytes21':
+        return new Uint8Array(21).fill(0x3c);
+      case 'mac6[]':
+        return ['00112233445A'];
+    }
+  }
+
+  for (const ctx of [CTX.modernShimmer3, CTX.shimmer3R] as const) {
+    const layout = resolveInfoMemLayout(ctx);
+    const generation: Shimmer3Generation = layout.isShimmer3R ? 'shimmer3r' : 'shimmer3-old-imu';
+
+    it(`${generation}: no field touches a byte it does not declare, and the value reads back`, () => {
+      for (const f of infoMemFieldsFor(generation)) {
+        const bytes = new Uint8Array(INFOMEM_SIZE);
+        const value = probeValue(f);
+        writeInfoMemFieldValue(bytes, f, layout, value);
+        const owned = ownedBytes(f, layout);
+        for (let i = 0; i < INFOMEM_SIZE; i++) {
+          if (bytes[i] !== 0 && !owned.has(i)) {
+            throw new Error(
+              `${f.key} wrote byte ${i} (0x${bytes[i].toString(16)}) it does not own`,
+            );
+          }
+        }
+        expect(readInfoMemFieldValue(bytes, f, layout), f.key).toEqual(value);
+      }
+    });
+  }
+});
