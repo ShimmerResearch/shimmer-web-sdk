@@ -103,6 +103,8 @@ export {
   SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
 } from './devices/shimmer3r/streamFraming.js';
+/** Per-platform length input the STATUS_RESPONSE span needs (Shimmer3R 2 bytes, Shimmer3 1). */
+export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
 export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
 export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
 export {
