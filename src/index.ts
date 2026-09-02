@@ -357,6 +357,24 @@ export type {
   InfoMemSdConfig,
   InfoMemCalibrationBlocks,
 } from './devices/infomem/index.js';
+export {
+  SHIMMER3_INFOMEM_FIELD_SCHEMA,
+  SHIMMER3_INFOMEM_FIELD_GROUPS,
+  NEW_IMU_EXP_REV,
+  resolveFieldIndex,
+  readInfoMemFieldValue,
+  writeInfoMemFieldValue,
+  infoMemFieldsFor,
+  inferShimmer3Generation,
+} from './devices/infomem/index.js';
+export type {
+  Shimmer3Generation,
+  InfoMemFieldKind,
+  InfoMemFieldOption,
+  InfoMemFieldDefinition,
+  InfoMemFieldGroup,
+  InfoMemFieldSubgroup,
+} from './devices/infomem/index.js';
 
 // Inertial (accel/gyro/mag) calibration — phase P3
 export {

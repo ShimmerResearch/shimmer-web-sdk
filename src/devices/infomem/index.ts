@@ -42,3 +42,22 @@ export { parseInfoMem, INFOMEM_SAMPLING_CLOCK_FREQ } from './parse.js';
 
 export { generateInfoMem, deviceWriteDivergentRanges } from './generate.js';
 export type { GenerateInfoMemOptions, DeviceWriteDivergentRanges } from './generate.js';
+
+export {
+  SHIMMER3_INFOMEM_FIELD_SCHEMA,
+  SHIMMER3_INFOMEM_FIELD_GROUPS,
+  NEW_IMU_EXP_REV,
+  resolveFieldIndex,
+  readInfoMemFieldValue,
+  writeInfoMemFieldValue,
+  infoMemFieldsFor,
+  inferShimmer3Generation,
+} from './schema.js';
+export type {
+  Shimmer3Generation,
+  InfoMemFieldKind,
+  InfoMemFieldOption,
+  InfoMemFieldDefinition,
+  InfoMemFieldGroup,
+  InfoMemFieldSubgroup,
+} from './schema.js';
