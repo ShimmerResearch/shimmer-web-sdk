@@ -99,6 +99,32 @@ export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.f
   0x1c: { name: 'GSR', fmt: 'u16', endian: 'le', sizeBytes: 2 },
 });
 
+/** Shimmer3-only layer of {@link CHANNEL_FORMAT_OVERRIDES}. */
+const SHIMMER3_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
+  0x0d: { name: 'EXT_EXP_ADC_A7', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x0e: { name: 'EXT_EXP_ADC_A6', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x0f: { name: 'EXT_EXP_ADC_A15', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x10: { name: 'INT_EXP_ADC_A1', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x11: { name: 'INT_EXP_ADC_A12', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x13: { name: 'INT_EXP_ADC_A14', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x1a: { name: 'TEMPERATURE', fmt: 'u16', endian: 'be', sizeBytes: 2 },
+  0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'be', sizeBytes: 3 },
+  0x27: { name: 'BRIDGE_AMP_HIGH', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x28: { name: 'BRIDGE_AMP_LOW', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+});
+
+/** Shimmer3R-only layer of {@link CHANNEL_FORMAT_OVERRIDES}. */
+const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
+  0x0d: { name: 'EXT_ADC_0', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x0e: { name: 'EXT_ADC_1', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x0f: { name: 'EXT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x10: { name: 'INT_ADC_3', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x11: { name: 'INT_ADC_0', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x13: { name: 'INT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
+  0x1a: { name: 'TEMPERATURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
+  0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
+});
+
 /**
  * Per-generation channel table, layered over {@link CHANNEL_FORMATS}.
  *
@@ -147,28 +173,8 @@ export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.f
 export const CHANNEL_FORMAT_OVERRIDES: Readonly<
   Record<ShimmerGeneration, Readonly<Record<number, ChannelFormat>>>
 > = Object.freeze({
-  shimmer3: Object.freeze({
-    0x0d: { name: 'EXT_EXP_ADC_A7', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x0e: { name: 'EXT_EXP_ADC_A6', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x0f: { name: 'EXT_EXP_ADC_A15', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x10: { name: 'INT_EXP_ADC_A1', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x11: { name: 'INT_EXP_ADC_A12', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x13: { name: 'INT_EXP_ADC_A14', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x1a: { name: 'TEMPERATURE', fmt: 'u16', endian: 'be', sizeBytes: 2 },
-    0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'be', sizeBytes: 3 },
-    0x27: { name: 'BRIDGE_AMP_HIGH', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x28: { name: 'BRIDGE_AMP_LOW', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-  }),
-  shimmer3r: Object.freeze({
-    0x0d: { name: 'EXT_ADC_0', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x0e: { name: 'EXT_ADC_1', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x0f: { name: 'EXT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x10: { name: 'INT_ADC_3', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x11: { name: 'INT_ADC_0', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x13: { name: 'INT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
-    0x1a: { name: 'TEMPERATURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
-    0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
-  }),
+  shimmer3: SHIMMER3_CHANNEL_FORMATS,
+  shimmer3r: SHIMMER3R_CHANNEL_FORMATS,
 });
 
 const RESOLVED: Record<ShimmerGeneration, Readonly<Record<number, ChannelFormat>>> = {
@@ -203,6 +209,21 @@ export function resolveChannelFormat(
   generation: ShimmerGeneration,
 ): ChannelFormat | undefined {
   return RESOLVED[generation][id];
+}
+
+/**
+ * True when this channel ID means a different signal, or occupies a different
+ * number of bytes, depending on the hardware generation — i.e. when getting the
+ * generation wrong would mislabel or misdecode it.
+ *
+ * A schema built without knowing the generation is only trustworthy if none of
+ * its channels answers true here.
+ */
+export function isGenerationSensitiveChannel(id: number): boolean {
+  return (
+    CHANNEL_FORMAT_OVERRIDES.shimmer3[id] !== undefined ||
+    CHANNEL_FORMAT_OVERRIDES.shimmer3r[id] !== undefined
+  );
 }
 
 /**

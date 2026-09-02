@@ -535,7 +535,12 @@ export class Shimmer3Client extends BaseShimmerClient {
       OPCODES.INQUIRY_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
     );
-    const info = interpretShimmer3InquiryResponse(rsp, this._timestampFmt);
+    // A channel ID this SDK cannot describe has to reach the host, not just the
+    // schema: its width was guessed, so every later channel in the frame may be
+    // decoding from the wrong offset (see `buildShimmer3Schema`).
+    const info = interpretShimmer3InquiryResponse(rsp, this._timestampFmt, (m) =>
+      this._emitStatus(`⚠️ ${m}`),
+    );
     this.schema = info.schema;
     this.samplingRateHz = info.samplingRateHz;
     this.enabledSensors = info.schema.enabledSensors;

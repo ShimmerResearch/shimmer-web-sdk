@@ -13,10 +13,13 @@
  *   com.shimmerresearch.bluetooth.ShimmerBluetooth (response byte layouts + handshake)
  */
 
-import { OPCODES, TIMESTAMP_FIELD, type TimestampFmt } from '../shimmer3r/constants.js';
-import { CHANNEL_FORMATS } from '../shimmer3r/channelFormats.js';
-import { SensorBitmapShimmer3 } from '../shimmer3r/SensorBitmap.js';
-import { u16le, hex2 } from '../shimmer3r/protocol.js';
+import { OPCODES, type TimestampFmt } from '../shimmer3r/constants.js';
+import {
+  buildStreamSchema,
+  type StreamSchemaBase,
+  type StreamSchemaField,
+} from '../shimmer3r/streamSchema.js';
+import { u16le } from '../shimmer3r/protocol.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -82,24 +85,24 @@ export const SHIMMER3_SAMPLING_CLOCK_FREQ = 32768;
 // Stream schema
 // ---------------------------------------------------------------------------
 
-/** One decoded channel within a streaming data frame. */
-export interface Shimmer3ChannelField {
-  id: number;
-  name: string;
-  fmt: string;
-  endian: string;
-  sizeBytes: number;
-}
+/**
+ * One decoded channel within a streaming data frame.
+ *
+ * Structurally identical to the Shimmer3R client's field type — the two
+ * families share the channel vocabulary — and kept as its own name because it
+ * is exported. See {@link StreamSchemaField} for what `assumed` and
+ * `offsetTrusted` mean.
+ */
+export type Shimmer3ChannelField = StreamSchemaField;
 
-/** Describes how to slice a streaming data frame, built from an inquiry. */
-export interface Shimmer3StreamSchema {
-  timestampFmt: TimestampFmt;
-  fields: Shimmer3ChannelField[];
-  /** Total bytes per frame, including the 0x00 DATA_PACKET preamble byte. */
-  frameBytes: number;
-  enabledSensors: number;
-  dataPreambleByte: number;
-}
+/**
+ * Describes how to slice a streaming data frame, built from an inquiry.
+ *
+ * `dataPreambleByte` is 0x00 (DATA_PACKET) and `frameBytes` includes it.
+ * `trusted` is the field to check before believing the numbers — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export type Shimmer3StreamSchema = StreamSchemaBase;
 
 /** Typed result of decoding an INQUIRY_RESPONSE. */
 export interface Shimmer3InquiryResult {
@@ -125,78 +128,31 @@ export interface Shimmer3InquiryResult {
 /**
  * Build a stream schema from the channel-ID list reported by the inquiry.
  *
- * Mirrors ShimmerObject#interpretDataPacketFormat (the channel→format mapping is
- * identical for Shimmer3 and Shimmer3R, so `CHANNEL_FORMATS` and
- * `SensorBitmapShimmer3` are reused verbatim). The only Shimmer3-relevant knob is
- * the timestamp width (u24 for firmware code ≥ 6, else u16 — see
- * ShimmerObject#updateTimestampByteLength).
+ * Mirrors ShimmerObject#interpretDataPacketFormat. The generation is fixed at
+ * `'shimmer3'`: this file is the classic-Bluetooth Shimmer3 path, so unlike
+ * `Shimmer3RClient` — which the same firmware answers on both platforms — there
+ * is nothing to determine and nothing to assume. That matters for the BMP
+ * channels, which are 2-byte big-endian temperature + 3-byte big-endian
+ * pressure here and 3 little-endian bytes each on a Shimmer3R
+ * (see `CHANNEL_FORMAT_OVERRIDES`).
+ *
+ * The only Shimmer3-relevant knob is the timestamp width (u24 for firmware code
+ * ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength).
+ *
+ * @param onProblem optional sink for the message an unrecognised channel ID
+ *   produces; `Shimmer3Client` wires it to `onStatus`. The schema's `trusted`
+ *   and `unknownChannelIds` say the same thing to code rather than to a log.
  */
 export function buildShimmer3Schema(
   channelIds: number[],
   timestampFmt: TimestampFmt,
+  onProblem?: (message: string) => void,
 ): Shimmer3StreamSchema {
-  const fields: Shimmer3ChannelField[] = [];
-  const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
-  let frameBytes = 1 + ts.sizeBytes; // 1 = DATA_PACKET (0x00) preamble
-  let enabledSensors = 0;
-
-  for (const id of channelIds) {
-    const fmt = CHANNEL_FORMATS[id];
-    if (!fmt) {
-      fields.push({ id, name: `CH_${hex2(id)}`, fmt: 'i16', endian: 'le', sizeBytes: 2 });
-      frameBytes += 2;
-      continue;
-    }
-    fields.push({ id, ...fmt });
-    frameBytes += fmt.sizeBytes ?? 2;
-    enabledSensors |= channelIdToSensorBit(id);
-  }
-
-  return { timestampFmt, fields, frameBytes, enabledSensors, dataPreambleByte: 0x00 };
-}
-
-/** Map a channel/signal ID to its SensorBitmapShimmer3 enable bit (0 if none). */
-function channelIdToSensorBit(id: number): number {
-  switch (id) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-      return SensorBitmapShimmer3.SENSOR_A_ACCEL;
-    case 0x04:
-    case 0x05:
-    case 0x06:
-      return SensorBitmapShimmer3.SENSOR_D_ACCEL;
-    case 0x14:
-    case 0x15:
-    case 0x16:
-      return SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
-    case 0x07:
-    case 0x08:
-    case 0x09:
-      return SensorBitmapShimmer3.SENSOR_MAG;
-    case 0x0a:
-    case 0x0b:
-    case 0x0c:
-      return SensorBitmapShimmer3.SENSOR_GYRO;
-    case 0x12:
-      return SensorBitmapShimmer3.SENSOR_INT_A1;
-    case 0x1c:
-      return SensorBitmapShimmer3.SENSOR_GSR;
-    case 0x23:
-    case 0x24:
-      return SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
-    case 0x25:
-    case 0x26:
-      return SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
-    case 0x1e:
-    case 0x1f:
-      return SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
-    case 0x21:
-    case 0x22:
-      return SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
-    default:
-      return 0;
-  }
+  return buildStreamSchema(channelIds, timestampFmt, {
+    generation: 'shimmer3',
+    dataPreambleByte: 0x00,
+    onProblem,
+  });
 }
 
 /**
@@ -207,10 +163,14 @@ function channelIdToSensorBit(id: number): number {
  * works, matching Shimmer3RClient's `base` handling).
  *
  * Ported from ShimmerObject#interpretInqResponse, HW_ID.SHIMMER_3 branch.
+ *
+ * @param onProblem optional sink for schema problems (an unrecognised channel
+ *   ID); see {@link buildShimmer3Schema}.
  */
 export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
+  onProblem?: (message: string) => void,
 ): Shimmer3InquiryResult {
   let base = 0;
   if (u8[0] === OPCODES.INQUIRY_RESPONSE) base = 1;
@@ -234,7 +194,7 @@ export function interpretShimmer3InquiryResponse(
   const chStart = base + 8;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
-  const schema = buildShimmer3Schema(channelIds, timestampFmt);
+  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
 
   return {
     opcode: u8[0],

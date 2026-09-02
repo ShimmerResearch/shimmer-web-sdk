@@ -5,13 +5,13 @@ import {
   OPCODES,
   BT_FEATURE,
   SHIMMER3R_DEFAULTS,
-  TIMESTAMP_FIELD,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
   type TimestampFmt,
 } from './constants.js';
 import { SensorBitmapShimmer3 } from './SensorBitmap.js';
-import { CHANNEL_FORMATS } from './channelFormats.js';
+import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
+import { buildStreamSchema, type StreamSchemaBase } from './streamSchema.js';
 import {
   calibrateGsrDataToResistanceFromAmplifierEq,
   nudgeGsrResistance,
@@ -120,22 +120,7 @@ const CALIB_DUMP_CHUNK_BYTES = 128;
 // Internal schema type
 // ---------------------------------------------------------------------------
 
-interface ChannelField {
-  id: number;
-  name: string;
-  fmt: string;
-  endian: string;
-  sizeBytes: number;
-}
-
-interface StreamSchema {
-  timestampFmt: TimestampFmt;
-  fields: ChannelField[];
-  /** Total bytes per frame, including the 0x00 preamble byte. */
-  frameBytes: number;
-  enabledSensors: number;
-  dataPreambleByte: number;
-}
+type StreamSchema = StreamSchemaBase;
 
 // ---------------------------------------------------------------------------
 // Constructor options
@@ -1840,77 +1825,46 @@ export class Shimmer3RClient extends BaseShimmerClient {
     };
   }
 
+  /**
+   * Which generation's channel table this client uses to decode a packet.
+   *
+   * Read from the cached DEVICE_VERSION_RESPONSE when the host has asked for it
+   * ({@link readDeviceVersion}); `'shimmer3r'` otherwise, because that is what
+   * this client is named for and what its default transport connects to.
+   *
+   * The default is not always harmless. This client also drives a classic
+   * Shimmer3 over an RFCOMM byte stream (the two platforms share this command
+   * set), and the two generations disagree about the width of the
+   * pressure/temperature channels — a Shimmer3 sends 2 big-endian bytes of
+   * temperature where a Shimmer3R sends 3 little-endian ones, and reverses the
+   * order of the pair. So call `readDeviceVersion()` before `inquiry()` on any
+   * link that might be a Shimmer3; `inquiry()` deliberately does not send that
+   * command itself, to keep the schema rebuild after `setSensors()` a single
+   * round trip. When the generation is assumed *and* the channel list contains a
+   * channel that depends on it, the schema says so (`trusted === false`) and a
+   * status message names the channels.
+   */
+  get generation(): ShimmerGeneration {
+    return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) ?? 'shimmer3r';
+  }
+
+  /** True when {@link generation} is this SDK's default rather than the device's answer. */
+  get generationIsAssumed(): boolean {
+    return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) === null;
+  }
+
   private _buildSchemaFromChannels(channelIds: number[], timestampFmt: TimestampFmt): StreamSchema {
-    const fields: ChannelField[] = [];
-    const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
-    let packetSize = 1 + ts.sizeBytes; // 1 = preamble 0x00
-    let enabledSensors = 0;
-
-    for (const id of channelIds) {
-      const fmt = CHANNEL_FORMATS[id];
-      if (!fmt) {
-        fields.push({ id, name: `CH_${hex2(id)}`, fmt: 'i16', endian: 'le', sizeBytes: 2 });
-        packetSize += 2;
-        continue;
-      }
-      fields.push({ id, ...fmt });
-      packetSize += fmt.sizeBytes ?? 2;
-
-      switch (id) {
-        case 0x00:
-        case 0x01:
-        case 0x02:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_A_ACCEL;
-          break;
-        case 0x04:
-        case 0x05:
-        case 0x06:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_D_ACCEL;
-          break;
-        case 0x14:
-        case 0x15:
-        case 0x16:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
-          break;
-        case 0x07:
-        case 0x08:
-        case 0x09:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_MAG;
-          break;
-        case 0x0a:
-        case 0x0b:
-        case 0x0c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GYRO;
-          break;
-        case 0x12:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_INT_A1;
-          break;
-        case 0x1c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GSR;
-          break;
-        case 0x23:
-        case 0x24:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
-          break;
-        case 0x25:
-        case 0x26:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
-          break;
-        case 0x1e:
-        case 0x1f:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
-          break;
-        case 0x21:
-        case 0x22:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
-          break;
-        default:
-          console.warn(`⚠️ Unmapped channel ID 0x${id.toString(16)} — added as generic i16.`);
-      }
-    }
-
-    this.enabledSensors = enabledSensors;
-    return { timestampFmt, fields, frameBytes: packetSize, enabledSensors, dataPreambleByte: 0x00 };
+    const schema = buildStreamSchema(channelIds, timestampFmt, {
+      generation: this.generation,
+      generationAssumed: this.generationIsAssumed,
+      dataPreambleByte: 0x00,
+      // Schema problems have to reach the host, not just the schema object: a
+      // guessed width shifts every later channel in the frame, and the decode
+      // fails silently rather than throwing.
+      onProblem: (m) => this._emitStatus(`⚠️ ${m}`),
+    });
+    this.enabledSensors = schema.enabledSensors;
+    return schema;
   }
 
   // ---------------------------------------------------------------------------
