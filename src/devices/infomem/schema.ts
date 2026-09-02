@@ -61,9 +61,18 @@ import {
  */
 export type Shimmer3Generation = 'shimmer3-old-imu' | 'shimmer3-new-imu' | 'shimmer3r';
 
-/** How a field's value is encoded in the InfoMem bytes. */
+/**
+ * How a field's value is encoded in the InfoMem bytes.
+ *
+ * `bytes10` and `bytes21` are opaque, fixed-length byte runs handed back and
+ * taken verbatim: the 10-byte ADS1292R ExG register banks and the 21-byte
+ * kinematic calibration blocks respectively. Neither has a scalar reading a
+ * generic editor could offer, so the kind exists to say "this field is that
+ * many bytes wide" — a `u8` there would put a 0-255 spinner on the first byte
+ * and leave the rest of the run unreachable.
+ */
 export type InfoMemFieldKind =
-  'bit' | 'u8' | 'u16le' | 'u16be' | 'u32be' | 'ascii12' | 'bytes21' | 'mac6[]';
+  'bit' | 'u8' | 'u16le' | 'u16be' | 'u32be' | 'ascii12' | 'bytes10' | 'bytes21' | 'mac6[]';
 
 /**
  * `[value, label]`, same tuple shape as the Java `Listof…ConfigValues` pairs.
@@ -529,7 +538,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     key: 'exg1',
     label: 'ExG Chip 1 Registers',
     desc: 'Raw 10-byte ADS1292R chip-1 register bank at bytes 10-19.',
-    kind: 'u8',
+    kind: 'bytes10',
     layoutKey: 'idxExg1',
     group: 'exg',
     appliesTo: ALL,
@@ -539,7 +548,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     key: 'exg2',
     label: 'ExG Chip 2 Registers',
     desc: 'Raw 10-byte ADS1292R chip-2 register bank at bytes 20-29.',
-    kind: 'u8',
+    kind: 'bytes10',
     layoutKey: 'idxExg2',
     group: 'exg',
     appliesTo: ALL,
@@ -823,6 +832,8 @@ export function resolveFieldIndex(field: InfoMemFieldDefinition, layout: InfoMem
 }
 
 const GENERAL_CALIB_LEN = 21;
+/** One ADS1292R ExG register bank (`EXG_BANK_LENGTH`) — the `bytes10` width. */
+const EXG_BANK_LEN = 10;
 const NAME_LEN = 12;
 const MAC_LEN = 6;
 const MAX_NODES = 21;
@@ -882,6 +893,11 @@ export function readInfoMemFieldValue(
         s += String.fromCharCode(b);
       }
       return s;
+    }
+    case 'bytes10': {
+      const out = new Uint8Array(EXG_BANK_LEN);
+      out.set(bytes.subarray(idx, idx + EXG_BANK_LEN), 0);
+      return out;
     }
     case 'bytes21': {
       const out = new Uint8Array(GENERAL_CALIB_LEN);
@@ -963,6 +979,11 @@ export function writeInfoMemFieldValue(
       for (let i = 0; i < NAME_LEN; i++) {
         bytes[idx + i] = i < s.length ? s.charCodeAt(i) & 0xff : 0xff;
       }
+      return;
+    }
+    case 'bytes10': {
+      const src = value as Uint8Array;
+      for (let i = 0; i < EXG_BANK_LEN; i++) bytes[idx + i] = (src[i] ?? 0) & 0xff;
       return;
     }
     case 'bytes21': {

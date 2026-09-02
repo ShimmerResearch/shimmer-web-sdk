@@ -328,6 +328,7 @@ describe('readInfoMemFieldValue / writeInfoMemFieldValue', () => {
     expect(readInfoMemFieldValue(img, field('estimatedExpLength'), layout)).toBe(0x0102); // u16be
     expect(readInfoMemFieldValue(img, field('configTime'), layout)).toBe(0x5f0a0b0c); // u32be
     expect(readInfoMemFieldValue(img, field('deviceName'), layout)).toBe('SHIM3R'); // ascii12
+    expect(readInfoMemFieldValue(img, field('exg1'), layout)).toEqual(img.slice(10, 20)); // bytes10
     expect(readInfoMemFieldValue(img, field('calib.gyro'), layout)).toEqual(img.subarray(55, 76));
     expect(readInfoMemFieldValue(img, field('syncNodes'), layout)).toEqual([
       'A1A2A3A4A5A6',
@@ -346,6 +347,8 @@ describe('readInfoMemFieldValue / writeInfoMemFieldValue', () => {
       ['estimatedExpLength', 0xbeef],
       ['configTime', 0x7fabcdef],
       ['deviceName', 'NODE-07'],
+      ['exg1', Uint8Array.from([0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20])],
+      ['exg2', Uint8Array.from([0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0xe1, 0xe1, 0x00])],
       ['calib.wrAccel', new Uint8Array(21).fill(0x2b)],
       ['syncNodes', ['0011223344FF', 'AABBCCDDEEFF']],
     ];
@@ -355,6 +358,29 @@ describe('readInfoMemFieldValue / writeInfoMemFieldValue', () => {
       writeInfoMemFieldValue(bytes, f, layout, value);
       expect(readInfoMemFieldValue(bytes, f, layout), key).toEqual(value);
     }
+  });
+
+  it('an ExG bank is a whole 10-byte run, not just its first byte', () => {
+    // Declaring exg1/exg2 as `u8` made a generic editor offer byte 10 (and byte
+    // 20) alone and left the other nine bytes of each bank unreachable; the
+    // `bytes10` kind is what makes the full register bank addressable.
+    expect(field('exg1').kind).toBe('bytes10');
+    expect(field('exg2').kind).toBe('bytes10');
+    const bank = readInfoMemFieldValue(fullFieldInfoMem(), field('exg2'), layout);
+    expect(bank).toBeInstanceOf(Uint8Array);
+    expect((bank as Uint8Array).length).toBe(10);
+  });
+
+  it('editing ExG bank 1 leaves bank 2 and the neighbouring bytes untouched', () => {
+    const img = fullFieldInfoMem();
+    const bytes = new Uint8Array(img);
+    writeInfoMemFieldValue(bytes, field('exg1'), layout, new Uint8Array(10).fill(0x5c));
+    // The bank itself changed…
+    expect(Array.from(bytes.subarray(10, 20))).toEqual(Array(10).fill(0x5c));
+    // …and nothing on either side of it did: ConfigSetupByte3 below (byte 9),
+    // ExG bank 2 above (bytes 20-29) and the baud rate after it (byte 30).
+    expect(Array.from(bytes.subarray(0, 10))).toEqual(Array.from(img.subarray(0, 10)));
+    expect(Array.from(bytes.subarray(20, 31))).toEqual(Array.from(img.subarray(20, 31)));
   });
 
   it('a bit write preserves the other bits of its byte', () => {
@@ -454,11 +480,13 @@ describe('every schema field writes ONLY into its own declared bytes', () => {
           ? 4
           : f.kind === 'ascii12'
             ? 12
-            : f.kind === 'bytes21'
-              ? 21
-              : f.kind === 'mac6[]'
-                ? 21 * 6
-                : 1;
+            : f.kind === 'bytes10'
+              ? 10
+              : f.kind === 'bytes21'
+                ? 21
+                : f.kind === 'mac6[]'
+                  ? 21 * 6
+                  : 1;
     for (let i = 0; i < width; i++) spans.push(idx + i);
     if (f.msbLayoutKey !== undefined)
       spans.push(resolveFieldIndex({ ...f, layoutKey: f.msbLayoutKey }, layout));
@@ -481,6 +509,8 @@ describe('every schema field writes ONLY into its own declared bytes', () => {
         return 0x12345678;
       case 'ascii12':
         return 'PROBE';
+      case 'bytes10':
+        return new Uint8Array(10).fill(0x4d);
       case 'bytes21':
         return new Uint8Array(21).fill(0x3c);
       case 'mac6[]':
