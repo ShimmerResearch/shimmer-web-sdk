@@ -134,6 +134,94 @@ describe('shimmer3rControlMessageLength', () => {
     // one-shot: [0xCB][status]
     expect(len([OP.DELETE_RESPONSE, 0])).toBe(2);
   });
+
+  it('sizes the one-byte range responses', () => {
+    // Both were absent from the length table, so a serial drain resynced
+    // straight past them and every GET_*_RANGE over a byte stream timed out.
+    expect(len([OPCODES.WR_ACCEL_RANGE_RESPONSE, 3])).toBe(2);
+    expect(len([OPCODES.WR_ACCEL_RANGE_RESPONSE])).toBe(NEED_MORE);
+    expect(len([OPCODES.GYRO_RANGE_RESPONSE, 5])).toBe(2);
+    expect(len([OPCODES.GYRO_RANGE_RESPONSE])).toBe(NEED_MORE);
+  });
+
+  describe('instream responses ([0x8A] prefix)', () => {
+    const INSTREAM = OPCODES.INSTREAM_CMD_RESPONSE; // 0x8A
+    const STATUS = OPCODES.STATUS_RESPONSE; // 0x71
+    const VBATT = OPCODES.VBATT_RESPONSE; // 0x94
+
+    it('needs the sub-opcode before it can size anything', () => {
+      expect(len([INSTREAM])).toBe(NEED_MORE);
+    });
+
+    it('sizes a status response at 2 + statusPayloadBytes', () => {
+      // Shimmer3R sends two status bytes, Shimmer3 one (STATUS_BYTE_COUNT).
+      expect(len([INSTREAM, STATUS, 0x21, 0x01])).toBe(4);
+      expect(shimmer3rControlMessageLength(new Uint8Array([INSTREAM, STATUS, 0x21, 0x01]))).toBe(4);
+      expect(
+        shimmer3rControlMessageLength(new Uint8Array([INSTREAM, STATUS, 0x21, 0x01]), {
+          statusPayloadBytes: 1,
+        }),
+      ).toBe(3);
+    });
+
+    it('waits for the second status byte only when one is expected', () => {
+      const short = new Uint8Array([INSTREAM, STATUS, 0x21]);
+      // Default (Shimmer3R): the usbPluggedIn byte is still outstanding.
+      expect(shimmer3rControlMessageLength(short)).toBe(NEED_MORE);
+      // Told it is a Shimmer3, the same bytes are a whole message. Getting this
+      // wrong is not a stall but a theft: the framer would swallow whatever
+      // followed the status — usually an ACK.
+      expect(shimmer3rControlMessageLength(short, { statusPayloadBytes: 1 })).toBe(3);
+    });
+
+    it('sizes a battery response at the 3-byte BattStatusRaw', () => {
+      expect(len([INSTREAM, VBATT, 0x9a, 0x03, 0xc0])).toBe(5);
+      expect(len([INSTREAM, VBATT, 0x9a, 0x03])).toBe(NEED_MORE);
+      // Trailing bytes belong to the next message, not this one.
+      expect(len([INSTREAM, VBATT, 0x9a, 0x03, 0xc0, ACK])).toBe(5);
+    });
+
+    it('still hands every other sub-opcode to sdMessageSpan', () => {
+      expect(len(Array.from(makeStatusFrame(2, 0, 4096)))).toBe(10);
+      // An instream sub-opcode belonging to nothing: sdMessageSpan resyncs.
+      expect(len([INSTREAM, 0x55, 1, 2, 3])).toBe(RESYNC);
+    });
+  });
+
+  describe('RSP_CALIB_DUMP (0x99)', () => {
+    const CALIB = OPCODES.RSP_CALIB_DUMP_COMMAND; // 0x99
+    // [0x99][dataLen][offsetLo][offsetHi][data…] — the length byte counts the
+    // data only, so the message is 4 bytes longer than it claims.
+    const dump = (dataLen: number, offset = 0): number[] => [
+      CALIB,
+      dataLen,
+      offset & 0xff,
+      (offset >> 8) & 0xff,
+      ...new Array(dataLen).fill(0x5a),
+    ];
+
+    it('needs the length byte before it can size the message', () => {
+      expect(len([CALIB])).toBe(NEED_MORE);
+    });
+
+    it('spans 4 + the length byte', () => {
+      expect(len(dump(8, 256))).toBe(12);
+      expect(len(dump(0))).toBe(4);
+    });
+
+    it('needs the data bytes too', () => {
+      expect(len(dump(8).slice(0, 11))).toBe(NEED_MORE);
+    });
+
+    it('accepts the firmware maximum of 128 data bytes', () => {
+      expect(len(dump(128))).toBe(132);
+    });
+
+    it('resyncs past a length the firmware could never have sent', () => {
+      expect(len([CALIB, 129])).toBe(RESYNC);
+      expect(len([CALIB, 255])).toBe(RESYNC);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

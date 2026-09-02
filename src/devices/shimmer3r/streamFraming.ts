@@ -46,7 +46,9 @@ export const SHIMMER3R_INQ_CHANNELS_OFFSET = SHIMMER3R_INQ_NUM_CHANNELS_OFFSET +
  */
 export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>> = Object.freeze({
   [OPCODES.SAMPLING_RATE_RESPONSE]: 2, // 0x04
+  [OPCODES.WR_ACCEL_RANGE_RESPONSE]: 1, // 0x0A
   [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
+  [OPCODES.GYRO_RANGE_RESPONSE]: 1, // 0x4A
   [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
   [OPCODES.FW_VERSION_RESPONSE]: 6, // 0x2F fwId u16, major u16, minor u8, patch u8
   [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
@@ -64,6 +66,24 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
 ]);
 
 /**
+ * How many status bytes a STATUS_RESPONSE carries — the one length in this
+ * protocol that depends on which platform answered rather than on the bytes
+ * themselves.
+ */
+export interface Shimmer3RFramingOptions {
+  /**
+   * 2 on a Shimmer3R, 1 on a Shimmer3 (`STATUS_BYTE_COUNT`,
+   * log-and-stream-common `Comms/shimmer_bt_uart.h:259-263`). Defaults to 2:
+   * this framer belongs to the Shimmer3R client, and a client that has not yet
+   * asked for the hardware version is talking to a Shimmer3R until told
+   * otherwise. Get it wrong on a Shimmer3 and the framer eats the byte after
+   * the status — an ACK, usually — so the client should pass 1 as soon as
+   * `readDeviceVersion` reports hardware 3.
+   */
+  statusPayloadBytes?: 1 | 2;
+}
+
+/**
  * Total length (INCLUDING the leading opcode) of the control message at the
  * head of `buf`, or {@link NEED_MORE} when more bytes are required to tell, or
  * {@link RESYNC} when the leading byte starts nothing we recognise.
@@ -72,7 +92,10 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
  * by the negotiated schema rather than by the protocol, so the client routes it
  * to its schema parser instead of through this function.
  */
-export function shimmer3rControlMessageLength(buf: Uint8Array): number {
+export function shimmer3rControlMessageLength(
+  buf: Uint8Array,
+  opts: Shimmer3RFramingOptions = {},
+): number {
   if (buf.length === 0) return NEED_MORE;
   const opcode = buf[0];
 
@@ -80,9 +103,43 @@ export function shimmer3rControlMessageLength(buf: Uint8Array): number {
     return 1;
   }
 
-  // SD-transfer frames and one-shot responses: one definition, in sdMessageSpan.
-  if (opcode === SD_INSTREAM_BYTE || SD_RESPONSE_OPCODES.has(opcode)) {
+  /*
+   * 0x8A (INSTREAM_CMD_RESPONSE) is a shared prefix, not an opcode: the byte
+   * after it selects the message. SD transfer owns most of that space, but the
+   * firmware also answers GET_STATUS and GET_VBATT through it, and those two
+   * predate the SD frames — so they are decided here before the rest is handed
+   * to sdMessageSpan.
+   */
+  if (opcode === SD_INSTREAM_BYTE) {
+    if (buf.length < 2) return NEED_MORE;
+    if (buf[1] === OPCODES.STATUS_RESPONSE) {
+      // [0x8A][0x71][status0]{[status1]} — ShimBt_assembleStatusBytes,
+      // `Comms/shimmer_bt_uart.c:2920-2932`.
+      const total = 2 + (opts.statusPayloadBytes ?? 2);
+      return buf.length < total ? NEED_MORE : total;
+    }
+    if (buf[1] === OPCODES.VBATT_RESPONSE) {
+      // [0x8A][0x94][BattStatusRaw x3] — `Comms/shimmer_bt_uart.c:1848-1859`.
+      return buf.length < 5 ? NEED_MORE : 5;
+    }
     return sdMessageSpan(buf);
+  }
+
+  // SD-transfer one-shot responses: one definition, in sdMessageSpan.
+  if (SD_RESPONSE_OPCODES.has(opcode)) {
+    return sdMessageSpan(buf);
+  }
+
+  if (opcode === OPCODES.RSP_CALIB_DUMP_COMMAND) {
+    // [0x99][length][offsetLo][offsetHi][data…] — the length byte counts the
+    // data only, and the firmware reads at most 128 bytes of calibration RAM
+    // per request (`Comms/shimmer_bt_uart.c:2241-2249`), so a larger one is a
+    // stray byte rather than a giant response.
+    if (buf.length < 2) return NEED_MORE;
+    const dataLen = buf[1];
+    if (dataLen > 128) return RESYNC;
+    const total = 4 + dataLen;
+    return buf.length < total ? NEED_MORE : total;
   }
 
   if (opcode === OPCODES.INQUIRY_RESPONSE) {
