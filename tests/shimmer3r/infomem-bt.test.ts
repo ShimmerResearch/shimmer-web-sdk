@@ -357,10 +357,18 @@ describe('Shimmer3RClient configuration writes while streaming', () => {
     await fw.client.startStreaming();
     fw.cmds.length = 0; // only what happens AFTER the stream starts matters
 
-    await expect(fw.client.writeInfoMemBytes(patternImage())).rejects.toThrow(/while streaming/);
-    await expect(fw.client.writeInfoMemConfig(seedConfig())).rejects.toThrow(/while streaming/);
-    await expect(fw.client.updateSdLogConfig()).rejects.toThrow(/while streaming/);
-    await expect(fw.client.updateCalibDump()).rejects.toThrow(/while streaming/);
+    await expect(fw.client.writeInfoMemBytes(patternImage())).rejects.toThrow(
+      /unavailable while this client is streaming/,
+    );
+    await expect(fw.client.writeInfoMemConfig(seedConfig())).rejects.toThrow(
+      /unavailable while this client is streaming/,
+    );
+    await expect(fw.client.updateSdLogConfig()).rejects.toThrow(
+      /unavailable while this client is streaming/,
+    );
+    await expect(fw.client.updateCalibDump()).rejects.toThrow(
+      /unavailable while this client is streaming/,
+    );
     // Not one byte written: the refusal happens before the version reads, let
     // alone before a page write, so there is no half-written image to explain.
     expect(fw.cmds).toHaveLength(0);

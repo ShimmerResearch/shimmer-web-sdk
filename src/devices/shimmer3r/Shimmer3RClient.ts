@@ -117,6 +117,42 @@ const SHIMMER3R_INFOMEM_BLE_CHUNK_BYTES = 64;
 const CALIB_DUMP_CHUNK_BYTES = 128;
 
 // ---------------------------------------------------------------------------
+// Stray-ACK tolerance
+// ---------------------------------------------------------------------------
+
+/**
+ * A control message with a leading ACK byte stepped over, so a waiter matches
+ * on the opcode the firmware composed rather than on framing sitting in front
+ * of it.
+ *
+ * Needed because `_expectingAck` is a COUNT, not a queue: any ACK satisfies any
+ * outstanding expectation. The two stop commands write without registering one
+ * ({@link Shimmer3RClient.stopStreaming},
+ * {@link Shimmer3RClient.stopStreamingAndLogging}) and yet the firmware ACKs
+ * them, so a host that asks for something straight after a stop has that stray
+ * ACK counted as its own command's — and its command's REAL reply then arrives
+ * with the count already back at zero, unconsumed by the ACK branch of
+ * {@link Shimmer3RClient._handleFramedChunk}. Over BLE the module packs that
+ * reply in behind its own ACK, so what reaches the waiters is
+ * `[0xFF][0x8A][0x71]…` with the ACK still on the front. A waiter that matches
+ * at offset 0 alone misses it and times out on a reply that did arrive.
+ *
+ * Stepping over the byte here, rather than balancing the count by waiting for
+ * the stop's ACK at the stop, is what keeps that deliberate no-ACK-wait intact
+ * — see {@link Shimmer3RClient.stopStreaming} for why waiting there is the
+ * worse trade. It costs nothing when the count was right all along: no message
+ * the firmware composes begins with an ACK of its own, and a lone ACK is left
+ * alone so the waiters go on ignoring it.
+ *
+ * A byte stream does not strictly need this — `_extractUnframedMessages` has
+ * already split the ACK into its own message — but it is applied on both paths
+ * so the two transports agree on what a waiter accepts.
+ */
+function withoutLeadingAck(msg: Uint8Array): Uint8Array {
+  return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
+}
+
+// ---------------------------------------------------------------------------
 // Internal schema type
 // ---------------------------------------------------------------------------
 
@@ -514,37 +550,29 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this.onDeviceStatus) return;
     // A push carries the ACK prefix when the firmware's
     // `useAckPrefixForInstreamResponses` flag is on
-    // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), so step over one if it is
-    // there. On a byte stream the drain has already split the ACK off, but over
-    // BLE it shares the notification.
-    const at = chunk[0] === OPCODES.ACK_COMMAND_PROCESSED ? 1 : 0;
-    if (chunk[at] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
-    if (chunk[at + 1] !== OPCODES.STATUS_RESPONSE) return;
+    // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), and a stray ACK can be
+    // sitting in front of it besides; `withoutLeadingAck` covers both.
+    const msg = withoutLeadingAck(chunk);
+    if (msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
+    if (msg[1] !== OPCODES.STATUS_RESPONSE) return;
     // Somebody's answer, not news: `getStatus` reports it to its own caller.
     if (this._statusReadsInFlight > 0) return;
-    // The payload must be ALL there, not merely started. A guard of `at + 3`
-    // let a push with one status byte through on a two-byte platform, and the
-    // parser then reported `usbPluggedIn: null` — indistinguishable, to the
+    // The payload must be ALL there, not merely started. A guard of three
+    // bytes let a push with one status byte through on a two-byte platform, and
+    // the parser then reported `usbPluggedIn: null` — indistinguishable, to the
     // caller, from a Shimmer3 that has no such field.
     const need = this._minStatusPayloadBytes;
-    if (chunk.length < at + 2 + need) {
+    if (msg.length < 2 + need) {
       // Dropped rather than surfaced: nobody asked for this message, so there
       // is no caller waiting to be failed, and inventing a status is worse than
       // missing one the firmware will push again on the next change. Logged
       // because a short push means the framing is wrong, which is exactly the
       // kind of thing whoever turned `debug` on is looking for.
-      this._log(
-        'Dropping truncated STATUS push:',
-        chunk.length - at - 2,
-        'payload byte(s), need',
-        need,
-      );
+      this._log('Dropping truncated STATUS push:', msg.length - 2, 'payload byte(s), need', need);
       return;
     }
     try {
-      this.onDeviceStatus(
-        parseShimmer3StatusBytes(chunk.subarray(at + 2, at + 2 + this._statusPayloadBytes)),
-      );
+      this.onDeviceStatus(parseShimmer3StatusBytes(msg.subarray(2, 2 + this._statusPayloadBytes)));
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
     }
@@ -1359,14 +1387,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * NACK and is reported as one. The message says as much rather than implying
    * the check covers both.
    */
+  /**
+   * Refuse a configuration write the firmware would reject anyway.
+   *
+   * Covers what this client started, streaming or streaming-plus-SD-logging,
+   * since both set the same flag. It cannot cover a recording the client did
+   * not start — one begun with the sensor's own button, or by a scheduled
+   * trial — because no local flag is set for those; there the device NACKs the
+   * write, which surfaces as a failure rather than as this refusal.
+   * {@link getStatus} reports the sensor's actual sensing and SD-logging state
+   * for a caller that wants to know before trying.
+   */
   private _assertNotSensingForConfigWrite(what: string): void {
     if (this._streaming) {
       throw new Error(
-        `${what} is unavailable while streaming — the firmware refuses every ` +
-          'configuration write while sensing. Call stopStreaming() first. SD logging ' +
-          'counts as sensing too but is not checked here, because this client holds no ' +
-          'local SD-logging state: if one is running the device will NACK the write. ' +
-          'readStatus() reports both.',
+        `${what} is unavailable while this client is streaming — the firmware ` +
+          'refuses every configuration write while the sensor is sensing. Call ' +
+          'stopStreaming(), or stopStreamingAndLogging() if the recording was ' +
+          'started with startStreamingAndLogging(), which sets the same flag.',
       );
     }
   }
@@ -2172,11 +2210,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
-        if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) return;
-        if (chunk[0] === expectedOpcode) {
+        // The expected opcode first, so a reply is never mistaken for framing;
+        // then the same message with a stray ACK stepped over. Resolving with
+        // the stripped buffer is what lets every caller keep reading its reply
+        // from offset 0.
+        const msg = chunk[0] === expectedOpcode ? chunk : withoutLeadingAck(chunk);
+        if (msg[0] === expectedOpcode) {
           clearTimeout(t);
           this._offTemp(handler);
-          resolve(chunk);
+          resolve(msg);
         }
       };
       this._onTemp(handler);
@@ -2202,6 +2244,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   ): Promise<Uint8Array> {
     const matches = (c: Uint8Array): boolean =>
       c.length >= 2 + payloadLen && c[0] === OPCODES.INSTREAM_CMD_RESPONSE && c[1] === subOpcode;
+    /** The instream message a chunk carries, past any stray ACK in front. */
+    const message = (c: Uint8Array): Uint8Array =>
+      c[0] === OPCODES.INSTREAM_CMD_RESPONSE ? c : withoutLeadingAck(c);
 
     // BLE packs [0xFF][0x8A][0x71]… into a single notification, so the reply may
     // already be sitting in the ACK's remainder — the same synchronous hand-over
@@ -2220,10 +2265,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }, timeoutMs);
 
       const handler = (chunk: Uint8Array): void => {
-        if (!chunk || !matches(chunk)) return;
+        if (!chunk) return;
+        const msg = message(chunk);
+        if (!matches(msg)) return;
         clearTimeout(t);
         this._offTemp(handler);
-        resolve(chunk);
+        resolve(msg);
       };
       this._onTemp(handler);
     });

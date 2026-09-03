@@ -40,9 +40,17 @@ export interface StreamSchemaField {
    */
   assumed?: boolean;
   /**
-   * False when this field's byte offset within the frame sits at or after an
+   * False when this field's byte offset within the frame sits **after** an
    * assumed width, so the offset — and therefore the value — cannot be relied
    * on. Absent or true means the offset came entirely from described channels.
+   *
+   * A field that is itself {@link assumed} keeps `offsetTrusted: true`: where it
+   * *starts* is known, because everything before it was described. What is not
+   * known is where it ends, which is why the fields after it are the ones
+   * marked. So the two flags answer different questions — `assumed` says this
+   * value is meaningless, `offsetTrusted` says this value may have been read
+   * from the wrong place — and a host wanting only trustworthy numbers has to
+   * check both.
    */
   offsetTrusted?: boolean;
 }

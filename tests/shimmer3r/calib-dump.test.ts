@@ -244,7 +244,9 @@ describe('Shimmer3RClient.writeCalibDump while streaming', () => {
     const fw = await scriptedFirmware({ framed: true });
     await fw.client.startStreaming();
     fw.cmds.length = 0;
-    await expect(fw.client.writeCalibDump(dumpOf(2))).rejects.toThrow(/while streaming/);
+    await expect(fw.client.writeCalibDump(dumpOf(2))).rejects.toThrow(
+      /unavailable while this client is streaming/,
+    );
     expect(fw.cmds).toHaveLength(0);
     expect(fw.calibRam.every((b) => b === 0)).toBe(true);
   });
