@@ -5,13 +5,25 @@ import {
   OPCODES,
   BT_FEATURE,
   SHIMMER3R_DEFAULTS,
-  TIMESTAMP_FIELD,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
   type TimestampFmt,
 } from './constants.js';
-import { SensorBitmapShimmer3 } from './SensorBitmap.js';
-import { CHANNEL_FORMATS } from './channelFormats.js';
+import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
+import {
+  EXG_BANK_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  exgBanksEqualIgnoringStatus,
+  applyExgPreset,
+  clearExgResolutionFlags,
+  type ExgChipIndex,
+  type ApplicableExgPreset,
+  type ExgResolution,
+} from '../exg/index.js';
+import { buildStreamSchema, type StreamSchemaBase } from './streamSchema.js';
 import {
   calibrateGsrDataToResistanceFromAmplifierEq,
   nudgeGsrResistance,
@@ -43,11 +55,25 @@ import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
   getGroupDefaults,
+  parseCalibDump,
+  MAX_CALIB_DUMP_BYTES,
   type StreamingImuRanges,
   type InertialGroup,
   type KinematicCalibration,
+  type CalibDump,
 } from '../calibration/index.js';
 import { MAC_LENGTH, INVALID_MAC_IDS } from '../infomem/layout.js';
+import {
+  resolveInfoMemLayout,
+  parseInfoMem,
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
+  INFOMEM_SIZE,
+  INFOMEM_PAGE_SIZE,
+  type InfoMemContext,
+  type InfoMemDeviceConfig,
+} from '../infomem/index.js';
 import {
   SD_TRANSFER_OPCODES,
   SD_STATUS,
@@ -82,26 +108,67 @@ import {
 // 224+6 stays within one 128-byte InfoMem segment, so a single read suffices.
 const INFOMEM_MAC_OFFSET = 224;
 
+/**
+ * Bytes per InfoMem / calibration-dump write chunk over a **framed** (BLE)
+ * transport. The firmware's own ceiling is 128, and a byte stream uses it; BLE
+ * gets 64 because that is the chunk size the EEPROM brand-record write is
+ * proven to survive on real hardware, where a command has to cross several
+ * notifications into a firmware receive buffer that a larger record has
+ * overflowed before (DEV-802). Overridable per call via `opts.chunkBytes`.
+ */
+const SHIMMER3R_INFOMEM_BLE_CHUNK_BYTES = 64;
+
+/**
+ * Bytes per calibration-dump READ. Reads are safe at the firmware's full 128
+ * regardless of transport — the reply is reassembled across notifications by
+ * `_readLengthPrefixedResponse`, and the size limit that motivates the smaller
+ * BLE write chunk is a limit on what the device can receive, not on what it can
+ * send. `ShimCalib_ramRead` caps a request at 128
+ * (`Calibration/shimmer_calibration.c:372-380`).
+ */
+const CALIB_DUMP_CHUNK_BYTES = 128;
+
+// ---------------------------------------------------------------------------
+// Stray-ACK tolerance
+// ---------------------------------------------------------------------------
+
+/**
+ * A control message with a leading ACK byte stepped over, so a waiter matches
+ * on the opcode the firmware composed rather than on framing sitting in front
+ * of it.
+ *
+ * Needed because `_expectingAck` is a COUNT, not a queue: any ACK satisfies any
+ * outstanding expectation. The two stop commands write without registering one
+ * ({@link Shimmer3RClient.stopStreaming},
+ * {@link Shimmer3RClient.stopStreamingAndLogging}) and yet the firmware ACKs
+ * them, so a host that asks for something straight after a stop has that stray
+ * ACK counted as its own command's — and its command's REAL reply then arrives
+ * with the count already back at zero, unconsumed by the ACK branch of
+ * {@link Shimmer3RClient._handleFramedChunk}. Over BLE the module packs that
+ * reply in behind its own ACK, so what reaches the waiters is
+ * `[0xFF][0x8A][0x71]…` with the ACK still on the front. A waiter that matches
+ * at offset 0 alone misses it and times out on a reply that did arrive.
+ *
+ * Stepping over the byte here, rather than balancing the count by waiting for
+ * the stop's ACK at the stop, is what keeps that deliberate no-ACK-wait intact
+ * — see {@link Shimmer3RClient.stopStreaming} for why waiting there is the
+ * worse trade. It costs nothing when the count was right all along: no message
+ * the firmware composes begins with an ACK of its own, and a lone ACK is left
+ * alone so the waiters go on ignoring it.
+ *
+ * A byte stream does not strictly need this — `_extractUnframedMessages` has
+ * already split the ACK into its own message — but it is applied on both paths
+ * so the two transports agree on what a waiter accepts.
+ */
+function withoutLeadingAck(msg: Uint8Array): Uint8Array {
+  return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
+}
+
 // ---------------------------------------------------------------------------
 // Internal schema type
 // ---------------------------------------------------------------------------
 
-interface ChannelField {
-  id: number;
-  name: string;
-  fmt: string;
-  endian: string;
-  sizeBytes: number;
-}
-
-interface StreamSchema {
-  timestampFmt: TimestampFmt;
-  fields: ChannelField[];
-  /** Total bytes per frame, including the 0x00 preamble byte. */
-  frameBytes: number;
-  enabledSensors: number;
-  dataPreambleByte: number;
-}
+type StreamSchema = StreamSchemaBase;
 
 // ---------------------------------------------------------------------------
 // Constructor options
@@ -495,37 +562,29 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this.onDeviceStatus) return;
     // A push carries the ACK prefix when the firmware's
     // `useAckPrefixForInstreamResponses` flag is on
-    // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), so step over one if it is
-    // there. On a byte stream the drain has already split the ACK off, but over
-    // BLE it shares the notification.
-    const at = chunk[0] === OPCODES.ACK_COMMAND_PROCESSED ? 1 : 0;
-    if (chunk[at] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
-    if (chunk[at + 1] !== OPCODES.STATUS_RESPONSE) return;
+    // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), and a stray ACK can be
+    // sitting in front of it besides; `withoutLeadingAck` covers both.
+    const msg = withoutLeadingAck(chunk);
+    if (msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
+    if (msg[1] !== OPCODES.STATUS_RESPONSE) return;
     // Somebody's answer, not news: `getStatus` reports it to its own caller.
     if (this._statusReadsInFlight > 0) return;
-    // The payload must be ALL there, not merely started. A guard of `at + 3`
-    // let a push with one status byte through on a two-byte platform, and the
-    // parser then reported `usbPluggedIn: null` — indistinguishable, to the
+    // The payload must be ALL there, not merely started. A guard of three
+    // bytes let a push with one status byte through on a two-byte platform, and
+    // the parser then reported `usbPluggedIn: null` — indistinguishable, to the
     // caller, from a Shimmer3 that has no such field.
     const need = this._minStatusPayloadBytes;
-    if (chunk.length < at + 2 + need) {
+    if (msg.length < 2 + need) {
       // Dropped rather than surfaced: nobody asked for this message, so there
       // is no caller waiting to be failed, and inventing a status is worse than
       // missing one the firmware will push again on the next change. Logged
       // because a short push means the framing is wrong, which is exactly the
       // kind of thing whoever turned `debug` on is looking for.
-      this._log(
-        'Dropping truncated STATUS push:',
-        chunk.length - at - 2,
-        'payload byte(s), need',
-        need,
-      );
+      this._log('Dropping truncated STATUS push:', msg.length - 2, 'payload byte(s), need', need);
       return;
     }
     try {
-      this.onDeviceStatus(
-        parseShimmer3StatusBytes(chunk.subarray(at + 2, at + 2 + this._statusPayloadBytes)),
-      );
+      this.onDeviceStatus(parseShimmer3StatusBytes(msg.subarray(2, 2 + this._statusPayloadBytes)));
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
     }
@@ -869,14 +928,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Firmware always emits the length byte after the opcode, but its absence is
    * tolerated (older/variant firmware) by treating the first byte as a prefix
    * only when it equals the requested length.
+   *
+   * `headerBytes` is how many bytes sit between the opcode and the payload:
+   * 1 for the `[len]` of an InfoMem or daughter-card read, 3 for the
+   * `[len][offsetLo][offsetHi]` a calibration-dump reply echoes back
+   * (`Comms/shimmer_bt_uart.c:2119-2127`). The whole header is recognised — and
+   * skipped — on the same condition either way, that its first byte is the
+   * length that was asked for, so a response with no header at all still
+   * reaches the caller intact.
    */
   private async _readLengthPrefixedResponse(
     cmd: Uint8Array,
     respOpcode: number,
     expectedLen: number,
     label: string,
+    headerBytes = 1,
     ackTimeoutMs = 1500,
     responseTimeoutMs = 2000,
+    expectedOffset?: number,
   ): Promise<Uint8Array> {
     const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs);
     const first =
@@ -886,8 +955,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     /* Bytes after the response opcode. */
     let acc = first[0] === respOpcode ? first.subarray(1) : first;
+
+    /* Whether a header is present is decided by reading it, because a response
+     * without one is a case this client supports (see the loopback test for an
+     * InfoMem reply with no length byte). That check is unavoidably a guess for
+     * a one-byte header: `[6][six bytes]` and `[six bytes beginning 0x06]` are
+     * not distinguishable, and guessing wrong slices real data off the front.
+     *
+     * The three-byte calibration header is not in that position, so it is not
+     * treated as if it were. Its two offset bytes echo the offset that was
+     * requested, and checking them alongside the length turns a coincidence on
+     * one byte into a coincidence on three. Previously only `buf[0]` was
+     * examined and the offset bytes were ignored entirely. */
+    const hasHeader = (buf: Uint8Array): boolean => {
+      if (buf.length < headerBytes || buf[0] !== expectedLen) return false;
+      if (headerBytes >= 3 && expectedOffset !== undefined) {
+        return (buf[1] | (buf[2] << 8)) === expectedOffset;
+      }
+      return true;
+    };
     const dataOf = (buf: Uint8Array): Uint8Array =>
-      buf.length >= 1 && buf[0] === expectedLen ? buf.subarray(1) : buf;
+      hasHeader(buf) ? buf.subarray(headerBytes) : buf;
 
     if (dataOf(acc).length >= expectedLen) {
       return dataOf(acc).slice(0, expectedLen);
@@ -1053,6 +1141,326 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
+  // InfoMem configuration over the radio
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Write one chunk of the device's InfoMem (SET_INFOMEM_COMMAND 0x8C, args
+   * `[len][offsetLo][offsetHi][data…]`), resolving on the firmware's ACK — the
+   * counterpart of {@link readInfoMem}, and the primitive that made configuring
+   * a sensor over the radio possible at all: until this existed the client could
+   * read the configuration image a page at a time and had no way to put one
+   * back.
+   *
+   * `data` is at most 128 bytes, the firmware's own ceiling for the command
+   * (`Comms/shimmer_bt_uart.c:1322-1327`, which also requires
+   * `offset + len <= NV_NUM_RWMEM_BYTES`, 512 on this firmware); a longer chunk
+   * or an out-of-range offset is NACKed rather than truncated. Most callers want
+   * {@link writeInfoMemBytes} or {@link writeInfoMemConfig}, which chunk a whole
+   * image for them; this is the byte-level escape hatch.
+   *
+   * The firmware refuses every SET while it is sensing
+   * (`ShimBt_isCmdBlockedWhileSensing`, 0x8C included), so a write during
+   * streaming or SD logging comes back as a NACK.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3R has taken an InfoMem write over this
+   * transport yet — the command layout is the Java driver's and the firmware's,
+   * but the round trip is unconfirmed.
+   */
+  async writeInfoMem(address: number, data: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
+      throw new Error('InfoMem address must be an integer in 0..65535.');
+    }
+    if (data.length < 1 || data.length > INFOMEM_PAGE_SIZE) {
+      throw new Error(`InfoMem write must be 1..${INFOMEM_PAGE_SIZE} bytes.`);
+    }
+    this._emitStatus(`SET_INFOMEM ${data.length}B @ ${address} → waiting for ACK…`);
+    const cmd = new Uint8Array(4 + data.length);
+    cmd[0] = OPCODES.SET_INFOMEM_COMMAND;
+    cmd[1] = data.length & 0xff;
+    cmd[2] = address & 0xff;
+    cmd[3] = (address >> 8) & 0xff;
+    cmd.set(data, 4);
+    await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('InfoMem write ACKed');
+  }
+
+  /**
+   * Read the whole {@link INFOMEM_SIZE}-byte configuration image in 128-byte
+   * page reads (D → C → B), reassembled in order.
+   *
+   * The page addresses sent depend on the firmware and hardware — legacy MSP430
+   * absolute 0x1800/0x1880/0x1900 versus flat 0/128/256 — and are resolved by
+   * {@link resolveInfoMemLayout} from the device's own version replies, never
+   * hard-coded here. A Shimmer3 on old firmware genuinely addresses its InfoMem
+   * differently from a Shimmer3R, and this client talks to both, so the version
+   * reads that {@link _infoMemCtx} performs are load-bearing rather than
+   * defensive.
+   */
+  async readInfoMemBytes(): Promise<Uint8Array> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    return this._readInfoMemBytesImpl(await this._infoMemCtx());
+  }
+
+  /**
+   * Write a whole {@link INFOMEM_SIZE}-byte configuration image, chunked, each
+   * chunk resolving on its own ACK.
+   *
+   * `opts.chunkBytes` defaults to **64 over a framed (BLE) transport and 128
+   * over an unframed one**. 128 is the firmware's ceiling and the page size the
+   * dock path uses, and it is what a byte stream — classic Bluetooth over
+   * RFCOMM, or the dock UART — carries happily. Over BLE the proven size is 64:
+   * that is what the brand-record write survives on real hardware, where a
+   * 128-byte command has to cross four notifications into a firmware receive
+   * buffer that has overflowed on smaller records before (DEV-802). Pass
+   * `chunkBytes` to override either default.
+   *
+   * Note that 64-byte chunks split each page in two, and the firmware does its
+   * own bookkeeping on a chunk that starts exactly at a page base: writing
+   * offset 0 makes it regenerate the calibration dump from config bytes, and
+   * writing offset 128 makes it overwrite the MAC bytes and (on a Shimmer3R)
+   * regenerate the dump again (`Comms/shimmer_bt_uart.c:1322-1360`). It also
+   * runs `checkAndCorrectConfig` after every chunk, so a page is briefly half
+   * old and half new — the same window the page-at-a-time dock write has
+   * between pages, not a new one.
+   *
+   * Refuses while this client believes it is streaming: the firmware NACKs a
+   * SET mid-stream, and a NACK partway through would leave a half-written image
+   * on the device, which is far worse than not starting.
+   */
+  async writeInfoMemBytes(bytes: Uint8Array, opts: { chunkBytes?: number } = {}): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (bytes.length !== INFOMEM_SIZE) {
+      throw new Error(`writeInfoMemBytes expects ${INFOMEM_SIZE} bytes, got ${bytes.length}`);
+    }
+    this._assertNotSensingForConfigWrite('InfoMem write');
+    return this._writeInfoMemBytesImpl(
+      await this._infoMemCtx(),
+      bytes,
+      this._infoMemChunkBytes(opts.chunkBytes),
+    );
+  }
+
+  /**
+   * Read and decode the device's configuration — {@link readInfoMemBytes}
+   * followed by {@link parseInfoMem} against the same resolved layout, so every
+   * field arrives named rather than as an offset a caller has to know.
+   */
+  async readInfoMemConfig(): Promise<InfoMemDeviceConfig> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const ctx = await this._infoMemCtx();
+    return parseInfoMem(await this._readInfoMemBytesImpl(ctx), ctx);
+  }
+
+  /**
+   * Encode and write a configuration to the device over the radio — the
+   * radio-side counterpart of `WiredShimmerClient.writeInfoMemConfig`, with the
+   * same ordering and the same verify semantics, so a host can offer one
+   * configuration screen for a docked and a connected sensor.
+   *
+   * The image is generated with device-write finalization: the MAC is forced to
+   * all-0xFF and the config-file-creation flag is set, so the firmware re-reads
+   * its MAC from the Bluetooth transceiver and regenerates its SD configuration.
+   *
+   * When `opts.setRtc` (default `true`, matching both the dock client and
+   * desktop Consensys), the real-world clock is written FIRST from the host
+   * time and only then the InfoMem — the order desktop
+   * `CallableWriteConfig.call()` uses (BasicDock.java:1556-1587). An RTC failure
+   * ABORTS the config write rather than being tolerated: the InfoMem write is
+   * not attempted, matching the Java rethrow. Note (DEV-900) that the device
+   * treats the RWC as LOCAL civil time; {@link setRtcTime} carries the detail.
+   *
+   * `opts.verify` (default `true`) re-reads the image afterwards and byte-
+   * compares it against what was sent, EXCLUDING the ranges a device write
+   * legitimately diverges in — the MAC the firmware overwrites and the
+   * config-delay/config-file-creation flag byte it rewrites
+   * ({@link deviceWriteDivergentRanges}). Returns `{ verified: boolean }`, or
+   * `{ verified: null }` when verification was not attempted.
+   *
+   * Refuses before writing anything if this client believes it is streaming.
+   *
+   * HARDWARE-VERIFY: that the device accepts the write, applies it, and
+   * regenerates its SD configuration can only be confirmed on real hardware.
+   */
+  async writeInfoMemConfig(
+    config: InfoMemDeviceConfig,
+    opts: { verify?: boolean; setRtc?: boolean } = {},
+  ): Promise<{ verified: boolean | null }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._assertNotSensingForConfigWrite('Configuration write');
+    const ctx = await this._infoMemCtx();
+    // (1) RTC first, exactly as desktop CallableWriteConfig orders it. A
+    //     rejection here propagates, so nothing is written to the InfoMem.
+    if (opts.setRtc ?? true) await this.setRtcTime(Date.now());
+    // (2) the chunked image write.
+    const bytes = generateInfoMem(config, ctx, { base: config.raw, forDeviceWrite: true });
+    await this._writeInfoMemBytesImpl(ctx, bytes, this._infoMemChunkBytes());
+    if (!(opts.verify ?? true)) return { verified: null };
+    const readback = await this._readInfoMemBytesImpl(ctx);
+    const verified = compareInfoMemExcluding(bytes, readback, deviceWriteDivergentRanges(ctx));
+    this._emitStatus(`Configuration write ${verified ? 'verified' : 'MISMATCHED on read-back'}`);
+    return { verified };
+  }
+
+  /**
+   * Ask the firmware to regenerate its SD-card configuration file from the
+   * current InfoMem (UPD_SDLOG_CFG_COMMAND 0x9C, no arguments, ACK only).
+   *
+   * A configuration write updates the InfoMem the firmware samples with; the
+   * text configuration file on the SD card, which a later offline analysis
+   * reads to learn what the recording was configured as, is only rewritten when
+   * the firmware is told to. Call this after {@link writeInfoMemConfig} when the
+   * sensor will record to its card, so the card and the InfoMem agree.
+   *
+   * NACKed while sensing, like every other SET.
+   */
+  async updateSdLogConfig(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._assertNotSensingForConfigWrite('SD configuration update');
+    this._emitStatus('UPD_SDLOG_CFG → waiting for ACK…');
+    await this._writeExpectingAck(new Uint8Array([OPCODES.UPD_SDLOG_CFG_COMMAND]), 1500);
+    this._emitStatus('SD log configuration regenerated from InfoMem');
+  }
+
+  /**
+   * Ask the firmware to apply its in-RAM calibration dump to its configuration
+   * bytes and SD header, and to persist it (UPD_CALIB_DUMP_COMMAND 0x9B, no
+   * arguments, ACK only).
+   *
+   * This is what makes a {@link writeCalibDump} take effect. The firmware also
+   * applies a dump by itself the moment the bytes it has received add up to the
+   * length the dump's own header declared
+   * (`ShimCalib_ramWrite`, `Calibration/shimmer_calibration.c:330-370`), so on a
+   * complete write this is a re-apply rather than the only trigger — which is
+   * exactly why it is worth sending: it is also the way to apply a dump whose
+   * declared length the host did not finish delivering.
+   *
+   * NACKed while sensing.
+   */
+  async updateCalibDump(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._assertNotSensingForConfigWrite('Calibration dump update');
+    this._emitStatus('UPD_CALIB_DUMP → waiting for ACK…');
+    await this._writeExpectingAck(new Uint8Array([OPCODES.UPD_CALIB_DUMP_COMMAND]), 1500);
+    this._emitStatus('Calibration dump applied to configuration bytes');
+  }
+
+  /**
+   * Build the InfoMem layout context from the device's own version replies.
+   *
+   * Both reads are cached on the client (and cleared on reconnect), so asking
+   * for it costs at most one round trip each per connection — cheap enough that
+   * every InfoMem entry point can ask rather than making callers remember to
+   * call {@link readDeviceVersion} first, which is the dock client's contract
+   * only because a dock caches an identity for a slot.
+   */
+  private async _infoMemCtx(): Promise<InfoMemContext> {
+    const dv = await this.readDeviceVersion();
+    const fv = await this.readFwVersion();
+    return {
+      hardwareVersion: dv.hardwareVersion,
+      firmwareId: fv.fwId,
+      // `patch` is the Java driver's `firmwareVersionInternal` — the third
+      // component of the version, not a separate field.
+      firmwareVersion: { major: fv.major, minor: fv.minor, internal: fv.patch },
+    };
+  }
+
+  /**
+   * Chunk size for an InfoMem write: the caller's value when given, else 64 on
+   * a framed (BLE) transport and the firmware's full 128 on a byte stream.
+   * See {@link writeInfoMemBytes} for why the BLE default is lower.
+   */
+  private _infoMemChunkBytes(requested?: number): number {
+    if (requested !== undefined) {
+      if (!Number.isInteger(requested) || requested < 1 || requested > INFOMEM_PAGE_SIZE) {
+        throw new Error(`chunkBytes must be an integer in 1..${INFOMEM_PAGE_SIZE}.`);
+      }
+      return requested;
+    }
+    return this._unframed ? INFOMEM_PAGE_SIZE : SHIMMER3R_INFOMEM_BLE_CHUNK_BYTES;
+  }
+
+  /**
+   * Refuse a configuration write while this client believes it is streaming.
+   *
+   * The firmware would NACK it (`ShimBt_isCmdBlockedWhileSensing`), and a NACK
+   * arriving partway through a chunked write leaves a half-written image on the
+   * device. A named refusal also reads far better than the ACK timeout the same
+   * situation used to produce.
+   *
+   * The guard is **only** as good as `_streaming`, which tracks the streams
+   * this client started. The firmware blocks configuration writes for anything
+   * it considers sensing, SD logging included, and this client holds no local
+   * SD-logging flag — `readStatus()` is the only way to learn about a log
+   * started before it connected or by another host. So a write can still be
+   * refused by the device after passing this check; that refusal arrives as a
+   * NACK and is reported as one. The message says as much rather than implying
+   * the check covers both.
+   */
+  /**
+   * Refuse a configuration write the firmware would reject anyway.
+   *
+   * Covers what this client started, streaming or streaming-plus-SD-logging,
+   * since both set the same flag. It cannot cover a recording the client did
+   * not start — one begun with the sensor's own button, or by a scheduled
+   * trial — because no local flag is set for those; there the device NACKs the
+   * write, which surfaces as a failure rather than as this refusal.
+   * {@link getStatus} reports the sensor's actual sensing and SD-logging state
+   * for a caller that wants to know before trying.
+   */
+  private _assertNotSensingForConfigWrite(what: string): void {
+    if (this._streaming) {
+      throw new Error(
+        `${what} is unavailable while this client is streaming — the firmware ` +
+          'refuses every configuration write while the sensor is sensing. Call ' +
+          'stopStreaming(), or stopStreamingAndLogging() if the recording was ' +
+          'started with startStreamingAndLogging(), which sets the same flag.',
+      );
+    }
+  }
+
+  /** Paged InfoMem read (D → C → B) against an already-resolved context. */
+  private async _readInfoMemBytesImpl(ctx: InfoMemContext): Promise<Uint8Array> {
+    const layout = resolveInfoMemLayout(ctx);
+    const pageAddrs = [layout.addrD, layout.addrC, layout.addrB];
+    const out = new Uint8Array(INFOMEM_SIZE);
+    for (let i = 0; i < pageAddrs.length; i++) {
+      const chunk = await this.readInfoMem(pageAddrs[i], INFOMEM_PAGE_SIZE);
+      if (chunk.length < INFOMEM_PAGE_SIZE) {
+        throw new Error(
+          `InfoMem page ${i} short read: expected ${INFOMEM_PAGE_SIZE} bytes, got ${chunk.length}`,
+        );
+      }
+      out.set(chunk.subarray(0, INFOMEM_PAGE_SIZE), i * INFOMEM_PAGE_SIZE);
+    }
+    return out;
+  }
+
+  /**
+   * Chunked InfoMem write against an already-resolved context.
+   *
+   * Addresses advance flat from the D-page base rather than being taken per
+   * page, which is correct for both address bases because the three pages are
+   * contiguous in each (0/128/256, and 0x1800/0x1880/0x1900). With the default
+   * 128-byte chunk this reproduces the dock client's page-at-a-time write
+   * exactly.
+   */
+  private async _writeInfoMemBytesImpl(
+    ctx: InfoMemContext,
+    bytes: Uint8Array,
+    chunkBytes: number,
+  ): Promise<void> {
+    const base = resolveInfoMemLayout(ctx).addrD;
+    for (let off = 0; off < INFOMEM_SIZE; off += chunkBytes) {
+      const end = Math.min(off + chunkBytes, INFOMEM_SIZE);
+      await this.writeInfoMem(base + off, bytes.subarray(off, end));
+    }
+    this._emitStatus(`InfoMem image written (${INFOMEM_SIZE}B in ${chunkBytes}B chunks)`);
+  }
+
+  // ---------------------------------------------------------------------------
   // Real-world clock (RWC)
   // ---------------------------------------------------------------------------
 
@@ -1116,67 +1524,201 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // ExG configuration helpers
+  // ExG (ADS1292R) live configuration — GET / SET / preset apply
+  //
+  // Codec-driven port of the Java ExG BT command flow
+  // (ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration, :4014-4226),
+  // replacing the hardcoded 16-bit-only preset instruction arrays this section
+  // used to carry. The register banks now come from the shared, transport-free
+  // codec in `../exg/` and the GET/SET framing from `../exg/live.ts`, so
+  // Shimmer3R and classic Shimmer3 share one definition of both.
   // ---------------------------------------------------------------------------
 
-  /** Enable EMG (ADS1292R) in 16-bit mode on EXG1 & EXG2. */
+  /**
+   * Read both ExG chips' 10-byte register banks over the radio
+   * (GET_EXG_REGS ×2 → EXG_REGS_RESPONSE decode). Ported from
+   * ShimmerBluetooth.readEXGConfigurations, which issues one GET for CHIP1 then
+   * one for CHIP2 (ShimmerBluetooth.java:4014-4018).
+   *
+   * @throws Error when not connected, or while streaming — the read-back needs
+   *   the control plane, which the data plane owns for the duration of a stream.
+   */
+  async readExgConfig(timeoutMs = 2000): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
+    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
+    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    return { exg1, exg2 };
+  }
+
+  /**
+   * Read one chip's bank. EXG_REGS_RESPONSE is `[0x62][count][reg0..reg9]` — the
+   * byte after the opcode is the register COUNT the firmware is returning, which
+   * it echoes from the request (`*(resPacket + packet_length++) = exgLength`,
+   * `log-and-stream-common/Comms/shimmer_bt_uart.c:2227-2229`). That is the same
+   * length-prefixed shape as an InfoMem or daughter-card read, so this reuses
+   * {@link _readLengthPrefixedResponse} and inherits its ACK-piggyback handling,
+   * notification reassembly, and tolerance of firmware that omits the prefix.
+   */
+  private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
+    return this._readLengthPrefixedResponse(
+      buildGetExgRegsCommand(chip),
+      OPCODES.EXG_REGS_RESPONSE,
+      EXG_BANK_LENGTH,
+      `ExG chip ${chip + 1} register read`,
+      1,
+      1500,
+      timeoutMs,
+    );
+  }
+
+  /**
+   * Write both ExG chips' 10-byte register banks over the radio
+   * (SET_EXG_REGS ×2), then read them back and verify.
+   *
+   * Ports ShimmerBluetooth.writeEXGConfiguration (:4222-4226) — one 14-byte
+   * instruction per chip — with the Shimmer3R-specific oversampling-ratio
+   * injection into REG1 (see {@link _injectOversamplingRatio}).
+   *
+   * WRITE-SAFETY DEVIATION FROM JAVA: the Java driver fires SET_EXG_REGS and does
+   * not verify, relying on a timeout→disconnect failsafe if the write silently
+   * fails (ShimmerBluetooth.java:4212-4216; the register array is cached
+   * driver-side on the bare ACK, :2132). The safer flow is ported instead:
+   * SET → await ACK → GET read-back → compare, ignoring only the read-only REG8
+   * status byte → throw on mismatch. A bad or no-op write therefore surfaces here
+   * rather than as a puzzling disconnect later.
+   *
+   * @throws Error when not connected, while streaming, or on a read-back mismatch.
+   * @throws RangeError when either bank is not exactly 10 bytes.
+   */
+  async writeExgConfig(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot write ExG registers while streaming');
+    if (exg1.length !== EXG_BANK_LENGTH || exg2.length !== EXG_BANK_LENGTH) {
+      throw new RangeError(
+        `ExG register banks must be exactly ${EXG_BANK_LENGTH} bytes each, got ${exg1.length}/${exg2.length}.`,
+      );
+    }
+
+    const b1 = this._injectOversamplingRatio(exg1);
+    const b2 = this._injectOversamplingRatio(exg2);
+
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP1, b1), 1500);
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP2, b2), 1500);
+
+    const readBack = await this.readExgConfig();
+    if (
+      !exgBanksEqualIgnoringStatus(b1, readBack.exg1) ||
+      !exgBanksEqualIgnoringStatus(b2, readBack.exg2)
+    ) {
+      throw new Error(
+        'ExG write read-back mismatch: device registers do not match what was written',
+      );
+    }
+    this._emitStatus('ExG registers written and verified.');
+  }
+
+  /**
+   * Shimmer3R-only: overwrite REG1's (bank byte 0) low 3 bits with the ADS1292R
+   * oversampling ratio for the current sampling rate. This reproduces exactly
+   * what the previous `_writeExgPages` did — `exg[4] = ((exg[4] >> 3) << 3) |
+   * ratio`, where byte 4 of the old 14-byte instruction was register byte 0 — and
+   * keeps using {@link getOversamplingRatioADS1292R} rather than the codec's
+   * `exgRateSettingFromFreq`. The two disagree on purpose: this one uses strict
+   * `<` thresholds (calibration.ts:89, the live-BT path) where the docked
+   * InfoMem/config-generation path uses `<=` (SensorEXG.setExGRateFromFreq), so
+   * they differ at exactly the boundary rates. Classic Shimmer3 does neither —
+   * ShimmerBluetooth.writeEXGConfiguration writes reg[0] verbatim (:4224).
+   */
+  private _injectOversamplingRatio(bank: Uint8Array): Uint8Array {
+    const ratio = getOversamplingRatioADS1292R(this.samplingRateHz);
+    const out = new Uint8Array(bank);
+    out[0] = (((out[0] >> 3) << 3) | ratio) & 0xff;
+    return out;
+  }
+
+  /**
+   * Apply an ExG preset live: derive the register banks and the enabled-sensors
+   * bitmap from the client's current inquiry state (sampling rate, enabled
+   * sensors) via the codec's `applyExgPreset`, write the registers, then update
+   * the bitmap.
+   *
+   * ORDER: ExG registers first, enabled sensors LAST. The desktop write flow
+   * marks `writeEnabledSensors(...)` "this should always be the last command"
+   * (ShimmerBluetooth.java:2732,2735) and runs `writeEXGConfiguration()` earlier
+   * in the same flow (:2670). {@link setSensors} re-inquires, so the streaming
+   * schema and `enabledSensors` end up reflecting the new preset.
+   */
+  async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot configure ExG while streaming');
+
+    // 'off' — LIVE disable. Java never pushes zeroed register banks at the chip:
+    // the ADS1292R forces its must-be bits on write (CONFIG2 bit7 = 1 etc.,
+    // ExGConfigBytesDetails.java:507-525), so a zeroed SET would read back
+    // non-zero and fail the verify in writeExgConfig. The disable is done purely
+    // by dropping the ExG bits from the enabled-sensors bitmap
+    // (writeEnabledSensors, ShimmerBluetooth.java:2732,2735; the ExG register
+    // read/write only run while ExG stays enabled, :2670,4014-4018). The DOCKED
+    // path (`applyExgPreset('off')`) does zero the InfoMem banks — InfoMem is
+    // passive storage, and that is what detectExgPreset keys 'off' off.
+    if (preset === 'off') {
+      await this.setSensors(clearExgResolutionFlags(this.enabledSensors));
+      this._emitStatus("ExG preset 'off' applied (ExG chips disabled). Schema updated.");
+      return;
+    }
+
+    // Seeded from the device's current banks so that the oscillator-clock
+    // PRESERVE path is honoured on hardware whose joined-clock state cannot be
+    // inferred from the hardware id (a classic Shimmer3 with a rev >= 4 unified
+    // ExG board). On a Shimmer3R the banks are fully determined by the preset.
+    const current = await this.readExgConfig();
+    const result = applyExgPreset(
+      {
+        exg1: current.exg1,
+        exg2: current.exg2,
+        enabledSensors: this.enabledSensors,
+        samplingRateHz: this.samplingRateHz,
+        hardwareVersion: HW_ID.SHIMMER_3R,
+      },
+      preset,
+      resolution,
+    );
+
+    await this.writeExgConfig(result.exg1, result.exg2);
+    // Enabled sensors last; setSensors re-inquires and refreshes the schema.
+    await this.setSensors(result.enabledSensors);
+    this._emitStatus(`ExG preset '${preset}' (${resolution}) applied. Schema updated.`);
+  }
+
+  /**
+   * Enable EMG (ADS1292R) in 16-bit mode.
+   *
+   * Thin wrapper over {@link applyExgPresetLive} so the preset bytes have exactly
+   * one source (`EXG_PRESET_ARRAYS` in `../exg/presets.ts`). NOTE that, following
+   * the Java driver, the EMG preset powers chip 2 down and so enables the chip-1
+   * resolution flag ONLY (SensorEXG.setExgChannelBitsPerMode, :2162-2182); the
+   * hardcoded version of this helper enabled both chips' 16-bit flags and
+   * streamed two channels of powered-down noise.
+   */
   async enableEMG16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20, 0x00, 0x00, 0x02, 0x03,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0xe1, 0xe1, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('EMG 16-bit enabled on EXG1 & EXG2. Schema updated.');
+    await this.applyExgPresetLive('emg', '16bit');
   }
 
-  /** Enable EXG test signal in 16-bit mode (useful for verifying ExG hardware). */
+  /**
+   * Enable the ExG test signal in 16-bit mode (useful for verifying ExG hardware).
+   * Thin wrapper over {@link applyExgPresetLive} — see {@link enableEMG16Bit}.
+   */
   async enableEXGTestSignal16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xab, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa3, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('EXG test signal 16-bit enabled. Schema updated.');
+    await this.applyExgPresetLive('test-signal', '16bit');
   }
 
-  /** Enable ECG in 16-bit mode on EXG1 & EXG2. */
+  /**
+   * Enable ECG in 16-bit mode on EXG1 & EXG2.
+   * Thin wrapper over {@link applyExgPresetLive} — see {@link enableEMG16Bit}.
+   */
   async enableECG16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x40, 0x40, 0x2d, 0x00, 0x00, 0x02, 0x03,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0x40, 0x47, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('ECG 16-bit enabled on EXG1 & EXG2. Schema updated.');
-  }
-
-  private async _writeExgPages(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
-    const oversamplingRatio = getOversamplingRatioADS1292R(this.samplingRateHz);
-    exg1 = new Uint8Array(exg1);
-    exg2 = new Uint8Array(exg2);
-    exg1[4] = (((exg1[4] >> 3) << 3) | oversamplingRatio) & 0xff;
-    exg2[4] = (((exg2[4] >> 3) << 3) | oversamplingRatio) & 0xff;
-
-    await this._write(exg1);
-    await new Promise<void>((r) => setTimeout(r, 200));
-    await this._write(exg2);
-    await new Promise<void>((r) => setTimeout(r, 50));
-
-    const targetBits =
-      (SensorBitmapShimmer3.SENSOR_EXG1_16BIT | SensorBitmapShimmer3.SENSOR_EXG2_16BIT) >>> 0;
-    const newMask = ((this.enabledSensors >>> 0) | targetBits) & 0xffffff;
-    await this.setSensors(newMask);
+    await this.applyExgPresetLive('ecg', '16bit');
   }
 
   // ---------------------------------------------------------------------------
@@ -1266,6 +1808,146 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const block = rsp.subarray(1, 22);
     const scale = getGroupDefaults('shimmer3r', group)?.sensitivityScale ?? 1;
     return parseKinematicCalibBlock(block, { sensitivityScale: scale });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Calibration dump over the radio
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read the device's whole calibration dump (GET_CALIB_DUMP_COMMAND 0x9A →
+   * `[0x99][len][offsetLo][offsetHi][data…]`), paged, and return both the raw
+   * bytes and the parsed {@link CalibDump}.
+   *
+   * The dump is the device's own record of every per-sensor calibration it
+   * holds — sensor id, range, when it was calibrated, and the 21-byte block
+   * itself — which is more than {@link readCalibration} can learn from the
+   * per-sensor GET commands: those return a block with no provenance, so a host
+   * cannot tell a factory calibration from a default the firmware seeded.
+   *
+   * The dump's own length is the first thing read: the first two payload bytes
+   * at offset 0 are a little-endian u16 and the total size is that value **+ 2**
+   * (the length field is not counted in it), so this reads 128 bytes, takes the
+   * total from the header, and pages the remainder. A length of 0 or one beyond
+   * {@link MAX_CALIB_DUMP_BYTES} is rejected rather than paged after — an
+   * unprovisioned or corrupt header would otherwise ask the host to walk 64 kB
+   * of nothing.
+   *
+   * HARDWARE-VERIFY: unexercised against a real Shimmer3R. The chunked read
+   * sequence is ported from the Java driver's `readMem(GET_CALIB_DUMP_COMMAND…)`
+   * (ShimmerBluetooth.java:4450-4453) and matches the firmware handler, but the
+   * round trip is unconfirmed — which is why {@link readCalibration} still
+   * prefers the per-sensor commands for streaming calibration.
+   */
+  async readCalibDump(): Promise<{ bytes: Uint8Array; dump: CalibDump }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const head = await this._readCalibDumpChunk(0, CALIB_DUMP_CHUNK_BYTES);
+    if (head.length < 2) {
+      throw new Error(`Calibration dump header too short (${head.length} bytes).`);
+    }
+    // +2: the u16 length field counts the bytes AFTER itself
+    // (`ShimCalib_ramWrite`, Calibration/shimmer_calibration.c:346-349).
+    const total = u16le(head, 0) + 2;
+    if (total <= 2 || total > MAX_CALIB_DUMP_BYTES) {
+      throw new Error(
+        `Calibration dump reports an implausible length (${total} bytes); ` +
+          `expected 3..${MAX_CALIB_DUMP_BYTES}. The device's calibration memory ` +
+          'is probably unprovisioned.',
+      );
+    }
+    const bytes = new Uint8Array(total);
+    bytes.set(head.subarray(0, Math.min(head.length, total)), 0);
+    for (let off = head.length; off < total; off += CALIB_DUMP_CHUNK_BYTES) {
+      const len = Math.min(CALIB_DUMP_CHUNK_BYTES, total - off);
+      const chunk = await this._readCalibDumpChunk(off, len);
+      if (chunk.length < len) {
+        throw new Error(
+          `Calibration dump short read at offset ${off}: expected ${len} bytes, got ${chunk.length}`,
+        );
+      }
+      bytes.set(chunk.subarray(0, len), off);
+    }
+    const dump = parseCalibDump(bytes);
+    this._emitStatus(`Calibration dump: ${total}B, ${dump.records.length} record(s)`);
+    return { bytes, dump };
+  }
+
+  /**
+   * Write a calibration dump (SET_CALIB_DUMP_COMMAND 0x98, args
+   * `[len][offsetLo][offsetHi][data…]`), chunked from offset 0, each chunk
+   * resolving on its ACK, then — unless `opts.update` is `false` — apply it with
+   * {@link updateCalibDump}.
+   *
+   * Writing must start at offset 0 and run forward: the firmware takes the
+   * total length from the header bytes of the FIRST chunk and counts the
+   * remainder in ("starting with offset > 2 is not accepted",
+   * `Calibration/shimmer_calibration.c:343-346`), so an out-of-order write is
+   * silently discarded — and discarded without a NACK, since the handler
+   * ignores `ShimCalib_ramWrite`'s failure return. Chunk size follows the same
+   * rule as {@link writeInfoMemBytes}: 64 over BLE, 128 over a byte stream.
+   *
+   * A dump written here is NOT the last word on the device's calibration: the
+   * firmware regenerates its dump FROM the configuration bytes whenever InfoMem
+   * page D (or, on a Shimmer3R, page C) is written
+   * (`Comms/shimmer_bt_uart.c:1345-1360`), so a later
+   * {@link writeInfoMemConfig} supersedes it. Write the dump after the
+   * configuration, not before.
+   *
+   * Refuses while streaming; the firmware NACKs a SET while sensing.
+   *
+   * HARDWARE-VERIFY: unexercised against real hardware.
+   */
+  async writeCalibDump(
+    bytes: Uint8Array,
+    opts: { update?: boolean; chunkBytes?: number } = {},
+  ): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (bytes.length < 3 || bytes.length > MAX_CALIB_DUMP_BYTES) {
+      throw new Error(
+        `Calibration dump must be 3..${MAX_CALIB_DUMP_BYTES} bytes, got ${bytes.length}.`,
+      );
+    }
+    this._assertNotSensingForConfigWrite('Calibration dump write');
+    const chunkBytes = this._infoMemChunkBytes(opts.chunkBytes);
+    for (let off = 0; off < bytes.length; off += chunkBytes) {
+      const chunk = bytes.subarray(off, Math.min(off + chunkBytes, bytes.length));
+      const cmd = new Uint8Array(4 + chunk.length);
+      cmd[0] = OPCODES.SET_CALIB_DUMP_COMMAND;
+      cmd[1] = chunk.length & 0xff;
+      cmd[2] = off & 0xff;
+      cmd[3] = (off >> 8) & 0xff;
+      cmd.set(chunk, 4);
+      this._emitStatus(`SET_CALIB_DUMP ${chunk.length}B @ ${off} → waiting for ACK…`);
+      await this._writeExpectingAck(cmd, 1500);
+    }
+    this._emitStatus(`Calibration dump written (${bytes.length}B in ${chunkBytes}B chunks)`);
+    if (opts.update ?? true) await this.updateCalibDump();
+  }
+
+  /**
+   * One GET_CALIB_DUMP round trip. The reply carries a 3-byte
+   * `[len][offsetLo][offsetHi]` header before its payload — the firmware echoes
+   * the request back — so the shared length-prefixed reader is told to skip
+   * three rather than one.
+   */
+  private async _readCalibDumpChunk(offset: number, length: number): Promise<Uint8Array> {
+    const cmd = new Uint8Array([
+      OPCODES.GET_CALIB_DUMP_COMMAND,
+      length & 0xff,
+      offset & 0xff,
+      (offset >> 8) & 0xff,
+    ]);
+    this._emitStatus(`GET_CALIB_DUMP ${length}B @ ${offset} → waiting for ACK then RSP…`);
+    return this._readLengthPrefixedResponse(
+      cmd,
+      OPCODES.RSP_CALIB_DUMP_COMMAND,
+      length,
+      'Calibration dump read',
+      3,
+      1500,
+      2000,
+      offset,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1404,77 +2086,46 @@ export class Shimmer3RClient extends BaseShimmerClient {
     };
   }
 
+  /**
+   * Which generation's channel table this client uses to decode a packet.
+   *
+   * Read from the cached DEVICE_VERSION_RESPONSE when the host has asked for it
+   * ({@link readDeviceVersion}); `'shimmer3r'` otherwise, because that is what
+   * this client is named for and what its default transport connects to.
+   *
+   * The default is not always harmless. This client also drives a classic
+   * Shimmer3 over an RFCOMM byte stream (the two platforms share this command
+   * set), and the two generations disagree about the width of the
+   * pressure/temperature channels — a Shimmer3 sends 2 big-endian bytes of
+   * temperature where a Shimmer3R sends 3 little-endian ones, and reverses the
+   * order of the pair. So call `readDeviceVersion()` before `inquiry()` on any
+   * link that might be a Shimmer3; `inquiry()` deliberately does not send that
+   * command itself, to keep the schema rebuild after `setSensors()` a single
+   * round trip. When the generation is assumed *and* the channel list contains a
+   * channel that depends on it, the schema says so (`trusted === false`) and a
+   * status message names the channels.
+   */
+  get generation(): ShimmerGeneration {
+    return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) ?? 'shimmer3r';
+  }
+
+  /** True when {@link generation} is this SDK's default rather than the device's answer. */
+  get generationIsAssumed(): boolean {
+    return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) === null;
+  }
+
   private _buildSchemaFromChannels(channelIds: number[], timestampFmt: TimestampFmt): StreamSchema {
-    const fields: ChannelField[] = [];
-    const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
-    let packetSize = 1 + ts.sizeBytes; // 1 = preamble 0x00
-    let enabledSensors = 0;
-
-    for (const id of channelIds) {
-      const fmt = CHANNEL_FORMATS[id];
-      if (!fmt) {
-        fields.push({ id, name: `CH_${hex2(id)}`, fmt: 'i16', endian: 'le', sizeBytes: 2 });
-        packetSize += 2;
-        continue;
-      }
-      fields.push({ id, ...fmt });
-      packetSize += fmt.sizeBytes ?? 2;
-
-      switch (id) {
-        case 0x00:
-        case 0x01:
-        case 0x02:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_A_ACCEL;
-          break;
-        case 0x04:
-        case 0x05:
-        case 0x06:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_D_ACCEL;
-          break;
-        case 0x14:
-        case 0x15:
-        case 0x16:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
-          break;
-        case 0x07:
-        case 0x08:
-        case 0x09:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_MAG;
-          break;
-        case 0x0a:
-        case 0x0b:
-        case 0x0c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GYRO;
-          break;
-        case 0x12:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_INT_A1;
-          break;
-        case 0x1c:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_GSR;
-          break;
-        case 0x23:
-        case 0x24:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
-          break;
-        case 0x25:
-        case 0x26:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
-          break;
-        case 0x1e:
-        case 0x1f:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
-          break;
-        case 0x21:
-        case 0x22:
-          enabledSensors |= SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
-          break;
-        default:
-          console.warn(`⚠️ Unmapped channel ID 0x${id.toString(16)} — added as generic i16.`);
-      }
-    }
-
-    this.enabledSensors = enabledSensors;
-    return { timestampFmt, fields, frameBytes: packetSize, enabledSensors, dataPreambleByte: 0x00 };
+    const schema = buildStreamSchema(channelIds, timestampFmt, {
+      generation: this.generation,
+      generationAssumed: this.generationIsAssumed,
+      dataPreambleByte: 0x00,
+      // Schema problems have to reach the host, not just the schema object: a
+      // guessed width shifts every later channel in the frame, and the decode
+      // fails silently rather than throwing.
+      onProblem: (m) => this._emitStatus(`⚠️ ${m}`),
+    });
+    this.enabledSensors = schema.enabledSensors;
+    return schema;
   }
 
   // ---------------------------------------------------------------------------
@@ -1705,11 +2356,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
-        if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) return;
-        if (chunk[0] === expectedOpcode) {
+        // The expected opcode first, so a reply is never mistaken for framing;
+        // then the same message with a stray ACK stepped over. Resolving with
+        // the stripped buffer is what lets every caller keep reading its reply
+        // from offset 0.
+        const msg = chunk[0] === expectedOpcode ? chunk : withoutLeadingAck(chunk);
+        if (msg[0] === expectedOpcode) {
           clearTimeout(t);
           this._offTemp(handler);
-          resolve(chunk);
+          resolve(msg);
         }
       };
       this._onTemp(handler);
@@ -1735,6 +2390,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   ): Promise<Uint8Array> {
     const matches = (c: Uint8Array): boolean =>
       c.length >= 2 + payloadLen && c[0] === OPCODES.INSTREAM_CMD_RESPONSE && c[1] === subOpcode;
+    /** The instream message a chunk carries, past any stray ACK in front. */
+    const message = (c: Uint8Array): Uint8Array =>
+      c[0] === OPCODES.INSTREAM_CMD_RESPONSE ? c : withoutLeadingAck(c);
 
     // BLE packs [0xFF][0x8A][0x71]… into a single notification, so the reply may
     // already be sitting in the ACK's remainder — the same synchronous hand-over
@@ -1753,10 +2411,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }, timeoutMs);
 
       const handler = (chunk: Uint8Array): void => {
-        if (!chunk || !matches(chunk)) return;
+        if (!chunk) return;
+        const msg = message(chunk);
+        if (!matches(msg)) return;
         clearTimeout(t);
         this._offTemp(handler);
-        resolve(chunk);
+        resolve(msg);
       };
       this._onTemp(handler);
     });

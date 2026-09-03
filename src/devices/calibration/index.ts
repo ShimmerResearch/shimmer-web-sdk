@@ -23,6 +23,7 @@ export type { ImuFamily, InertialGroup, GroupDefaults } from './defaults.js';
 export {
   parseCalibDump,
   generateCalibDump,
+  MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
 } from './dump.js';

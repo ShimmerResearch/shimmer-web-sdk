@@ -28,12 +28,15 @@ import type { InfoMemContext, InfoMemDeviceConfig } from './types.js';
 import { parseInfoMem, INFOMEM_SAMPLING_CLOCK_FREQ } from './parse.js';
 import {
   BIT_SHIFT,
+  COMPOSITE_MSB_SHIFT,
   CONFIG_TIME_BIT_SHIFTS,
   CONFIG_TIME_LENGTH,
   EXG_BANK_LENGTH,
+  GENERAL_CALIBRATION_LENGTH,
   INFOMEM_SIZE,
   MAC_LENGTH,
   MASK,
+  MAX_SYNC_NODES,
   NAME_LENGTH,
   resolveInfoMemLayout,
   type InfoMemLayout,
@@ -220,6 +223,203 @@ function writeModelledFields(
     out[layout.idxSDMyTrialID] = t.id & 0xff;
     out[layout.idxSDNumOfShimmers] = t.numShimmers & 0xff;
   }
+
+  writeImu(out, config, layout);
+  writeSd(out, config, layout);
+  writeCalibration(out, config, layout);
+  writeSyncNodes(out, config, layout);
+}
+
+/**
+ * IMU rate/range fields into ConfigSetupByte0-5, all read-modify-write so the
+ * unmodelled bits in those bytes (the firmware-only `wrAccelLpModeMsb`, the
+ * MPL bits on Shimmer3, every reserved bit) keep their base value.
+ *
+ * The composite MSB bits (gyro range bit 2, pressure oversampling bit 2) are
+ * written ONLY on Shimmer3R — on Shimmer3 they belong to the MPL region of
+ * ConfigSetupByte4 and must not be disturbed.
+ */
+function writeImu(out: Uint8Array, config: InfoMemDeviceConfig, layout: InfoMemLayout): void {
+  const imu = config.imu;
+
+  // ConfigSetupByte0 — WR accel (LSM303DLHC/LSM303AH/LIS2DW12).
+  setBitField(
+    out,
+    layout.idxConfigSetupByte0,
+    BIT_SHIFT.WR_ACCEL_RATE,
+    MASK.WR_ACCEL_RATE,
+    imu.wrAccelRate,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte0,
+    BIT_SHIFT.WR_ACCEL_RANGE,
+    MASK.WR_ACCEL_RANGE,
+    imu.wrAccelRange,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte0,
+    BIT_SHIFT.WR_ACCEL_LPM,
+    MASK.WR_ACCEL_LPM,
+    imu.wrAccelLpm ? 1 : 0,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte0,
+    BIT_SHIFT.WR_ACCEL_HRM,
+    MASK.WR_ACCEL_HRM,
+    imu.wrAccelHrm ? 1 : 0,
+  );
+
+  // ConfigSetupByte1 — whole byte is the IMU accel+gyro rate.
+  setBitField(out, layout.idxConfigSetupByte1, BIT_SHIFT.IMU_RATE, MASK.IMU_RATE, imu.imuRate);
+
+  // ConfigSetupByte2 — mag range/rate + gyro-range low bits.
+  setBitField(out, layout.idxConfigSetupByte2, BIT_SHIFT.MAG_RANGE, MASK.MAG_RANGE, imu.magRange);
+  setBitField(out, layout.idxConfigSetupByte2, BIT_SHIFT.MAG_RATE, MASK.MAG_RATE, imu.magRate);
+  setBitField(
+    out,
+    layout.idxConfigSetupByte2,
+    BIT_SHIFT.GYRO_RANGE_LSB,
+    MASK.GYRO_RANGE_LSB,
+    imu.gyroRange,
+  );
+
+  // ConfigSetupByte3 — alt/LN accel range + pressure-oversampling low bits.
+  // (GSR range and exp power are written by the caller above.)
+  setBitField(
+    out,
+    layout.idxConfigSetupByte3,
+    BIT_SHIFT.ALT_ACCEL_RANGE,
+    MASK.ALT_ACCEL_RANGE,
+    imu.altAccelRange,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte3,
+    BIT_SHIFT.PRESSURE_OVERSAMPLING_LSB,
+    MASK.PRESSURE_OVERSAMPLING_LSB,
+    imu.pressureOversampling,
+  );
+
+  if (!layout.isShimmer3R) return;
+
+  // ---- Shimmer3R-only: ConfigSetupByte4/5.
+  setBitField(
+    out,
+    layout.idxConfigSetupByte4,
+    BIT_SHIFT.GYRO_RANGE_MSB,
+    MASK.GYRO_RANGE_MSB,
+    imu.gyroRange >> COMPOSITE_MSB_SHIFT,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte4,
+    BIT_SHIFT.PRESSURE_OVERSAMPLING_MSB,
+    MASK.PRESSURE_OVERSAMPLING_MSB,
+    imu.pressureOversampling >> COMPOSITE_MSB_SHIFT,
+  );
+  setBitField(
+    out,
+    layout.idxConfigSetupByte4,
+    BIT_SHIFT.ALT_ACCEL_RATE,
+    MASK.ALT_ACCEL_RATE,
+    imu.altAccelRate,
+  );
+  // ConfigSetupByte5 bits 0-5 (NOT byte 4 — see BIT_SHIFT.ALT_MAG_RATE).
+  setBitField(
+    out,
+    layout.idxConfigSetupByte5,
+    BIT_SHIFT.ALT_MAG_RATE,
+    MASK.ALT_MAG_RATE,
+    imu.altMagRate,
+  );
+}
+
+/** SD interval + big-endian experiment lengths, gated like the Java generate. */
+function writeSd(out: Uint8Array, config: InfoMemDeviceConfig, layout: InfoMemLayout): void {
+  if (!layout.supportsSdLogSync) return;
+  const sd = config.sd;
+  out[layout.idxSDBTInterval] = sd.btInterval & 0xff;
+  out[layout.idxEstimatedExpLengthMsb] = (sd.estimatedExpLengthMin >> 8) & 0xff;
+  out[layout.idxEstimatedExpLengthLsb] = sd.estimatedExpLengthMin & 0xff;
+  out[layout.idxMaxExpLengthMsb] = (sd.maxExpLengthMin >> 8) & 0xff;
+  out[layout.idxMaxExpLengthLsb] = sd.maxExpLengthMin & 0xff;
+}
+
+/**
+ * The 21-byte kinematic calibration blocks, byte-for-byte as modelled — an
+ * identity write unless the caller replaced an array. Blocks shorter than 21
+ * bytes are zero-padded; longer ones are truncated.
+ */
+function writeCalibration(
+  out: Uint8Array,
+  config: InfoMemDeviceConfig,
+  layout: InfoMemLayout,
+): void {
+  const c = config.calibration;
+  setBytes(out, layout.idxAnalogAccelCalibration, calibBlock(c.lnAccel));
+  setBytes(out, layout.idxMPU9150GyroCalibration, calibBlock(c.gyro));
+  setBytes(out, layout.idxLSM303DLHCMagCalibration, calibBlock(c.mag));
+  setBytes(out, layout.idxLSM303DLHCAccelCalibration, calibBlock(c.wrAccel));
+  if (layout.isShimmer3R) {
+    if (c.altAccel) setBytes(out, layout.idxADXL371AltAccelCalibration, calibBlock(c.altAccel));
+    if (c.altMag) setBytes(out, layout.idxLIS3MDLAltMagCalibration, calibBlock(c.altMag));
+  }
+}
+
+/**
+ * Sync-node MAC list into InfoMem B: the listed MACs at `idxNode0 + i*6`, the
+ * remaining slots padded with 0xFF (ShimmerObject.java:5353-5366).
+ *
+ * DELIBERATE DEVIATION: Java additionally blanks the WHOLE list to 0xFF when
+ * `mSyncWhenLogging == 0`. This codec writes the list as modelled, so a
+ * read-change-write cycle cannot silently destroy a stored node list just
+ * because sync happens to be off; a caller that wants the Java behaviour sets
+ * `syncNodes: []`.
+ *
+ * The list is TERMINATED by the first all-0xFF slot — that is where
+ * `parseSyncNodes` stops, and the firmware reads it the same way. So the first
+ * missing, malformed or literally all-0xFF entry ends the list here too, and
+ * every slot after it is padded. Writing a real MAC behind a terminator would
+ * put bytes in the image that no reader can reach, and the list would come
+ * back shorter than it went in.
+ */
+function writeSyncNodes(out: Uint8Array, config: InfoMemDeviceConfig, layout: InfoMemLayout): void {
+  if (!layout.supportsSdLogSync) return;
+  let terminated = false;
+  for (let i = 0; i < MAX_SYNC_NODES; i++) {
+    const offset = layout.idxNode0 + i * MAC_LENGTH;
+    const mac = terminated ? undefined : config.syncNodes[i];
+    // macFromHex already yields all-0xFF for unparseable input, so this one
+    // test covers a bad string and a real FFFFFFFFFFFF alike.
+    const bytes = mac === undefined ? undefined : macFromHex(mac);
+    if (bytes === undefined || bytes.every((b) => b === 0xff)) {
+      terminated = true;
+      for (let b = 0; b < MAC_LENGTH; b++) out[offset + b] = 0xff;
+    } else {
+      setBytes(out, offset, bytes);
+    }
+  }
+}
+
+/** 12-char hex → 6 bytes (UtilShimmer.hexStringToByteArray). Bad input → invalid MAC. */
+function macFromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(MAC_LENGTH).fill(0xff);
+  if (!/^[0-9a-fA-F]{12}$/.test(hex)) return out;
+  for (let i = 0; i < MAC_LENGTH; i++) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** Normalise a calibration block to exactly 21 bytes. */
+function calibBlock(block: Uint8Array): Uint8Array {
+  if (block.length === GENERAL_CALIBRATION_LENGTH) return block;
+  const b = new Uint8Array(GENERAL_CALIBRATION_LENGTH);
+  b.set(block.subarray(0, GENERAL_CALIBRATION_LENGTH), 0);
+  return b;
 }
 
 /**
@@ -257,6 +457,39 @@ export function deviceWriteDivergentRanges(ctx: InfoMemContext): DeviceWriteDive
     mac: { start: layout.idxMacAddress, length: MAC_LENGTH },
     configDelayFlag: { start: layout.idxSDConfigDelayFlag, length: 1 },
   };
+}
+
+/**
+ * Byte-compare `written` against `readback` over the full InfoMem, ignoring the
+ * ranges a device write intentionally leaves diverged — pass
+ * {@link deviceWriteDivergentRanges} for the context that was written.
+ *
+ * This is what makes a write-back verify meaningful. A read-back after a device
+ * write is NEVER byte-identical to what was sent: the firmware overwrites the
+ * MAC bytes with the address it reads from its own Bluetooth transceiver, and
+ * it rewrites the config-delay / config-file-creation flag byte as it
+ * regenerates its SD configuration. Comparing the whole image would therefore
+ * report a mismatch on every successful write, and comparing nothing would
+ * report success on a corrupt one.
+ *
+ * Shared by the dock and radio config-write paths so both draw the exclusion
+ * line in exactly the same place.
+ */
+export function compareInfoMemExcluding(
+  written: Uint8Array,
+  readback: Uint8Array,
+  ranges: DeviceWriteDivergentRanges,
+): boolean {
+  if (written.length !== readback.length) return false;
+  const excluded = new Set<number>();
+  for (const r of [ranges.mac, ranges.configDelayFlag]) {
+    for (let i = 0; i < r.length; i++) excluded.add(r.start + i);
+  }
+  for (let i = 0; i < written.length; i++) {
+    if (excluded.has(i)) continue;
+    if (written[i] !== readback[i]) return false;
+  }
+  return true;
 }
 
 function exgBank(bank: Uint8Array): Uint8Array {

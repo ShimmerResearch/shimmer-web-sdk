@@ -83,7 +83,7 @@ export type {
 // Shimmer3R
 export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
-export { SensorBitmapShimmer3 } from './devices/shimmer3r/SensorBitmap.js';
+export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
 export {
   OPCODES,
@@ -117,8 +117,28 @@ export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.
  */
 export { parseShimmer3StatusBytes } from './devices/shimmer3r/protocol.js';
 export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
-export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
-export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
+export {
+  CHANNEL_FORMATS,
+  CHANNEL_FORMAT_OVERRIDES,
+  UNKNOWN_CHANNEL_ASSUMED_BYTES,
+  isGenerationSensitiveChannel,
+  channelLayoutDiffersByGeneration,
+  channelFormatsFor,
+  resolveChannelFormat,
+  generationFromHardwareVersion,
+} from './devices/shimmer3r/channelFormats.js';
+export type { ChannelFormat, ShimmerGeneration } from './devices/shimmer3r/channelFormats.js';
+/**
+ * The generation-aware stream-schema builder both clients use. `trusted` on the
+ * result says whether the byte offsets can be relied on — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export { buildStreamSchema } from './devices/shimmer3r/streamSchema.js';
+export type {
+  StreamSchemaBase,
+  StreamSchemaField,
+  BuildStreamSchemaOptions,
+} from './devices/shimmer3r/streamSchema.js';
 export {
   calibrateU12AdcValue,
   calibrateShimmer3RAdcChannel,
@@ -233,6 +253,10 @@ export {
   parseShimmer3FwVersionResponse,
   shimmer3UsesThreeByteTimestamp,
   shimmer3ControlMessageLength,
+  // The ShimmerVerObject firmware-capability ladder, and the ExG command gate
+  // the Shimmer3 client applies with it.
+  deriveShimmer3FirmwareVersionCode,
+  shimmer3SupportsExg,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
@@ -386,6 +410,7 @@ export {
   parseInfoMem,
   generateInfoMem,
   deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
   resolveInfoMemLayout,
   checkConfigBytesValid,
   fwCompare,
@@ -410,6 +435,143 @@ export type {
   GenerateInfoMemOptions,
   DeviceWriteDivergentRanges,
 } from './devices/infomem/index.js';
+export {
+  GENERAL_CALIBRATION_LENGTH as INFOMEM_GENERAL_CALIBRATION_LENGTH,
+  MAX_SYNC_NODES as INFOMEM_MAX_SYNC_NODES,
+  BIT_SHIFT as INFOMEM_BIT_SHIFT,
+  MASK as INFOMEM_MASK,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemImuConfig,
+  InfoMemSdConfig,
+  InfoMemCalibrationBlocks,
+} from './devices/infomem/index.js';
+export {
+  SHIMMER3_INFOMEM_FIELD_SCHEMA,
+  SHIMMER3_INFOMEM_FIELD_GROUPS,
+  NEW_IMU_EXP_REV,
+  resolveFieldIndex,
+  readInfoMemFieldValue,
+  writeInfoMemFieldValue,
+  infoMemFieldsFor,
+  inferShimmer3Generation,
+} from './devices/infomem/index.js';
+export type {
+  Shimmer3Generation,
+  InfoMemFieldKind,
+  InfoMemFieldOption,
+  InfoMemFieldDefinition,
+  InfoMemFieldGroup,
+  InfoMemFieldSubgroup,
+} from './devices/infomem/index.js';
+
+// ADS1292R ExG register codec (Shimmer3 / Shimmer3R) — the ECG/EMG/respiration
+// expansion board. The two 10-byte per-chip register banks appear in three
+// places — InfoMem (`exg1`/`exg2`), an SD-log header, and the live GET/SET
+// commands — and this is the one codec for all three: `decodeExgRegisters` /
+// `encodeExgRegisters` for a single bank, `detectExgPreset` to name what a pair
+// of banks is, `applyExgPreset` to build the banks AND the sensor bitmap for a
+// chosen preset, and `updateExgSetting` to change one named knob in place. Ported
+// from the Java driver's SensorEXG / ExGConfigBytesDetails / ShimmerObject ExG
+// accessors, with the driver file:line for every byte value in the source.
+//
+// Resolution (16- vs 24-bit) is NOT a register field: it lives in the enabled-
+// sensors bitmap. Use `exgResolutionFromSensors` to read it back.
+//
+// The clients apply this themselves — `Shimmer3RClient` / `Shimmer3Client`
+// expose `readExgConfig`, `writeExgConfig` and `applyExgPresetLive`; the framing
+// exports below are needed only when driving the radio by hand.
+export {
+  EXG_BANK_LENGTH,
+  decodeExgRegisters,
+  encodeExgRegisters,
+  applyExgMustBeBits,
+  readExgField,
+  setExgFieldPreserving,
+  // Option label lists, verbatim from the Java GUI value lists.
+  CONVERSION_MODE_LABELS,
+  DATA_RATE_LABELS,
+  VOLTAGE_REFERENCE_LABELS,
+  TEST_SIGNAL_FREQUENCY_LABELS,
+  COMPARATOR_THRESHOLD_LABELS,
+  LEAD_OFF_CURRENT_LABELS,
+  LEAD_OFF_FREQUENCY_LABELS,
+  LEAD_OFF_DETECTION_LABELS,
+  GAIN_LABELS,
+  GAIN_VALUES,
+  POWER_DOWN_LABELS,
+  INPUT_SELECTION_LABELS,
+  CHOP_FREQUENCY_LABELS,
+  RESPIRATION_PHASE_32KHZ_LABELS,
+  RESPIRATION_PHASE_64KHZ_LABELS,
+  RESPIRATION_FREQUENCY_LABELS,
+  RESPIRATION_CONTROL_LABELS,
+  RLD_REFERENCE_SIGNAL_LABELS,
+  REFERENCE_ELECTRODE_OPTIONS,
+  // Presets: the driver's reference register arrays, detection, and the apply
+  // side (resolution flags, rate coupling, conflicting-sensor clearing).
+  EXG_PRESET_ARRAYS,
+  exgResolutionFromSensors,
+  detectExgPreset,
+  exgPresetLabel,
+  applyExgPreset,
+  clearExgResolutionFlags,
+  exgConflictingSensors,
+  exgRateSettingFromFreq,
+  EXG_CONFLICTING_SENSORS,
+  // Live GET/SET_EXG_REGS framing and read-back comparison.
+  SET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE,
+  GET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE_PAYLOAD_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  EXG_REG8_STATUS_INDEX,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  decodeExgRegsResponse,
+  exgBanksEqualIgnoringStatus,
+  // Per-knob editing: one named setting at a time, with typed errors.
+  EXG_KNOBS,
+  GAIN_OPTIONS,
+  DATA_RATE_OPTIONS,
+  LEAD_OFF_CURRENT_OPTIONS,
+  LEAD_OFF_COMPARATOR_OPTIONS,
+  LEAD_OFF_DETECTION_OPTIONS,
+  RESPIRATION_FREQUENCY_OPTIONS,
+  respirationPhaseOptions,
+  exgKnobOptions,
+  isExgRespirationEnabled,
+  updateExgSetting,
+  applyExgKnobEdits,
+  readExgKnobs,
+  ExgKnobError,
+  UnknownExgKnobError,
+  ExgKnobValueError,
+  ExgRespirationLockedError,
+} from './devices/exg/index.js';
+export type {
+  ExgFieldValue,
+  ExgGainValue,
+  ExgChannelSettings,
+  ExgLeadOffSettings,
+  ExgRespirationSettings,
+  ExgRldSettings,
+  ExgTestSignalSettings,
+  ExgStatusBits,
+  DecodedExgRegisters,
+  ExgFieldName,
+  ExgPreset,
+  ExgResolution,
+  ExgApplyInput,
+  ExgApplyResult,
+  ApplicableExgPreset,
+  ExgChipIndex,
+  ExgBanks,
+  ExgKnobOption,
+  ExgKnobField,
+  ExgKnobEdit,
+} from './devices/exg/index.js';
 
 // Inertial (accel/gyro/mag) calibration — phase P3
 export {
@@ -424,6 +586,7 @@ export {
   getDefaultCalibration,
   parseCalibDump,
   generateCalibDump,
+  MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
 } from './devices/calibration/index.js';

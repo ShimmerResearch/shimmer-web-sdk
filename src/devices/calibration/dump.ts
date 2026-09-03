@@ -17,6 +17,21 @@
  *          calibLen bytes calibration payload (a 21-byte kinematic block for IMU)
  */
 
+/**
+ * Largest calibration dump a host will accept — `MAX_CALIB_DUMP_MAX`, the
+ * ceiling the Java driver passes to every `readMem`/`writeMem` of the dump
+ * (LiteProtocol.java:128, ShimmerDevice.java:87).
+ *
+ * A dump read starts by trusting a length the device sent, so it needs a bound:
+ * without one, a corrupt or unprovisioned header can ask a host to page
+ * through 65 kB of nothing. The firmware's own calibration RAM is smaller
+ * still — `SHIMMER_CALIB_RAM_MAX` is 1024 bytes on both Shimmer3 and
+ * Shimmer3R (`Calibration/shimmer_calibration.h:16-20`) — so a real device
+ * cannot produce a dump anywhere near this ceiling; it is the Java driver's
+ * number, kept so the two implementations reject the same inputs.
+ */
+export const MAX_CALIB_DUMP_BYTES = 4096;
+
 /** One record parsed from a calibration dump. */
 export interface CalibDumpRecord {
   sensorId: number;
