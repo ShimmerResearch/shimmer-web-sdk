@@ -368,7 +368,7 @@ export function deriveShimmer3FirmwareVersionCode(
  * Whether this firmware carries the live ExG GET/SET register commands — the
  * gate the Java driver applies before every ExG read and write:
  * `(getFirmwareVersionInternal() >= 8 && getFirmwareVersionCode() == 2) ||
- * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4015,4025,4204,4222).
+ * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4015,4026,4205,4223).
  *
  * `firmwareVersionCode == 2` is exactly classic-Shimmer3 BtStream in
  * [0.2.0, 0.3.0), which only gained the ExG commands at internal 8 — hence the

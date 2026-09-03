@@ -4,7 +4,7 @@
  * Pure port of the Java oracle:
  *   - preset register arrays : SensorEXG.setDefault... / setEXG... (the commented
  *     reference byte arrays in SensorEXG.java:1782-1783 ECG, 1813-1814 EMG,
- *     1845 test, 1872-1873 respiration, 1921-1922 custom)
+ *     1845-1846 test, 1872-1873 respiration, 1921-1922 custom)
  *   - preset detection       : SensorEXG.isEXGUsingDefault*
  *     (SensorEXG.java:2680-2763), invoked in the order
  *     Respiration → ECG → EMG → TestSignal → Custom

@@ -29,7 +29,7 @@ export const GET_EXG_REGS_COMMAND = 0x63;
  * Number of payload bytes AFTER the {@link EXG_REGS_RESPONSE} opcode for a
  * full-bank read. The Java driver declares this response length as 11
  * (ShimmerBluetooth.java:468) and reads exactly 11 bytes (`readBytes(11, …)`,
- * ShimmerBluetooth.java:1641).
+ * ShimmerBluetooth.java:1642).
  *
  * The 11 bytes are `[count][reg0..reg9]`. Payload byte 0 is the number of
  * registers the firmware is returning, echoed back from the request — the
@@ -38,7 +38,7 @@ export const GET_EXG_REGS_COMMAND = 0x63;
  * and Shimmer3R trees) — which makes the response length-prefixed and, since
  * this SDK only ever asks for a whole 10-register bank, always 11 here. The
  * driver ignores that byte and copies the registers from offset 1
- * (`System.arraycopy(bufferAns, 1, …, 0, 10)`, ShimmerBluetooth.java:1645-1652),
+ * (`System.arraycopy(bufferAns, 1, …, 0, 10)`, ShimmerBluetooth.java:1646-1651),
  * because the chip identity is tracked host-side from the preceding GET
  * instruction rather than read back from the response
  * (`mTempChipID = insBytes[1]`, ShimmerBluetooth.java:1087-1089).
@@ -58,7 +58,7 @@ export type ExgChipIndex = typeof EXG_CHIP1 | typeof EXG_CHIP2;
  * `{0x63, chipID, 0, 10}` — read 10 registers starting at offset 0.
  * Byte-for-byte port of ShimmerBluetooth.readEXGConfigurations
  * (`writeInstruction(new byte[]{GET_EXG_REGS_COMMAND,(byte)(chipID.ordinal()),0,10})`,
- * ShimmerBluetooth.java:4023).
+ * ShimmerBluetooth.java:4027).
  */
 export function buildGetExgRegsCommand(chip: ExgChipIndex): Uint8Array {
   return new Uint8Array([GET_EXG_REGS_COMMAND, chip, 0, EXG_BANK_LENGTH]);
@@ -70,7 +70,7 @@ export function buildGetExgRegsCommand(chip: ExgChipIndex): Uint8Array {
  * bytes fit one instruction, never chunked). Byte-for-byte port of
  * ShimmerBluetooth.writeEXGConfiguration
  * (`writeInstruction(new byte[]{SET_EXG_REGS_COMMAND,(byte)(chipID.ordinal()),0,10,reg[0]..reg[9]})`,
- * ShimmerBluetooth.java:4220).
+ * ShimmerBluetooth.java:4224).
  *
  * @throws RangeError when `bank` is not exactly 10 bytes.
  */
@@ -94,7 +94,7 @@ export function buildSetExgRegsCommand(chip: ExgChipIndex, bank: Uint8Array): Ui
  *
  * The frame is `[0x62][count][reg0..reg9]` (opcode + {@link EXG_REGS_RESPONSE_PAYLOAD_LENGTH}
  * payload bytes). Mirrors the Java `System.arraycopy(bufferAns, 1, …, 0, 10)`
- * (ShimmerBluetooth.java:1645): the byte immediately after the opcode is the
+ * (ShimmerBluetooth.java:1646): the byte immediately after the opcode is the
  * register count, which the driver ignores, and the 10 register bytes follow.
  *
  * @param frame the complete response including the leading 0x62 opcode.

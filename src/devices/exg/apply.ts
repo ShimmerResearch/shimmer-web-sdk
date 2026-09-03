@@ -160,7 +160,7 @@ export type ApplicableExgPreset = 'ecg' | 'emg' | 'test-signal' | 'respiration' 
  * all-zero write would fail read-back — it simply drops the EXG bits from the
  * enabled-sensors bitmap and re-writes that (writeEnabledSensors is "always the
  * last command", ShimmerBluetooth.java:2732,2735; readEXGConfigurations /
- * writeEXGConfiguration only run while EXG stays enabled, :2670,4010-4014). The
+ * writeEXGConfiguration only run while EXG stays enabled, :2670,4014-4018). The
  * live `applyExgPresetLive('off')` path uses this instead of {@link applyExgPreset}
  * so it never writes — nor read-back-verifies — a zeroed bank. See the docked-vs-
  * live asymmetry note on {@link applyExgPreset} step (2).

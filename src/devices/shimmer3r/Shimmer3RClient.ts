@@ -1477,7 +1477,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // ExG (ADS1292R) live configuration — GET / SET / preset apply
   //
   // Codec-driven port of the Java ExG BT command flow
-  // (ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration, :4010-4227),
+  // (ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration, :4014-4226),
   // replacing the hardcoded 16-bit-only preset instruction arrays this section
   // used to carry. The register banks now come from the shared, transport-free
   // codec in `../exg/` and the GET/SET framing from `../exg/live.ts`, so
@@ -1488,7 +1488,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Read both ExG chips' 10-byte register banks over the radio
    * (GET_EXG_REGS ×2 → EXG_REGS_RESPONSE decode). Ported from
    * ShimmerBluetooth.readEXGConfigurations, which issues one GET for CHIP1 then
-   * one for CHIP2 (ShimmerBluetooth.java:4010-4014).
+   * one for CHIP2 (ShimmerBluetooth.java:4014-4018).
    *
    * @throws Error when not connected, or while streaming — the read-back needs
    *   the control plane, which the data plane owns for the duration of a stream.
@@ -1526,13 +1526,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Write both ExG chips' 10-byte register banks over the radio
    * (SET_EXG_REGS ×2), then read them back and verify.
    *
-   * Ports ShimmerBluetooth.writeEXGConfiguration (:4200-4227) — one 14-byte
+   * Ports ShimmerBluetooth.writeEXGConfiguration (:4222-4226) — one 14-byte
    * instruction per chip — with the Shimmer3R-specific oversampling-ratio
    * injection into REG1 (see {@link _injectOversamplingRatio}).
    *
    * WRITE-SAFETY DEVIATION FROM JAVA: the Java driver fires SET_EXG_REGS and does
    * not verify, relying on a timeout→disconnect failsafe if the write silently
-   * fails (ShimmerBluetooth.java:4028-4034; the register array is cached
+   * fails (ShimmerBluetooth.java:4212-4216; the register array is cached
    * driver-side on the bare ACK, :2132). The safer flow is ported instead:
    * SET → await ACK → GET read-back → compare, ignoring only the read-only REG8
    * status byte → throw on mismatch. A bad or no-op write therefore surfaces here
@@ -1578,7 +1578,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * `<` thresholds (calibration.ts:89, the live-BT path) where the docked
    * InfoMem/config-generation path uses `<=` (SensorEXG.setExGRateFromFreq), so
    * they differ at exactly the boundary rates. Classic Shimmer3 does neither —
-   * ShimmerBluetooth.writeEXGConfiguration writes reg[0] verbatim (:4220).
+   * ShimmerBluetooth.writeEXGConfiguration writes reg[0] verbatim (:4224).
    */
   private _injectOversamplingRatio(bank: Uint8Array): Uint8Array {
     const ratio = getOversamplingRatioADS1292R(this.samplingRateHz);
@@ -1609,7 +1609,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // non-zero and fail the verify in writeExgConfig. The disable is done purely
     // by dropping the ExG bits from the enabled-sensors bitmap
     // (writeEnabledSensors, ShimmerBluetooth.java:2732,2735; the ExG register
-    // read/write only run while ExG stays enabled, :2670,4010-4014). The DOCKED
+    // read/write only run while ExG stays enabled, :2670,4014-4018). The DOCKED
     // path (`applyExgPreset('off')`) does zero the InfoMem banks — InfoMem is
     // passive storage, and that is what detectExgPreset keys 'off' off.
     if (preset === 'off') {

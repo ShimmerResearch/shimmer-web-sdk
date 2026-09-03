@@ -539,7 +539,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   // ExG (ADS1292R) live configuration — GET / SET / preset apply
   //
   // The same LiteProtocol ExG command flow as Shimmer3R, ported from
-  // ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration (:4010-4227)
+  // ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration (:4014-4226)
   // and sharing the register codec and GET/SET framing in `../exg/`. Classic
   // Shimmer3 differs from the 3R in two respects: it writes the register banks
   // VERBATIM — the oversampling-ratio injection into REG1 is 3R-only, Java writes
@@ -551,7 +551,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Assert this device's firmware has the live ExG GET/SET commands, so an ExG
    * call on firmware without them fails immediately instead of hanging until the
    * response timeout. Applies the Java gate via {@link shimmer3SupportsExg}
-   * (ShimmerBluetooth.java:4015,4025,4204,4222), which derives the firmware
+   * (ShimmerBluetooth.java:4015,4026,4205,4223), which derives the firmware
    * version code from the parsed FW version plus the hardware id exactly as
    * ShimmerVerObject does. Old BtStream (code 1, or code 2 below internal 8) is
    * rejected up front.
@@ -613,7 +613,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    *
    * WRITE-SAFETY DEVIATION FROM JAVA: Java applies SET_EXG_REGS immediately and
    * does not verify, relying on a timeout→disconnect failsafe
-   * (ShimmerBluetooth.java:4211-4217). The safer flow is ported instead: SET →
+   * (ShimmerBluetooth.java:4212-4216). The safer flow is ported instead: SET →
    * await ACK → GET read-back → compare, ignoring only the read-only REG8 status
    * byte → throw on mismatch.
    *
