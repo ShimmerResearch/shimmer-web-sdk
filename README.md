@@ -285,6 +285,76 @@ ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
   per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
   confirm the port enumeration / which is which on the target platform.
 
+## Factory Self-Test (Shimmer3 / Shimmer3R)
+
+`runFactoryTest` asks the sensor to run the suite its firmware runs on the
+production line, and returns the report it prints. It is available on
+`Shimmer3RClient` (BLE and classic Bluetooth) and on `WiredShimmerClient`
+(dock UART, and a Shimmer3R's USB-C port).
+
+```js
+import {
+  SHIMMER3_FACTORY_TEST_TYPE,
+  SHIMMER3_FACTORY_TEST_TYPES,
+  parseShimmerFactoryTestReport,
+} from './dist/shimmer-web-sdk.esm.js';
+
+// SHIMMER3_FACTORY_TEST_TYPES describes all four suites — label, expected
+// duration, default timeout, and whether that suite prints a verdict at all.
+const report = await client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.MAIN, {
+  onLine: (line) => console.log(line), // shown as it prints, not at the end
+});
+
+const parsed = parseShimmerFactoryTestReport(report);
+console.log(parsed.overall.result, parsed.overall.failedTestNames);
+```
+
+Three things make this command unlike the others in this SDK, and a host has
+to be built for them:
+
+- **The report is raw text on the same link.** The firmware acknowledges the
+  command and then prints, with no opcode, no length and no CRC. The client
+  diverts those bytes ahead of its framer for the duration; nothing else needs
+  to know.
+- **Nothing else may be sent meanwhile.** The firmware's main loop is blocked
+  for the whole suite — up to about seventy seconds for the LED-state
+  walk-through — so every other command rejects with a `FactoryTestError` whose
+  `reason` is `busy` until the run ends.
+- **There is no abort command.** `opts.signal` stops the client listening; the
+  sensor keeps printing to its own end. The run therefore enters a `draining`
+  state, and the link is only free once `whenFactoryTestIdle()` resolves:
+
+```js
+const ctl = new AbortController();
+const run = client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.LED_STATES, {
+  signal: ctl.signal,
+});
+ctl.abort();
+await run.catch(() => {}); // rejects at once…
+await client.whenFactoryTestIdle(); // …but the sensor is still printing
+```
+
+`factoryTestState` and `onFactoryTestStateChange` report `idle` / `running` /
+`draining`, which is what a user interface needs to keep its own gating honest.
+The firmware refuses the command outright while the sensor is streaming or
+recording (`reason: 'nack'`).
+
+`parseShimmerFactoryTestReport` reads both families: Shimmer3R reports carry
+`S3R_TEST_00NN` ids, Shimmer3 reports carry none at all and are named from
+their line content. `parseVerisenseFactoryTestReport` shares the same core and
+returns the same shape.
+
+### Red LED
+
+`toggleLed()` flips the firmware's red-LED override — the "which sensor is
+this one" aid, which holds the lower LED solid red above the sensor's own
+indications. The firmware never clears the flag, so it survives a disconnect
+until it is toggled again or the sensor loses power. Because the command is a
+toggle with no "set", `setRedLed(on)` reads status bit 7 either side of it,
+writes nothing when the LED is already as asked, and throws rather than
+reporting success if the sensor's flag does not follow. Bluetooth only: the
+dock protocol has no LED command.
+
 ## Building
 
 ```bash
