@@ -1959,6 +1959,30 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus('START_STREAM ACK received; frames should follow');
   }
 
+  /**
+   * Stop streaming (STOP_STREAMING_COMMAND 0x20), best-effort: the command goes
+   * out and the state is cleared without waiting for the ACK the firmware sends
+   * back.
+   *
+   * Not waiting is deliberate. Stream packets keep arriving for hundreds of ms
+   * after the stop, and the framed path routes a notification to its ACK branch
+   * on the first byte alone — so with an ACK outstanding a residual frame that
+   * happened to begin 0xFF would be taken for the ACK and its tail forwarded to
+   * the control plane, which is how a stray 0xFE fabricates a NACK and a stray
+   * 0x02 frames a bogus inquiry. A notification is not frame-aligned, which is
+   * why the stream parser resyncs on a double preamble, so that first byte can
+   * be anything. `Shimmer3Client.stopStreaming` answers the same problem the
+   * long way, draining to quiescence before it re-enables the control plane;
+   * over BLE, where a notification is already one whole message, simply not
+   * waiting is enough — and it costs nothing against firmware that does not
+   * ACK a stop mid-stream at all.
+   *
+   * The price is that the ACK is still in flight when the next command goes
+   * out, and `_expectingAck` counts rather than queues, so it is spent on that
+   * command. {@link withoutLeadingAck} is what keeps that from costing the
+   * command its own reply — read it before making this wait for the ACK after
+   * all.
+   */
   override async stopStreaming(): Promise<void> {
     this._emitStatus('STOP_STREAM → sending (no ACK wait)…');
     try {
@@ -1991,7 +2015,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
   }
 
-  /** Stop streaming AND SD card logging. */
+  /**
+   * Stop streaming AND SD card logging (STOP_SDBT_COMMAND 0x97), best-effort
+   * and without waiting for its ACK, for the reasons {@link stopStreaming}
+   * gives.
+   */
   async stopStreamingAndLogging(): Promise<void> {
     this._emitStatus('STOP_BT_STREAM_SD_LOGGING → sending…');
     try {
