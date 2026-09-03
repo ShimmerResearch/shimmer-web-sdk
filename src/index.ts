@@ -122,6 +122,7 @@ export {
   CHANNEL_FORMAT_OVERRIDES,
   UNKNOWN_CHANNEL_ASSUMED_BYTES,
   isGenerationSensitiveChannel,
+  channelLayoutDiffersByGeneration,
   channelFormatsFor,
   resolveChannelFormat,
   generationFromHardwareVersion,
