@@ -106,7 +106,9 @@ function allZero(bank: Uint8Array): boolean {
  * checks (SensorEXG.java:2680-2763): it keys only off the CH1/CH2
  * input-selection nibbles (byte3/byte4 low nibble) plus the chip-2 respiration
  * modulation/demodulation bits, and — when {@link enabledSensors} is supplied
- * — the resolution flags. It does NOT compare the full byte arrays, so the
+ * — the resolution flags. (Respiration is the exception: it keys off the
+ * respiration bits and the resolution flags only, never the nibbles — see
+ * below.) It does NOT compare the full byte arrays, so the
  * fields the firmware rewrites (the data-rate/oversampling bits in byte0, the
  * oscillator-clock bit in byte1, PGA gain, etc.) do not affect the result.
  * This is why the 16-bit-only hardcoded 3R preset arrays — which differ from
@@ -123,6 +125,18 @@ function allZero(bank: Uint8Array): boolean {
  * (ShimmerObject.java:1791-1820): respiration shares the ECG input selections
  * and is distinguished only by its modulation/demodulation bits, so it must be
  * tested first.
+ *
+ * **Respiration is detected on those two bits alone**, without looking at the
+ * input-selection nibbles — so a bank that enables the respiration circuitry
+ * over some other input selection is reported as 'respiration' rather than
+ * 'custom'. That is deliberate, and it is what the oracle does: the driver's
+ * `isEXGUsingDefaultRespirationConfiguration` (SensorEXG.java:1871-1884) tests
+ * both chips' resolution flags and the chip-2 modulation and demodulation bits,
+ * and the line that would also have required the ECG input selections is
+ * commented out in its source. Tightening it here would be worse than the
+ * looseness: a sensor that Consensys calls a respiration configuration would
+ * then be called 'custom' by this SDK, and the point of this codec is that the
+ * two agree about the same device.
  *
  * @throws RangeError when either bank is not exactly 10 bytes.
  */

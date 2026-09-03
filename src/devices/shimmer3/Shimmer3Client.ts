@@ -572,8 +572,15 @@ export class Shimmer3Client extends BaseShimmerClient {
       );
       throw new Error(
         `ExG register commands are not supported by this firmware ` +
-          `(v${major}.${minor}.${internal}, firmware code ${code}); ` +
-          `ExG requires LogAndStream (any), BtStream >= 0.2.8, or firmware code >= 3.`,
+          `(v${major}.${minor}.${internal}, firmware code ${code}). ` +
+          `They need a firmware code of 3 or more — which every LogAndStream ` +
+          `build, every Shimmer3R, BtStream 0.3.0 and later, and SDLog reach — ` +
+          `or code 2 with an internal version of 8 or more (BtStream 0.2.8 to ` +
+          `0.2.x).` +
+          (code === -1
+            ? ' A code of -1 means the reported version matched no known ' +
+              'release, so it is refused whatever the firmware calls itself.'
+            : ''),
       );
     }
   }
