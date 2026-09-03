@@ -60,7 +60,11 @@ export type {
   FieldKind,
   InertialCalibration,
 } from './core/types.js';
-export { csvCell } from './core/csv.js';
+// CSV emission for decoded frames. Fix the column set once with
+// `objectClusterColumns`, then project every frame with `objectClusterRow`: a
+// per-frame column set shifts cells the moment a frame's field list differs.
+export { csvCell, csvRow, objectClusterColumns, objectClusterRow } from './core/csv.js';
+export type { ObjectClusterColumn, ObjectClusterColumnOptions } from './core/csv.js';
 export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
 export type {
   RtcDriftSampleInput,
@@ -103,6 +107,16 @@ export {
   SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
 } from './devices/shimmer3r/streamFraming.js';
+/** Per-platform length input the STATUS_RESPONSE span needs (Shimmer3R 2 bytes, Shimmer3 1). */
+export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
+/**
+ * Decode a STATUS_RESPONSE payload — what the sensor is doing right now
+ * (docked / sensing / logging / streaming / SD present / RTC set). Shared by
+ * both families: `Shimmer3RClient.getStatus` and the unsolicited pushes the
+ * firmware sends when any of those change.
+ */
+export { parseShimmer3StatusBytes } from './devices/shimmer3r/protocol.js';
+export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
 export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
 export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
 export {
@@ -227,6 +241,56 @@ export type {
   Shimmer3DeviceVersion,
   Shimmer3FwVersion,
 } from './devices/shimmer3/protocol.js';
+
+// Configuration option tables for both Shimmer3 families, ported verbatim from
+// the Java driver (labels AND config values — several are register encodings
+// that are neither contiguous nor monotonic). A table belongs to a chip, not a
+// platform: pick the pair matching the hardware you are configuring.
+export {
+  SHIMMER3_LSM6DSV_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM6DSV_GYRO_RANGE_OPTIONS,
+  SHIMMER3_LSM6DSV_ACCEL_GYRO_RATE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RATE_HPM_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
+  SHIMMER3_ADXL371_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LIS2MDL_MAG_RATE_OPTIONS,
+  SHIMMER3_LIS2MDL_MAG_RANGE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RATE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RANGE_OPTIONS,
+  SHIMMER3_BMP390_PRESSURE_OVERSAMPLING_OPTIONS,
+  SHIMMER3_BMP390_PRESSURE_RATE_OPTIONS,
+  SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS,
+  SHIMMER3_BMP581_PRESSURE_RATE_OPTIONS,
+  SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
+  SHIMMER3_BMP280_PRESSURE_RESOLUTION_OPTIONS,
+  SHIMMER3_GSR_RANGE_RESISTANCE_OPTIONS,
+  SHIMMER3_GSR_RANGE_CONDUCTANCE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_LSM303AH_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303AH_MAG_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_GYRO_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_MAG_RATE_OPTIONS,
+  SHIMMER3_BT_BAUD_RATE_OPTIONS,
+  SHIMMER3_SAMPLING_RATES_HZ,
+  samplingRateToDivisor,
+  divisorToSamplingRate,
+  SHIMMER3_SENSOR_LABELS,
+  shimmer3SensorLabel,
+} from './devices/shimmer3/sensorOptions.js';
+export type {
+  Shimmer3SensorOption,
+  Shimmer3SensorLabel,
+} from './devices/shimmer3/sensorOptions.js';
 
 // Wired / dock UART (Shimmer docked in a BasicDock/Base)
 export { WiredShimmerClient } from './devices/dock/WiredShimmerClient.js';

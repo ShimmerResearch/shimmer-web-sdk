@@ -17,8 +17,24 @@ import {
   nudgeGsrResistance,
   getOversamplingRatioADS1292R,
 } from './calibration.js';
-import { concatU8, u16le, u16be, u24le, u24be, sign16, sign24, hex2 } from './protocol.js';
-import { msToRtcBytesLE } from '../dock/protocol.js';
+import {
+  concatU8,
+  u16le,
+  u16be,
+  u24le,
+  u24be,
+  sign16,
+  sign24,
+  hex2,
+  parseShimmer3StatusBytes,
+  type Shimmer3DeviceStatus,
+} from './protocol.js';
+import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
+import {
+  parseShimmer3DeviceVersionResponse,
+  type Shimmer3DeviceVersion,
+} from '../shimmer3/protocol.js';
+import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC } from '../../core/framing.js';
@@ -175,6 +191,39 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _unframed = false;
   /** Re-framing accumulator, used only when {@link _unframed}. */
   private _ctrlBuf: Uint8Array = new Uint8Array(0);
+  /**
+   * How many bytes a STATUS_RESPONSE payload carries: 2 on a Shimmer3R, 1 on a
+   * Shimmer3 (`STATUS_BYTE_COUNT`, log-and-stream-common
+   * `Comms/shimmer_bt_uart.h:259-263`). Assumed 2 until
+   * {@link readDeviceVersion} says otherwise, and handed to the framer so a
+   * byte stream splits the message in the right place.
+   */
+  private _statusPayloadBytes: 1 | 2 = 2;
+  /**
+   * Non-zero while a {@link getStatus} round trip is outstanding, so its answer
+   * is not also reported as an unsolicited push. Counted rather than flagged:
+   * two callers may be awaiting at once.
+   */
+  private _statusReadsInFlight = 0;
+
+  /**
+   * How many status payload bytes a STATUS_RESPONSE must carry before it is
+   * worth parsing.
+   *
+   * Once {@link readDeviceVersion} has answered, {@link _statusPayloadBytes} is
+   * a contract — the firmware sends exactly that many — so a shorter message is
+   * a truncated one, not a shorter platform. Parsing it anyway would report
+   * `usbPluggedIn: null`, which means "this hardware has no such field" and NOT
+   * "the byte did not arrive"; the caller cannot tell those apart, so the
+   * shorter message must not be surfaced as a status at all.
+   *
+   * Before the platform is known the 2 is only a guess biased towards this
+   * client's namesake, so demanding it would reject — or time out on — the
+   * perfectly valid one-byte status a Shimmer3 sends.
+   */
+  private get _minStatusPayloadBytes(): 1 | 2 {
+    return this._deviceVersionCache ? this._statusPayloadBytes : 1;
+  }
 
   // Cached device configuration
   enabledSensors = 0x000000;
@@ -210,6 +259,28 @@ export class Shimmer3RClient extends BaseShimmerClient {
     ((info: ReturnType<Shimmer3RClient['_interpretInquiryResponseShimmer3R']>) => void) | null =
     null;
   onExpPowerChanged: ((expPower: number) => void) | null = null;
+
+  /**
+   * Invoked for a STATUS_RESPONSE the host did not ask for. The firmware pushes
+   * one whenever docking, SD logging, streaming or the USB rail changes
+   * (`ShimBt_instreamStatusRespSend`, log-and-stream-common
+   * `Comms/shimmer_bt_uart.c:2445-2469`), so this is how a host learns the user
+   * pressed the button or seated the sensor in a dock.
+   *
+   * The answer to a {@link getStatus} call is NOT delivered here — that would
+   * report every state twice.
+   *
+   * A push whose payload is short of the connected platform's status length is
+   * dropped (with a debug log) rather than parsed, so `usbPluggedIn: null` here
+   * always means "a Shimmer3, which has no such field" and never "the byte went
+   * missing". See {@link readDeviceVersion} for how that length is learnt.
+   *
+   * **Only fires while idle.** Once streaming, every inbound byte belongs to the
+   * data plane and goes to the schema parser, which has no way to tell a status
+   * push from sample bytes and will consume it. Do not rely on this callback to
+   * notice that a recording stopped mid-stream; poll {@link getStatus} instead.
+   */
+  onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
 
   constructor(opts: Shimmer3RClientOptions = {}) {
     super(opts);
@@ -268,6 +339,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._ctrlBuf = new Uint8Array(0);
     // The firmware's SD session counter restarts with the connection
     this._sdKnownSession = null;
+    // Both version caches describe the device at the far end of the link, so a
+    // reconnect — possibly to a different sensor — must not inherit them.
+    this._fwVersionCache = null;
+    this._deviceVersionCache = null;
+    this._statusPayloadBytes = 2;
+    this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
@@ -304,6 +381,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   override async disconnect(): Promise<void> {
+    // Application-initiated teardown is not a fault, so `onDisconnect` stays
+    // silent — including when this call is the cleanup that follows a drop.
+    this._suppressDisconnectNotification();
     try {
       this._notifyUnsub?.();
       this._disconnectUnsub?.();
@@ -326,11 +406,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
-  /** Handle an unexpected / requested transport disconnect. */
-  private _handleTransportDisconnect = (): void => {
+  /** Handle an unexpected transport disconnect (the link dropped under us). */
+  private _handleTransportDisconnect = (reason?: Error): void => {
     this._streaming = false;
     this._sdKnownSession = null;
     this._emitStatus('Device disconnected');
+    this._emitDisconnect(reason);
   };
 
   // ---------------------------------------------------------------------------
@@ -375,6 +456,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         } else {
           this._log('Forwarding non-DATA remainder to control handlers');
           this._emitTemp(this._lastAckRemainder);
+          this._maybeEmitDeviceStatus(this._lastAckRemainder);
         }
         this._lastAckRemainder = null;
       }
@@ -386,6 +468,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._rxBuf = concatU8(this._rxBuf, chunk);
     } else {
       this._emitTemp(chunk);
+      this._maybeEmitDeviceStatus(chunk);
       if (chunk.length && chunk[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, chunk);
       }
@@ -400,6 +483,53 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
   };
+
+  /**
+   * Surface a STATUS_RESPONSE nobody asked for on {@link onDeviceStatus}.
+   *
+   * Called for control-plane messages only, so it never sees stream data — and
+   * so a push that lands mid-stream is lost to the schema parser instead, as
+   * {@link onDeviceStatus} documents.
+   */
+  private _maybeEmitDeviceStatus(chunk: Uint8Array): void {
+    if (!this.onDeviceStatus) return;
+    // A push carries the ACK prefix when the firmware's
+    // `useAckPrefixForInstreamResponses` flag is on
+    // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), so step over one if it is
+    // there. On a byte stream the drain has already split the ACK off, but over
+    // BLE it shares the notification.
+    const at = chunk[0] === OPCODES.ACK_COMMAND_PROCESSED ? 1 : 0;
+    if (chunk[at] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
+    if (chunk[at + 1] !== OPCODES.STATUS_RESPONSE) return;
+    // Somebody's answer, not news: `getStatus` reports it to its own caller.
+    if (this._statusReadsInFlight > 0) return;
+    // The payload must be ALL there, not merely started. A guard of `at + 3`
+    // let a push with one status byte through on a two-byte platform, and the
+    // parser then reported `usbPluggedIn: null` — indistinguishable, to the
+    // caller, from a Shimmer3 that has no such field.
+    const need = this._minStatusPayloadBytes;
+    if (chunk.length < at + 2 + need) {
+      // Dropped rather than surfaced: nobody asked for this message, so there
+      // is no caller waiting to be failed, and inventing a status is worse than
+      // missing one the firmware will push again on the next change. Logged
+      // because a short push means the framing is wrong, which is exactly the
+      // kind of thing whoever turned `debug` on is looking for.
+      this._log(
+        'Dropping truncated STATUS push:',
+        chunk.length - at - 2,
+        'payload byte(s), need',
+        need,
+      );
+      return;
+    }
+    try {
+      this.onDeviceStatus(
+        parseShimmer3StatusBytes(chunk.subarray(at + 2, at + 2 + this._statusPayloadBytes)),
+      );
+    } catch (e) {
+      this._log('onDeviceStatus handler error', e);
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Unframed (byte-stream) transports
@@ -431,6 +561,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * The framer, told which platform is answering. Only STATUS_RESPONSE's length
+   * depends on that, and only this client knows it.
+   */
+  private _controlMessageLength(buf: Uint8Array): number {
+    return shimmer3rControlMessageLength(buf, { statusPayloadBytes: this._statusPayloadBytes });
+  }
+
+  /**
    * Pull every complete message out of {@link _ctrlBuf}, leaving the incomplete
    * tail behind. Extraction is finished before anything is dispatched so a
    * handler can never observe a half-updated buffer.
@@ -452,7 +590,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         break;
       }
 
-      const len = shimmer3rControlMessageLength(buf);
+      const len = this._controlMessageLength(buf);
       if (len === NEED_MORE) break;
       if (len === RESYNC) {
         this._log(`serial resync: dropping unframeable byte 0x${buf[0].toString(16)}`);
@@ -472,7 +610,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // response handler, and be dropped. Two ACKs are never merged: the second
       // would masquerade as the first's response body.
       if (msg.length === 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED && this._expectingAck > 0) {
-        const nextLen = shimmer3rControlMessageLength(buf);
+        const nextLen = this._controlMessageLength(buf);
         if (
           nextLen !== NEED_MORE &&
           nextLen !== RESYNC &&
@@ -1522,6 +1660,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
+        // A NACK is the firmware's answer, so stop waiting for one that is not
+        // coming. Several commands are refused outright while the device is
+        // sensing (`ShimBt_isCmdBlockedWhileSensing`), and "NACK received" says
+        // that; "ACK timeout" a second and a half later reads as a dead link.
+        // Only reachable while a command is in flight — this handler is
+        // registered for exactly that window — so a stray 0xFE cannot fabricate
+        // one, and stream bytes never reach the control fan-out at all.
+        if (chunk[0] === OPCODES.NACK_COMMAND_PROCESSED) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          reject(new Error('NACK received'));
+          return;
+        }
         if (chunk.length === 1 && chunk[0] === OPCODES.ACK_COMMAND_PROCESSED) {
           clearTimeout(t);
           this._offTemp(handler);
@@ -1565,6 +1716,52 @@ export class Shimmer3RClient extends BaseShimmerClient {
     });
   }
 
+  /**
+   * Await an instream response — one of the messages the firmware answers
+   * behind the shared `[0x8A]` prefix, where the byte after it selects the
+   * message rather than the leading opcode.
+   *
+   * @param subOpcode   The byte after 0x8A (STATUS_RESPONSE, VBATT_RESPONSE …).
+   * @param payloadLen  Minimum payload the message must carry to count, so a
+   *   truncated one is waited past rather than parsed. A *minimum*, not an
+   *   exact length: a Shimmer3 sends one status byte where a Shimmer3R sends
+   *   two, and a caller that has not yet asked which it is talking to must not
+   *   time out on the shorter answer.
+   */
+  private _waitForInstreamResponse(
+    subOpcode: number,
+    payloadLen: number,
+    timeoutMs = 1500,
+  ): Promise<Uint8Array> {
+    const matches = (c: Uint8Array): boolean =>
+      c.length >= 2 + payloadLen && c[0] === OPCODES.INSTREAM_CMD_RESPONSE && c[1] === subOpcode;
+
+    // BLE packs [0xFF][0x8A][0x71]… into a single notification, so the reply may
+    // already be sitting in the ACK's remainder — the same synchronous hand-over
+    // `_waitForResponse` performs for a plain opcode. Without this the message
+    // has been and gone by the time the waiter registers.
+    const rem = this._lastAckRemainder;
+    if (rem && matches(rem)) {
+      this._lastAckRemainder = null;
+      return Promise.resolve(rem);
+    }
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        reject(new Error(`Instream response 0x${hex2(subOpcode)} timeout`));
+      }, timeoutMs);
+
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || !matches(chunk)) return;
+        clearTimeout(t);
+        this._offTemp(handler);
+        resolve(chunk);
+      };
+      this._onTemp(handler);
+    });
+  }
+
   private _onTemp(fn: (chunk: Uint8Array) => void): void {
     this._temps.add(fn);
   }
@@ -1587,6 +1784,127 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _fwVersionCache: { fwId: number; major: number; minor: number; patch: number } | null =
     null;
+  private _deviceVersionCache: Shimmer3DeviceVersion | null = null;
+
+  /**
+   * Read (and cache) the hardware version via GET_DEVICE_VERSION_COMMAND
+   * (0x3F → `[0x25][hw]`). 3 = Shimmer3, 10 = Shimmer3R.
+   *
+   * Worth asking even though this client is named for the Shimmer3R: the two
+   * platforms share this firmware and this command set, so a Shimmer3 reached
+   * over classic Bluetooth answers here too — and answers some commands with
+   * fewer bytes than a Shimmer3R does (see {@link getStatus}). Cached, so the
+   * gating call sites can ask freely.
+   */
+  async readDeviceVersion(): Promise<Shimmer3DeviceVersion> {
+    if (this._deviceVersionCache) return this._deviceVersionCache;
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const cmd = new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const rsp =
+      ackRemainder && ackRemainder[0] === OPCODES.DEVICE_VERSION_RESPONSE
+        ? ackRemainder
+        : await this._waitForResponse(OPCODES.DEVICE_VERSION_RESPONSE, 1500);
+    if (rsp.length < 2) throw new Error('short DEVICE_VERSION_RESPONSE');
+    this._deviceVersionCache = parseShimmer3DeviceVersionResponse(rsp);
+    // A Shimmer3's firmware omits the usbPluggedIn status byte, so the framer
+    // has to stop waiting for a byte that is never coming — and, worse, stop
+    // swallowing the ACK that follows the status instead.
+    this._statusPayloadBytes = this._deviceVersionCache.hardwareVersion === HW_ID.SHIMMER_3 ? 1 : 2;
+    return this._deviceVersionCache;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Device status and battery
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ask what the sensor is doing: docked, sensing, logging, streaming, SD card
+   * present, RTC set (GET_STATUS_COMMAND 0x72 → `[0x8A][0x71][status0]…`).
+   *
+   * This is the only way to learn several of those. An inquiry reports the
+   * *configuration*; only the status bytes say whether a recording is actually
+   * running, whether the clock has been set since the sensor last lost power,
+   * or whether the firmware failed to open its SD file.
+   *
+   * Call {@link readDeviceVersion} first when the platform is unknown: a
+   * Shimmer3 answers with one status byte where a Shimmer3R sends two, and over
+   * a byte stream the framer needs to know which before it can split the
+   * message. Getting it wrong there consumes the ACK that follows.
+   *
+   * Calling it first also sharpens the failure mode here: with the platform
+   * known, an answer shorter than that platform's status is a truncated message
+   * and this rejects on timeout rather than returning a status whose
+   * `usbPluggedIn` is `null`. While the platform is unknown the short answer is
+   * still accepted, because it is indistinguishable from a Shimmer3's.
+   */
+  async getStatus(): Promise<Shimmer3DeviceStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    // Claimed before the write, not after the ACK: the reply can arrive while
+    // this method is still between awaits, and it must not be mistaken for an
+    // unsolicited push in that window.
+    this._statusReadsInFlight++;
+    try {
+      this._emitStatus('GET_STATUS → waiting for ACK then RSP…');
+      const ackRemainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.GET_STATUS_COMMAND]),
+        1500,
+      );
+      // Read once, so the ACK-remainder shortcut and the waiter that backs it
+      // up agree on what counts as a whole message even if another caller
+      // learns the platform mid-await.
+      const need = this._minStatusPayloadBytes;
+      const rsp =
+        ackRemainder &&
+        ackRemainder.length >= 2 + need &&
+        ackRemainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        ackRemainder[1] === OPCODES.STATUS_RESPONSE
+          ? ackRemainder
+          : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, need, 1500);
+      const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + this._statusPayloadBytes));
+      this._emitStatus(
+        `Status: docked=${status.docked} sensing=${status.sensing} ` +
+          `logging=${status.sdLogging} streaming=${status.streaming} ` +
+          `sdPresent=${status.sdPresent} rtcSet=${status.rtcSet}`,
+      );
+      return status;
+    } finally {
+      this._statusReadsInFlight--;
+    }
+  }
+
+  /**
+   * Read the battery ADC and charger state (GET_VBATT_COMMAND 0x95 →
+   * `[0x8A][0x94][raw x3]`).
+   *
+   * The three payload bytes are the firmware's own `BattStatusRaw` union
+   * (`Battery/shimmer_battery.h:60-74`): a little-endian 12-bit ADC reading
+   * followed by the charger chip's STAT1/STAT2 bits. That is the same record the
+   * dock UART carries, so this reuses {@link parseBatteryStatus} rather than
+   * adding a second reading of the same bytes — including its voltage curve and
+   * the percentage it declines to report when the reading is out of range.
+   */
+  async getBattery(): Promise<WiredBatteryStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus('GET_VBATT → waiting for ACK then RSP…');
+    const ackRemainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_VBATT_COMMAND]),
+      1500,
+    );
+    const rsp =
+      ackRemainder &&
+      ackRemainder.length >= 5 &&
+      ackRemainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+      ackRemainder[1] === OPCODES.VBATT_RESPONSE
+        ? ackRemainder
+        : await this._waitForInstreamResponse(OPCODES.VBATT_RESPONSE, 3, 1500);
+    const batt = parseBatteryStatus(rsp.subarray(2, 5));
+    const pct = batt.percentage === null ? 'n/a' : `${batt.percentage.toFixed(1)}%`;
+    this._emitStatus(
+      `Battery: ${batt.voltage.toFixed(3)} V (${pct}), charger ${batt.chargingStatus}`,
+    );
+    return batt;
+  }
 
   /** Read (and cache) the firmware version via GET_FW_VERSION_COMMAND. */
   async readFwVersion(): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
