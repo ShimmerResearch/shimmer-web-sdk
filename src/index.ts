@@ -154,6 +154,36 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
+// Factory self-test — the suite the firmware runs at the factory, driven over
+// Bluetooth (`Shimmer3RClient.runFactoryTest`) or the dock UART
+// (`WiredShimmerClient.runFactoryTest`). The type table and the LiteProtocol
+// ACK classifier are pure; the runner state machine is inside the clients.
+export {
+  SHIMMER3_FACTORY_TEST_TYPE,
+  SHIMMER3_FACTORY_TEST_TYPES,
+  shimmer3FactoryTestTypeInfo,
+  requireShimmer3FactoryTestType,
+  buildSetFactoryTestCommand,
+  classifyLiteProtocolAck,
+} from './devices/shimmer3r/factoryTest.js';
+export type {
+  Shimmer3FactoryTestType,
+  Shimmer3FactoryTestTypeInfo,
+} from './devices/shimmer3r/factoryTest.js';
+export {
+  FactoryTestError,
+  FACTORY_TEST_NACK_MESSAGE,
+  FACTORY_TEST_ACK_TIMEOUT_MS,
+  FACTORY_TEST_IDLE_FLOOR_MS,
+  FACTORY_TEST_DRAIN_IDLE_MS,
+} from './devices/factoryTest/capture.js';
+export type {
+  FactoryTestState,
+  FactoryTestFailureReason,
+  FactoryTestRunOptions,
+  AckVerdict,
+} from './devices/factoryTest/capture.js';
+
 // EEPROM brand (advertising name) record — shared by Shimmer3/Shimmer3R over
 // BLE/BT (readDaughterCardMem) and the dock UART / USB-C (CARD_MEM)
 export {
