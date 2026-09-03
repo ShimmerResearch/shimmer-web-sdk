@@ -5,4 +5,4 @@
  *
  * Kept in sync with package.json by tests/core/version.test.ts.
  */
-export const SDK_VERSION = '0.1.24';
+export const SDK_VERSION = '0.1.25';

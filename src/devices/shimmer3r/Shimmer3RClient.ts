@@ -1311,8 +1311,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * time and only then the InfoMem — the order desktop
    * `CallableWriteConfig.call()` uses (BasicDock.java:1556-1587). An RTC failure
    * ABORTS the config write rather than being tolerated: the InfoMem write is
-   * not attempted, matching the Java rethrow. Note (DEV-900) that the device
-   * treats the RWC as LOCAL civil time; {@link setRtcTime} carries the detail.
+   * not attempted, matching the Java rethrow. The clock is written as a plain
+   * Unix epoch; {@link setRtcTime} carries the detail.
    *
    * `opts.verify` (default `true`) re-reads the image afterwards and byte-
    * compares it against what was sent, EXCLUDING the ranges a device write
@@ -1550,9 +1550,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * same {@link msToRtcBytesLE} helper as the dock path (truncating, matching
    * the Java driver's `(long)(ms * 32.768)`). Call with `Date.now()` to sync
    * the device clock to the host before a drift run.
-   * NOTE (DEV-900): the device treats RWC as LOCAL civil time — pass a
-   * local-adjusted value if that distinction matters for the use case; for
-   * drift measurement only the rate matters, not the epoch.
+   * The value is a plain Unix epoch: desktop Consensys and the Java dock
+   * driver both write `System.currentTimeMillis() * 32.768`, and hardware set
+   * by either reads back as UTC. (The Verisense console's local-civil
+   * convention is that product's, not this one's — do not carry it across.)
+   * For drift measurement only the rate matters, not the epoch.
    */
   async setRtcTime(unixMs: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
