@@ -297,7 +297,7 @@ import {
   SHIMMER3_FACTORY_TEST_TYPE,
   SHIMMER3_FACTORY_TEST_TYPES,
   parseShimmerFactoryTestReport,
-} from './dist/shimmer-web-sdk.esm.js';
+} from '@shimmerresearch/shimmer-web-sdk';
 
 // SHIMMER3_FACTORY_TEST_TYPES describes all four suites — label, expected
 // duration, default timeout, and whether that suite prints a verdict at all.
