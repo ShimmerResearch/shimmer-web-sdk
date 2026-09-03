@@ -442,7 +442,12 @@ export class FactoryTestCapture {
         continue;
       }
       const ch = String.fromCharCode(b);
-      text += ch;
+      /* Only the caller that will USE the text builds it. A drain reads
+         nothing but the sentinel out of `_line`, and it can run for the length
+         of the suite -- over a minute for the LED-state walk -- so appending
+         every byte to a string nobody reads is a per-byte allocation for
+         nothing. */
+      if (accumulate) text += ch;
       this._line += ch;
       if (b !== 0x0a) continue;
 
