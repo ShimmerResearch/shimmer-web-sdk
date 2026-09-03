@@ -308,6 +308,47 @@ describe('InfoMem syncNodes', () => {
     expect(l.idxNode0 + 21 * 6).toBe(382);
   });
 
+  // The reader stops at the first all-0xFF slot (see the two tests above), so
+  // the writer has to agree with it: anything written past a terminator is
+  // unreachable, and the list would silently come back shorter than it went in.
+  it('truncates at a malformed MAC rather than writing past the terminator', () => {
+    const out = generateWithNodes(['A1A2A3A4A5A6', 'not-hex-here', 'C1C2C3C4C5C6']);
+    expect(parseInfoMem(out, ctx).syncNodes).toEqual(['A1A2A3A4A5A6']);
+    // Everything from the terminator on is padded, so no stale C1... remains.
+    for (let i = 6; i < 21 * 6; i++) expect(out[l.idxNode0 + i]).toBe(0xff);
+  });
+
+  it('treats a literal FFFFFFFFFFFF entry as the terminator', () => {
+    const out = generateWithNodes(['A1A2A3A4A5A6', 'FFFFFFFFFFFF', 'C1C2C3C4C5C6']);
+    expect(parseInfoMem(out, ctx).syncNodes).toEqual(['A1A2A3A4A5A6']);
+    for (let i = 6; i < 21 * 6; i++) expect(out[l.idxNode0 + i]).toBe(0xff);
+  });
+
+  it('truncates at a hole in a sparse list', () => {
+    const sparse: string[] = [];
+    sparse[0] = 'A1A2A3A4A5A6';
+    sparse[2] = 'C1C2C3C4C5C6';
+    const out = generateWithNodes(sparse);
+    expect(parseInfoMem(out, ctx).syncNodes).toEqual(['A1A2A3A4A5A6']);
+    for (let i = 6; i < 21 * 6; i++) expect(out[l.idxNode0 + i]).toBe(0xff);
+  });
+
+  it('what it writes always parses back to the same list', () => {
+    // The property the two above protect: write then read is the identity, for
+    // any input, because the writer cannot emit an unreadable image.
+    for (const nodes of [
+      [],
+      ['A1A2A3A4A5A6'],
+      ['A1A2A3A4A5A6', 'B1B2B3B4B5B6'],
+      ['A1A2A3A4A5A6', 'bad', 'C1C2C3C4C5C6'],
+      ['FFFFFFFFFFFF'],
+      ['A1A2A3A4A5A6', 'FFFFFFFFFFFF'],
+    ]) {
+      const back = parseInfoMem(generateWithNodes(nodes), ctx).syncNodes;
+      expect(parseInfoMem(generateWithNodes(back), ctx).syncNodes).toEqual(back);
+    }
+  });
+
   it('is not read or written on firmware without SD-log sync', () => {
     const btstream = {
       hardwareVersion: 3,

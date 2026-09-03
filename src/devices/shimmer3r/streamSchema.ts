@@ -20,6 +20,7 @@ import { hex2 } from './protocol.js';
 import { channelIdToSensorBit } from './SensorBitmap.js';
 import {
   UNKNOWN_CHANNEL_ASSUMED_BYTES,
+  channelLayoutDiffersByGeneration,
   isGenerationSensitiveChannel,
   resolveChannelFormat,
   type ShimmerGeneration,
@@ -157,14 +158,31 @@ export function buildStreamSchema(
   }
 
   // An assumed generation only matters if something in the list actually
-  // depends on it — a gyro-only packet decodes identically either way.
+  // depends on it — a gyro-only packet decodes identically either way. Of the
+  // channels that do differ, only those whose *layout* differs can misread the
+  // frame: across the ADC block the two generations disagree about the channel's
+  // name while `u16`/little-endian/2 bytes holds on both, so guessing wrong
+  // there mislabels a column without moving a single offset. Reporting that as
+  // untrustworthy would cry wolf on the commonest expansion-board setup, so it
+  // is said out loud and the schema stays trusted.
   const sensitive = [...new Set(Array.from(channelIds).filter(isGenerationSensitiveChannel))];
-  const generationMatters = generationAssumed && sensitive.length > 0;
+  const misdecoded = sensitive.filter(channelLayoutDiffersByGeneration);
+  const mislabelled = sensitive.filter((id) => !channelLayoutDiffersByGeneration(id));
+  const generationMatters = generationAssumed && misdecoded.length > 0;
   if (generationMatters) {
     onProblem?.(
-      `Channel(s) ${sensitive.map((id) => `0x${hex2(id)}`).join(', ')} are decoded differently on ` +
+      `Channel(s) ${misdecoded.map((id) => `0x${hex2(id)}`).join(', ')} are decoded differently on ` +
         `a Shimmer3 and a Shimmer3R, and this schema assumed ${generation} because the device ` +
         `version has not been read. Call readDeviceVersion() before inquiry() to settle it.`,
+    );
+  }
+  if (generationAssumed && mislabelled.length > 0) {
+    onProblem?.(
+      `Channel(s) ${mislabelled.map((id) => `0x${hex2(id)}`).join(', ')} carry a different name on ` +
+        `a Shimmer3 and a Shimmer3R, and this schema assumed ${generation} because the device ` +
+        `version has not been read. The bytes are laid out identically on both, so the frame ` +
+        `decodes correctly and stays trusted — only these channel names may be wrong. Call ` +
+        `readDeviceVersion() before inquiry() to settle them.`,
     );
   }
 

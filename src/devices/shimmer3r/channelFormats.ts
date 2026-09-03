@@ -227,18 +227,48 @@ export function resolveChannelFormat(
 }
 
 /**
- * True when this channel ID means a different signal, or occupies a different
- * number of bytes, depending on the hardware generation — i.e. when getting the
- * generation wrong would mislabel or misdecode it.
+ * True when this channel ID is described differently on the two generations, by
+ * label, by layout, or by existing on only one of them.
  *
- * A schema built without knowing the generation is only trustworthy if none of
- * its channels answers true here.
+ * This is the broad question, and a true answer is **not** on its own a reason
+ * to distrust a frame: across most of the ADC block the difference is the
+ * channel's *name* only. Use {@link channelLayoutDiffersByGeneration} for the
+ * narrower question of whether the bytes would actually be misread.
  */
 export function isGenerationSensitiveChannel(id: number): boolean {
   return (
     CHANNEL_FORMAT_OVERRIDES.shimmer3[id] !== undefined ||
     CHANNEL_FORMAT_OVERRIDES.shimmer3r[id] !== undefined
   );
+}
+
+/**
+ * True when assuming the wrong generation for this channel ID would **misread**
+ * the bytes rather than merely mislabel them: the width, the byte order, or
+ * whether the channel exists at all differs between the two generations.
+ *
+ * This is the predicate that gates `StreamSchema.trusted`, and it is
+ * deliberately narrower than {@link isGenerationSensitiveChannel}:
+ *
+ * - `0x1A`/`0x1B` qualify — 2 big-endian bytes then 3 on a Shimmer3 versus 3
+ *   little-endian bytes each on a Shimmer3R, emitted in the opposite order.
+ * - The Shimmer3-only `0x27`/`0x28` qualify, because they resolve to nothing at
+ *   all on a Shimmer3R, so assuming the wrong way either invents a width or
+ *   loses one.
+ * - The ADC block `0x0D`-`0x13` does **not** qualify: `u16`, little-endian, 2
+ *   bytes on both generations, so guessing wrong costs a column heading rather
+ *   than a number.
+ *
+ * Compares the *resolved* formats, not the override layers, so a channel that
+ * one generation overrides back to the same layout as the shared
+ * {@link CHANNEL_FORMATS} entry is correctly reported as layout-identical.
+ */
+export function channelLayoutDiffersByGeneration(id: number): boolean {
+  const s3 = resolveChannelFormat(id, 'shimmer3');
+  const s3r = resolveChannelFormat(id, 'shimmer3r');
+  if (s3 === undefined && s3r === undefined) return false;
+  if (s3 === undefined || s3r === undefined) return true;
+  return s3.fmt !== s3r.fmt || s3.endian !== s3r.endian || s3.sizeBytes !== s3r.sizeBytes;
 }
 
 /**

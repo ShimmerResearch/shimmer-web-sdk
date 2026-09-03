@@ -3,6 +3,10 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 import { buildStreamSchema } from '../../src/devices/shimmer3r/streamSchema.js';
+import {
+  channelLayoutDiffersByGeneration,
+  isGenerationSensitiveChannel,
+} from '../../src/devices/shimmer3r/channelFormats.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import type { ObjectCluster } from '../../src/core/ObjectCluster.js';
 
@@ -361,6 +365,66 @@ describe('a generation this client had to assume', () => {
     const { schema } = await s.client.inquiry();
     expect(schema.fields[0].name).toBe('EXT_EXP_ADC_A7');
     expect(schema.trusted).toBe(true);
+  });
+
+  it('keeps trusting a frame whose only doubt is a channel NAME', async () => {
+    // The ADC block is u16/le/2 bytes on both generations and differs only in
+    // what the channel is called, so assuming the wrong platform mislabels a
+    // column without moving an offset. Distrusting the frame here would cry
+    // wolf on the commonest expansion-board setup.
+    const s = await session(null, [CH.GYRO_X, CH.EXT_ADC_0]);
+    expect(s.client.generationIsAssumed).toBe(true);
+
+    const { schema } = await s.client.inquiry();
+    expect(schema.generationAssumed).toBe(true);
+    expect(schema.trusted).toBe(true);
+    expect(schema.unknownChannelIds).toEqual([]);
+
+    // Said out loud all the same, and named as a labelling doubt.
+    const warning = s.status.find((m) => m.includes('0x0D'));
+    expect(warning, `no naming warning: ${s.status.join(' | ')}`).toBeDefined();
+    expect(warning).toContain('different name');
+    expect(warning).toContain('stays trusted');
+  });
+
+  it('still distrusts a frame mixing a name-only and a layout difference', async () => {
+    const s = await session(null, [CH.EXT_ADC_0, CH.PRESSURE]);
+    const { schema } = await s.client.inquiry();
+    expect(schema.trusted).toBe(false);
+    // The two doubts are reported separately, not conflated.
+    expect(s.status.some((m) => m.includes('decoded differently') && m.includes('0x1B'))).toBe(
+      true,
+    );
+    expect(s.status.some((m) => m.includes('different name') && m.includes('0x0D'))).toBe(true);
+  });
+});
+
+describe('channelLayoutDiffersByGeneration', () => {
+  it('is false for a channel both generations lay out identically', () => {
+    expect(channelLayoutDiffersByGeneration(CH.GYRO_X)).toBe(false);
+    expect(channelLayoutDiffersByGeneration(CH.BATTERY)).toBe(false);
+  });
+
+  it('is false across the ADC block, where only the name differs', () => {
+    for (const id of [0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x13]) {
+      expect(channelLayoutDiffersByGeneration(id), `0x${id.toString(16)}`).toBe(false);
+      // ...but they are still generation-sensitive in the broad sense.
+      expect(isGenerationSensitiveChannel(id), `0x${id.toString(16)}`).toBe(true);
+    }
+  });
+
+  it('is true for the BMP pair, which differs in width and byte order', () => {
+    expect(channelLayoutDiffersByGeneration(CH.TEMPERATURE)).toBe(true);
+    expect(channelLayoutDiffersByGeneration(CH.PRESSURE)).toBe(true);
+  });
+
+  it('is true for a channel only one generation has at all', () => {
+    expect(channelLayoutDiffersByGeneration(CH.BRIDGE_HIGH)).toBe(true);
+    expect(channelLayoutDiffersByGeneration(0x28)).toBe(true);
+  });
+
+  it('is false for an ID neither generation describes', () => {
+    expect(channelLayoutDiffersByGeneration(CH.UNKNOWN)).toBe(false);
   });
 });
 

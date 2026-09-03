@@ -378,16 +378,28 @@ function writeCalibration(
  * read-change-write cycle cannot silently destroy a stored node list just
  * because sync happens to be off; a caller that wants the Java behaviour sets
  * `syncNodes: []`.
+ *
+ * The list is TERMINATED by the first all-0xFF slot — that is where
+ * `parseSyncNodes` stops, and the firmware reads it the same way. So the first
+ * missing, malformed or literally all-0xFF entry ends the list here too, and
+ * every slot after it is padded. Writing a real MAC behind a terminator would
+ * put bytes in the image that no reader can reach, and the list would come
+ * back shorter than it went in.
  */
 function writeSyncNodes(out: Uint8Array, config: InfoMemDeviceConfig, layout: InfoMemLayout): void {
   if (!layout.supportsSdLogSync) return;
+  let terminated = false;
   for (let i = 0; i < MAX_SYNC_NODES; i++) {
     const offset = layout.idxNode0 + i * MAC_LENGTH;
-    const mac = config.syncNodes[i];
-    if (mac === undefined) {
+    const mac = terminated ? undefined : config.syncNodes[i];
+    // macFromHex already yields all-0xFF for unparseable input, so this one
+    // test covers a bad string and a real FFFFFFFFFFFF alike.
+    const bytes = mac === undefined ? undefined : macFromHex(mac);
+    if (bytes === undefined || bytes.every((b) => b === 0xff)) {
+      terminated = true;
       for (let b = 0; b < MAC_LENGTH; b++) out[offset + b] = 0xff;
     } else {
-      setBytes(out, offset, macFromHex(mac));
+      setBytes(out, offset, bytes);
     }
   }
 }
