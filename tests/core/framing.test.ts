@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { drainByteStream, NEED_MORE, RESYNC, type DrainVerdict } from '../../src/core/framing.js';
+import {
+  drainByteStream,
+  NEED_MORE,
+  RESYNC,
+  type DrainOptions,
+  type DrainVerdict,
+} from '../../src/core/framing.js';
 
 // drainByteStream is the shared half of reading a protocol off an unframed pipe
 // (Web Serial, RFCOMM/SPP, a dock UART): accumulate, extract what the framer can
@@ -18,7 +24,13 @@ function toyLength(buf: Uint8Array): number {
   return buf.length < total ? NEED_MORE : total;
 }
 
-const drain = (bytes: number[], opts: Partial<Parameters<typeof drainByteStream>[1]> = {}) =>
+/*
+ * Typed against DrainOptions own Uint8Array default rather than
+ * `Parameters<typeof drainByteStream>`, which erases the generic to `unknown`:
+ * the `onMessage` callbacks below would receive `unknown` and `r.messages`
+ * would not be a `Uint8Array[]`, so none of this file would type-check.
+ */
+const drain = (bytes: number[], opts: Partial<DrainOptions> = {}) =>
   drainByteStream(new Uint8Array(bytes), { messageLength: toyLength, ...opts });
 
 const asArrays = (msgs: Uint8Array[]): number[][] => msgs.map((m) => Array.from(m));
