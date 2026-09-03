@@ -312,8 +312,19 @@ export class FactoryTestCapture {
   /**
    * Abandon the capture immediately with `err`, with NO drain — for a link that
    * has gone away, where there is nothing left to swallow.
+   *
+   * Forces the link free even from `draining`. Draining exists only to keep a
+   * still-arriving report away from the framer; on a closed transport nothing
+   * more can arrive, so waiting out the drain timers would hold a caller in
+   * "busy" for up to the whole timeout budget after the sensor stopped being
+   * reachable — a minute or more for the LED-state suite. The result promise
+   * has already rejected by then, so `err` is only used when it has not.
    */
   fail(err: Error): void {
+    if (this._settled) {
+      this._goIdle();
+      return;
+    }
     this._failNow(err);
   }
 

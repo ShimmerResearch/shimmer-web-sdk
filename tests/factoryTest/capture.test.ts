@@ -445,3 +445,48 @@ describe('FactoryTestCapture', () => {
     await expect(cap.result).resolves.toBe(cap.aggregate);
   });
 });
+
+describe('FactoryTestCapture.fail() while draining', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('frees the link at once instead of waiting the drain out', async () => {
+    /* Draining exists only to keep a still-arriving report away from the
+       framer. On a link that has gone there is nothing left to arrive, so
+       serving out the drain would hold a caller in "busy" for the rest of the
+       budget -- over a minute for the LED-state suite -- after the sensor
+       stopped being reachable. */
+    const states: string[] = [];
+    const cap = new FactoryTestCapture(classify, {
+      timeoutMs: 30_000,
+      onStateChange: (s) => states.push(s),
+    });
+    cap.start();
+    cap.feed(u8(ACK));
+    await vi.advanceTimersByTimeAsync(30_100);
+    await expect(cap.result).rejects.toThrow(FactoryTestError);
+    expect(cap.state).toBe('draining');
+
+    cap.fail(new FactoryTestError('disconnected', 'link dropped'));
+    expect(cap.state).toBe('idle');
+    await expect(cap.idle).resolves.toBeUndefined();
+    expect(states).toEqual(['running', 'draining', 'idle']);
+    // No timer left that could fire a second transition later.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cap.state).toBe('idle');
+    expect(states).toEqual(['running', 'draining', 'idle']);
+  });
+
+  it('still rejects a run that had not settled yet', async () => {
+    const cap = new FactoryTestCapture(classify, { timeoutMs: 30_000 });
+    cap.start();
+    cap.feed(u8(ACK));
+    cap.fail(new FactoryTestError('disconnected', 'link dropped'));
+    await expect(cap.result).rejects.toMatchObject({ reason: 'disconnected' });
+    expect(cap.state).toBe('idle');
+  });
+});
