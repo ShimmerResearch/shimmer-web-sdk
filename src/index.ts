@@ -978,3 +978,36 @@ export type {
   VerisenseFactoryTestOverall,
   VerisenseFactoryTestReportParsed,
 } from './devices/verisense/factoryTestReport.js';
+
+// --- Factory test report parsing (all families) ---
+// The Verisense exports above are one grammar over this shared core; these are
+// the core itself plus the Shimmer3/Shimmer3R grammar.
+export {
+  factoryTestReportToCsvRows,
+  detectFactoryTestReportFamily,
+} from './devices/factoryTest/report.js';
+export type {
+  FactoryTestVerdict,
+  FactoryTestMetricValue,
+  FactoryTestResult,
+  FactoryTestOverall,
+  FactoryTestReportParsedBase,
+  FactoryTestClassifier,
+  FactoryTestGrammar,
+  FactoryTestLineContext,
+  FactoryTestLineRule,
+  FactoryTestReportFamily,
+} from './devices/factoryTest/report.js';
+export {
+  parseShimmerFactoryTestReport,
+  shimmerFactoryTestReportToCsvRows,
+  SHIMMER3R_FACTORY_TEST_ID_NAMES,
+  SHIMMER_FACTORY_TEST_CLASSIFIERS,
+} from './devices/factoryTest/shimmerReport.js';
+export type {
+  ShimmerFactoryTestReportFamily,
+  ShimmerFactoryTestReportParsed,
+  ShimmerFactoryTestMcuInfo,
+  ShimmerFactoryTestModelInfo,
+  ShimmerFactoryTestIoStatus,
+} from './devices/factoryTest/shimmerReport.js';

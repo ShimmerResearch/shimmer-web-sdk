@@ -1,12 +1,33 @@
-import { csvCell } from '../../core/csv.js';
+import {
+  chipDetail,
+  emptyFactoryTestOverall,
+  factoryTestReportToCsvRows,
+  parseFactoryTestReport,
+  setNum,
+  setStr,
+  type FactoryTestClassifier,
+  type FactoryTestGrammar,
+  type FactoryTestLineContext,
+  type FactoryTestMetricValue,
+  type FactoryTestOverall,
+  type FactoryTestReportParsedBase,
+  type FactoryTestResult,
+  type FactoryTestVerdict,
+} from '../factoryTest/report.js';
 import { compareVerisenseFirmwareVersion } from './protocolUtils.js';
 
 /**
- * Parser for the plain-text factory test report streamed by the Verisense
- * firmware (`Includes/ASM_common_source/Test/hal_factoryTest.c`), turning it
- * into a flat map of named metrics suitable for a spreadsheet row.
+ * Verisense grammar for the shared factory-test report parser.
  *
- * Two properties drive the whole design:
+ * The report is printed by `Includes/ASM_common_source/Test/hal_factoryTest.c`.
+ * Everything generic about it — the banners, the verdict tiers, the truncation
+ * repair, the `Overall Result` bitmask decode and the CSV writer — now lives in
+ * `../factoryTest/report.ts`, shared with the Shimmer3/3R families. What is
+ * left here is what only Verisense prints: the `WS_TEST_` numbering, the
+ * twenty content rules, the MCU header block and the indented production-config
+ * and NAND blocks.
+ *
+ * Two properties drive the design, and both are Verisense's:
  *
  * 1. **Tests are identified by line content, never by the printed
  *    `WS_TEST_00NN` number.** The IDs were renumbered at firmware v2.00.010
@@ -24,27 +45,16 @@ import { compareVerisenseFirmwareVersion } from './protocolUtils.js';
  */
 
 /** Verdict carried by a single report line. */
-export type VerisenseFactoryTestVerdict =
-  'PASS' | 'FAIL' | 'WARNING' | 'NOT_APPLICABLE' | 'INFO' | 'UNKNOWN';
+export type VerisenseFactoryTestVerdict = FactoryTestVerdict;
 
 /** A value extracted from the report, as it should land in a spreadsheet cell. */
-export type VerisenseFactoryTestMetricValue = number | string | boolean;
+export type VerisenseFactoryTestMetricValue = FactoryTestMetricValue;
 
 /** One test as it appeared in the report. */
-export interface VerisenseFactoryTestResult {
-  /** The `WS_TEST_00NN` number printed in *this* report, or null if the line
-   * carried none. Not stable across firmware versions — see `name`. */
-  id: number | null;
-  /** Canonical snake_case key derived from the line's content. Stable across
-   * firmware versions; this is what column names are built from. */
-  name: string;
-  /** Human-readable test name, e.g. `'VD6283TX Light sensor'`. */
-  label: string;
-  verdict: VerisenseFactoryTestVerdict;
-  /** The report text for this test, sub-lines joined with `' | '`. */
-  detail: string;
-  metrics: Record<string, VerisenseFactoryTestMetricValue>;
-}
+export type VerisenseFactoryTestResult = FactoryTestResult;
+
+/** Overall verdict block printed just before the TEST END banner. */
+export type VerisenseFactoryTestOverall = FactoryTestOverall;
 
 /** MCU header block printed above the first test. */
 export interface VerisenseFactoryTestMcuInfo {
@@ -68,40 +78,13 @@ export interface VerisenseFactoryTestModelInfo {
   passkeyKind: string | null;
 }
 
-/** Overall verdict block printed just before the TEST END banner. */
-export interface VerisenseFactoryTestOverall {
-  /** null when the report never reached its footer (e.g. a blank board aborts
-   * the run at the Shimmer model test). */
-  result: 'PASS' | 'FAIL' | null;
-  failMaskHex: string | null;
-  failMask: number | null;
-  /** Canonical names of the tests whose bits are set, resolved through the ids
-   * actually observed in this report. */
-  failedTestNames: string[];
-}
-
 /** Everything a single report yields. */
-export interface VerisenseFactoryTestReportParsed {
-  /** The TEST START banner was found. */
-  ok: boolean;
-  /** The TEST END banner was found — a report can be valid but truncated. */
-  complete: boolean;
-  /** Dotted firmware version from the `Firmware version:` line, e.g. `'2.00.024'`. */
-  firmwareVersion: string | null;
+export interface VerisenseFactoryTestReportParsed extends FactoryTestReportParsedBase {
   /** Which `WS_TEST_00NN` numbering this report uses, derived from the firmware
    * version. Informational: parsing never depends on it. */
   idScheme: 'legacy' | 'v2_00_010' | 'unknown';
-  overall: VerisenseFactoryTestOverall;
   mcu: VerisenseFactoryTestMcuInfo;
   model: VerisenseFactoryTestModelInfo | null;
-  /** Tests in the order they were printed. */
-  tests: VerisenseFactoryTestResult[];
-  /** Every metric merged into one flat map — one spreadsheet column per key. */
-  metrics: Record<string, VerisenseFactoryTestMetricValue>;
-  /** Lines no rule recognized. Never dropped, so nothing is silently lost. */
-  unparsedLines: string[];
-  /** Anomalies worth surfacing (repaired truncation, stripped progress dots…). */
-  parserWarnings: string[];
 }
 
 /** The firmware release that renumbered the tests. */
@@ -123,21 +106,12 @@ const REPAIR_ANCHORS = [
   /\/\/\*+/g,
 ];
 
-interface Classifier {
-  name: string;
-  label: string;
-  match: RegExp;
-  /** Column holding this test's verdict. Defaults to `<name>_result`. */
-  resultKey?: string;
-  extract?: (body: string, out: Record<string, VerisenseFactoryTestMetricValue>) => void;
-}
-
 /**
  * Matched in order against the text following the `WS_TEST_00NN` prefix; first
  * hit wins. Every pattern keys on wording the firmware has printed stably
  * across the renumbering, not on the test number.
  */
-const CLASSIFIERS: Classifier[] = [
+const CLASSIFIERS: FactoryTestClassifier[] = [
   {
     name: 'vcore',
     label: 'VCore',
@@ -292,324 +266,12 @@ const CLASSIFIERS: Classifier[] = [
   { name: 'led', label: 'LED test', match: /LED test/i },
 ];
 
-/** Shared shape of the IMU-class self-test lines: optional temperature in
- * parentheses plus an optional failure-reason suffix. */
-function chipDetail(
-  body: string,
-  out: Record<string, VerisenseFactoryTestMetricValue>,
-  prefix: string,
-): void {
-  setNum(out, `${prefix}_temp_c`, /\(\s*(-?\d+)\s*°?\s*C\s*\)/i.exec(body)?.[1]);
-  const reason =
-    /-\s*(Chip not detected|Signal issue|Temperature issue|DRDY\/INT issue|Unknown)/i.exec(
-      body,
-    )?.[1];
-  if (reason) out[`${prefix}_fail_reason`] = reason.trim();
-}
-
-function num(value: string | undefined | null): number | undefined {
-  if (value == null || value === '') return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function setNum(
-  out: Record<string, VerisenseFactoryTestMetricValue>,
-  key: string,
-  value: string | undefined | null,
-): void {
-  const n = num(value);
-  if (n !== undefined) out[key] = n;
-}
-
-function setStr(
-  out: Record<string, VerisenseFactoryTestMetricValue>,
-  key: string,
-  value: string | undefined | null,
-): void {
-  const s = value?.trim();
-  if (s) out[key] = s;
-}
-
-/**
- * Fold the several ways a degree sign can reach us into a single `°`.
- *
- * The firmware emits a bare `0xB0` on some builds and UTF-8 `0xC2 0xB0` on
- * others; depending on how the transport decoded the bytes we see `°`, the
- * mojibake `Â°`, or the Unicode replacement character.
- */
-function normalizeReportText(text: string): string {
-  return String(text ?? '')
-    .replace(/Â°/g, '°')
-    .replace(/�/g, '°');
-}
-
-/** Split into lines, dropping the NAND health progress dots and re-splitting
- * lines that the firmware's 128-byte buffer glued together. */
-function toLines(text: string, warnings: string[]): string[] {
-  const out: string[] = [];
-  let stripped = 0;
-  for (const raw of text.split(/\r\n|\r|\n/)) {
-    // The NAND health test streams bare dots to keep the host's idle timer
-    // alive; they arrive with no newline of their own.
-    if (/^[.\s]*$/.test(raw) && /\./.test(raw)) {
-      stripped += 1;
-      continue;
-    }
-    const line = raw.replace(/\.{3,}\s*$/, '');
-    for (const piece of repairLine(line, warnings)) {
-      if (piece.trim()) out.push(piece);
-    }
-  }
-  if (stripped) warnings.push(`stripped ${stripped} progress-dot line(s)`);
-  return out;
-}
-
-/** Re-split one physical line wherever a known line start appears mid-line. */
-function repairLine(line: string, warnings: string[]): string[] {
-  let earliest = -1;
-  for (const anchor of REPAIR_ANCHORS) {
-    anchor.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = anchor.exec(line)) !== null) {
-      if (m.index > 0 && (earliest < 0 || m.index < earliest)) earliest = m.index;
-    }
-  }
-  if (earliest <= 0) return [line];
-  warnings.push(`repaired a line truncated by the firmware buffer near column ${earliest}`);
-  const head = line.slice(0, earliest);
-  return [head, ...repairLine(line.slice(earliest), warnings)];
-}
-
-/** Read the verdict keyword, if any, off the text following the test id. */
-function readVerdict(body: string): VerisenseFactoryTestVerdict {
-  const m = /^\s*(PASS|FAIL|WARNING)\b/i.exec(body);
-  if (m) return m[1].toUpperCase() as VerisenseFactoryTestVerdict;
-  if (/not applicable/i.test(body)) return 'NOT_APPLICABLE';
-  if (body.trim()) return 'INFO';
-  return 'UNKNOWN';
-}
-
-/** Derive the numbering scheme from the reported firmware version. */
-function readIdScheme(version: string | null): 'legacy' | 'v2_00_010' | 'unknown' {
-  if (!version) return 'unknown';
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (!m) return 'unknown';
-  const triple = {
-    major: Number(m[1]),
-    minor: Number(m[2]),
-    internal: Number(m[3]),
-  };
-  return compareVerisenseFirmwareVersion(triple, RENUMBER_VERSION) >= 0 ? 'v2_00_010' : 'legacy';
-}
-
-function emptyResult(): VerisenseFactoryTestReportParsed {
-  return {
-    ok: false,
-    complete: false,
-    firmwareVersion: null,
-    idScheme: 'unknown',
-    overall: { result: null, failMaskHex: null, failMask: null, failedTestNames: [] },
-    mcu: {
-      macId: null,
-      deviceId: null,
-      part: null,
-      variant: null,
-      lastResetHex: null,
-      lastResetReasons: null,
-      bootCount: null,
-    },
-    model: null,
-    tests: [],
-    metrics: {},
-    unparsedLines: [],
-    parserWarnings: [],
-  };
-}
-
-/**
- * Parse a full factory test report into structured metrics.
- *
- * Never throws: malformed or unrecognized input comes back with `ok: false`
- * and/or its lines preserved in `unparsedLines`.
- */
-export function parseVerisenseFactoryTestReport(text: string): VerisenseFactoryTestReportParsed {
-  const result = emptyResult();
-  try {
-    parseInto(normalizeReportText(text), result);
-  } catch (err) {
-    result.parserWarnings.push(`parser error: ${String((err as Error)?.message ?? err)}`);
-  }
-  return result;
-}
-
-function parseInto(text: string, result: VerisenseFactoryTestReportParsed): void {
-  const warnings = result.parserWarnings;
-  const lines = toLines(text, warnings);
-  const metrics = result.metrics;
-  /** Canonical name of the test each printed id was seen against, so the fail
-   * mask can be decoded under whichever numbering this report used. */
-  const nameById = new Map<number, string>();
-  let ledSeen = 0;
-  /** Held in an object so the assignment inside `pushTest` stays visible to
-   * the type checker at every use site. */
-  const open: { test: VerisenseFactoryTestResult | null } = { test: null };
-
-  const pushTest = (test: VerisenseFactoryTestResult): void => {
-    result.tests.push(test);
-    if (test.id != null) nameById.set(test.id, test.name);
-    open.test = test;
-  };
-
-  const addDetail = (line: string): void => {
-    const test = open.test;
-    if (!test) return;
-    test.detail = test.detail ? `${test.detail} | ${line.trim()}` : line.trim();
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (/TEST START/.test(trimmed)) {
-      result.ok = true;
-      continue;
-    }
-    if (/TEST END/.test(trimmed)) {
-      result.complete = true;
-      continue;
-    }
-
-    const fw = /^Firmware version\s*:\s*v?([\d.]+)/i.exec(trimmed);
-    if (fw) {
-      result.firmwareVersion = fw[1];
-      result.idScheme = readIdScheme(fw[1]);
-      metrics.fw_version = fw[1];
-      continue;
-    }
-
-    const range = /Temperature pass range set to\s*(-?\d+)\s*-\s*(-?\d+)/i.exec(trimmed);
-    if (range) {
-      setNum(metrics, 'temp_range_low_c', range[1]);
-      setNum(metrics, 'temp_range_high_c', range[2]);
-      continue;
-    }
-
-    const overall = /^Overall Result\s*=\s*(PASS|FAIL)(?:\s*\(\s*(0x[0-9A-Fa-f]+)\s*\))?/i.exec(
-      trimmed,
-    );
-    if (overall) {
-      result.overall.result = overall[1].toUpperCase() as 'PASS' | 'FAIL';
-      metrics.overall_result = result.overall.result;
-      if (overall[2]) {
-        result.overall.failMaskHex = overall[2].toUpperCase().replace('0X', '0x');
-        result.overall.failMask = Number.parseInt(overall[2], 16);
-        metrics.fail_mask_hex = result.overall.failMaskHex;
-      }
-      continue;
-    }
-
-    // Section headers (`MCU:`, `SPIM3:` …) carry no data but end the previous
-    // test's sub-line run.
-    if (
-      /^(?:MCU|I\/O status|Battery|Shimmer model|TWIM0|TWIM1 \(part ?\d\)|SPIM2|SPIM3)\s*:$/i.test(
-        trimmed,
-      )
-    ) {
-      open.test = null;
-      continue;
-    }
-
-    if (readMcuHeaderLine(trimmed, result, metrics)) continue;
-
-    // `LED test (WS_TEST_0019):` — the first such block is the operational
-    // status LED, the second the battery LED. Ordering survives renumbering.
-    const ledHeader = /^LED test\s*\(\s*WS_TEST_(\d{4})\s*\)\s*:/i.exec(trimmed);
-    if (ledHeader) {
-      const name = ledSeen === 0 ? 'led_status' : 'led_batt';
-      ledSeen += 1;
-      pushTest({
-        id: Number(ledHeader[1]),
-        name,
-        label:
-          name === 'led_status' ? 'LED test - operational status' : 'LED test - battery status',
-        verdict: 'INFO',
-        detail: '',
-        metrics: {},
-      });
-      // Deliberately no `<name>_result` metric: an INFO verdict carries no
-      // data (the LED test is operator-visual narration), and which suite ran
-      // is already recorded by the caller's factory-test-type column. The
-      // verdict is still on the tests[] entry for anyone who wants it.
-      continue;
-    }
-
-    const idLine = /^-?\s*WS_TEST_(\d{4})\s*-\s*(.*)$/i.exec(trimmed.replace(/^-\s*/, '- '));
-    if (idLine) {
-      const id = Number(idLine[1]);
-      const body = idLine[2] ?? '';
-      const verdict = readVerdict(body);
-      const classifier = CLASSIFIERS.find((c) => c.match.test(body));
-
-      let name = classifier?.name ?? `ws_test_${idLine[1]}`;
-      let label = classifier?.label ?? `WS_TEST_${idLine[1]}`;
-      if (name === 'led') {
-        // Not-applicable LED lines come through the id path rather than as a
-        // `LED test (…):` header.
-        name = ledSeen === 0 ? 'led_status' : 'led_batt';
-        label =
-          name === 'led_status' ? 'LED test - operational status' : 'LED test - battery status';
-        ledSeen += 1;
-      }
-
-      const testMetrics: Record<string, VerisenseFactoryTestMetricValue> = {};
-      classifier?.extract?.(body, testMetrics);
-      if (!classifier) scrapeGenericMetrics(body, name, testMetrics);
-
-      // A verdict column is only worth a spreadsheet cell when it can vary:
-      // PASS/FAIL/WARNING record an outcome and NOT_APPLICABLE records a
-      // model gate, but INFO just means "an informational line printed" — its
-      // substance is already in that line's own metrics (usb_power_good,
-      // charger_status, ...), so emitting it would waste a column per test.
-      if (verdict !== 'INFO') {
-        const resultKey = classifier?.resultKey ?? `${name}_result`;
-        testMetrics[resultKey] = verdict;
-      }
-
-      pushTest({ id, name, label, verdict, detail: body.trim(), metrics: testMetrics });
-      Object.assign(metrics, testMetrics);
-      continue;
-    }
-
-    if (readSubLine(trimmed, result, metrics, open.test, addDetail)) continue;
-
-    // LED narration (`- All LEDs off`, `- Left Red LED on`) belongs to the LED
-    // test currently open.
-    if (open.test && /^-\s*(All|Left|Right)\b.*LED/i.test(trimmed)) {
-      addDetail(trimmed.replace(/^-\s*/, ''));
-      continue;
-    }
-
-    result.unparsedLines.push(line);
-  }
-
-  // Decode the fail mask through the ids this report actually used.
-  if (result.overall.failMask != null) {
-    const names: string[] = [];
-    for (let bit = 0; bit < 32; bit += 1) {
-      if (!(result.overall.failMask & (1 << bit))) continue;
-      const id = bit + 1;
-      names.push(nameById.get(id) ?? `ws_test_${String(id).padStart(4, '0')}`);
-    }
-    result.overall.failedTestNames = names;
-  }
-}
-
 /** MCU identification lines printed above the first test. */
 function readMcuHeaderLine(
   trimmed: string,
-  result: VerisenseFactoryTestReportParsed,
-  metrics: Record<string, VerisenseFactoryTestMetricValue>,
+  ctx: FactoryTestLineContext<VerisenseFactoryTestReportParsed>,
 ): boolean {
+  const { result, metrics } = ctx;
   const mac = /^-?\s*MAC ID\s*:\s*([0-9A-Fa-f]+)/.exec(trimmed);
   if (mac) {
     result.mcu.macId = mac[1].toUpperCase();
@@ -659,12 +321,10 @@ function readMcuHeaderLine(
  */
 function readSubLine(
   trimmed: string,
-  result: VerisenseFactoryTestReportParsed,
-  metrics: Record<string, VerisenseFactoryTestMetricValue>,
-  current: VerisenseFactoryTestResult | null,
-  addDetail: (line: string) => void,
+  ctx: FactoryTestLineContext<VerisenseFactoryTestReportParsed>,
 ): boolean {
-  const put = (key: string, value: VerisenseFactoryTestMetricValue): void => {
+  const { result, metrics, current, addDetail } = ctx;
+  const put = (key: string, value: FactoryTestMetricValue): void => {
     metrics[key] = value;
     if (current) current.metrics[key] = value;
   };
@@ -779,6 +439,34 @@ function readSubLine(
   return false;
 }
 
+/**
+ * The Verisense grammar.
+ *
+ * Every flag the shared core offers is left off: this grammar is the behaviour
+ * the shared core was extracted from, so a report parsed through it comes out
+ * byte-for-byte as the standalone Verisense parser produced it (pinned by
+ * `tests/verisense/factory-test-report-snapshot.test.ts`).
+ */
+export const VERISENSE_FACTORY_TEST_GRAMMAR: FactoryTestGrammar<VerisenseFactoryTestReportParsed> =
+  {
+    idToken: 'WS_TEST',
+    classifiers: CLASSIFIERS,
+    sectionHeadings:
+      /^(?:MCU|I\/O status|Battery|Shimmer model|TWIM0|TWIM1 \(part ?\d\)|SPIM2|SPIM3)\s*:$/i,
+    repairAnchors: REPAIR_ANCHORS,
+    ledHeading: /^LED test\s*\(\s*WS_TEST_(\d{4})\s*\)\s*:/i,
+    ledClassifierName: 'led',
+    // The first LED block is the operational status LED, the second the battery
+    // LED. Ordering survives the renumbering; the printed id does not.
+    ledTest: (index) =>
+      index === 0
+        ? { name: 'led_status', label: 'LED test - operational status' }
+        : { name: 'led_batt', label: 'LED test - battery status' },
+    ledNarration: /^-\s*(All|Left|Right)\b.*LED/i,
+    headerLine: readMcuHeaderLine,
+    subLine: readSubLine,
+  };
+
 function emptyModel(): VerisenseFactoryTestModelInfo {
   return {
     name: null,
@@ -791,24 +479,53 @@ function emptyModel(): VerisenseFactoryTestModelInfo {
   };
 }
 
+/** Derive the numbering scheme from the reported firmware version. */
+function readIdScheme(version: string | null): 'legacy' | 'v2_00_010' | 'unknown' {
+  if (!version) return 'unknown';
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!m) return 'unknown';
+  const triple = {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    internal: Number(m[3]),
+  };
+  return compareVerisenseFirmwareVersion(triple, RENUMBER_VERSION) >= 0 ? 'v2_00_010' : 'legacy';
+}
+
+function emptyResult(): VerisenseFactoryTestReportParsed {
+  return {
+    ok: false,
+    complete: false,
+    firmwareVersion: null,
+    idScheme: 'unknown',
+    overall: emptyFactoryTestOverall(),
+    mcu: {
+      macId: null,
+      deviceId: null,
+      part: null,
+      variant: null,
+      lastResetHex: null,
+      lastResetReasons: null,
+      bootCount: null,
+    },
+    model: null,
+    tests: [],
+    metrics: {},
+    unparsedLines: [],
+    parserWarnings: [],
+  };
+}
+
 /**
- * Fallback for a test this build of the SDK has never seen: keep any
- * `Key = value` pairs so a firmware change still lands data in the sheet.
+ * Parse a full Verisense factory test report into structured metrics.
+ *
+ * Never throws: malformed or unrecognized input comes back with `ok: false`
+ * and/or its lines preserved in `unparsedLines`.
  */
-function scrapeGenericMetrics(
-  body: string,
-  name: string,
-  out: Record<string, VerisenseFactoryTestMetricValue>,
-): void {
-  const re = /([A-Za-z][A-Za-z0-9 _-]{0,40}?)\s*=\s*([-+]?\d+(?:\.\d+)?)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(body)) !== null) {
-    const key = `${name}_${m[1]
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')}`;
-    setNum(out, key, m[2]);
-  }
+export function parseVerisenseFactoryTestReport(text: string): VerisenseFactoryTestReportParsed {
+  const result = parseFactoryTestReport(text, VERISENSE_FACTORY_TEST_GRAMMAR, emptyResult);
+  result.idScheme = readIdScheme(result.firmwareVersion);
+  return result;
 }
 
 /**
@@ -818,21 +535,4 @@ function scrapeGenericMetrics(
  * caller's identity columns are authoritative, and a duplicated header name
  * breaks most CSV consumers.
  */
-export function verisenseFactoryTestReportToCsvRows(
-  parsed: VerisenseFactoryTestReportParsed,
-  meta: Record<string, string | number | boolean | null> = {},
-): string[] {
-  // Normalized once and used for both key discovery and value lookup, so a
-  // null/undefined `parsed` from a plain-JS caller cannot throw here.
-  const metrics = parsed?.metrics ?? {};
-  const metaKeys = Object.keys(meta);
-  const metaKeySet = new Set(metaKeys);
-  const metricKeys = Object.keys(metrics)
-    .filter((k) => !metaKeySet.has(k))
-    .sort();
-  const header = [...metaKeys, ...metricKeys].map(csvCell).join(',');
-  const values = [...metaKeys.map((k) => meta[k]), ...metricKeys.map((k) => metrics[k])]
-    .map(csvCell)
-    .join(',');
-  return [header, values];
-}
+export const verisenseFactoryTestReportToCsvRows = factoryTestReportToCsvRows;
