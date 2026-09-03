@@ -22,6 +22,6 @@ describe('SDK_VERSION', () => {
       packages: Record<string, { version?: string }>;
     };
     expect(lock.version).toBe(pkg.version);
-    expect(lock.packages[''].version).toBe(pkg.version);
+    expect(lock.packages['']?.version).toBe(pkg.version);
   });
 });
