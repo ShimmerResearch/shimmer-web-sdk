@@ -64,8 +64,10 @@ export interface Shimmer3FactoryTestTypeInfo {
  * The four types in firmware order.
  *
  * The durations are the firmware's own step counts, not measurements: the LED
- * suite is 9 steps of 2 s and the operational-state walk-through 14 of 5 s
- * (`Test/shimmer_test_leds_states.c`), and the IC suite's chip probes dominate
+ * suite is 9 steps of 2 s, and the operational-state walk-through holds 15
+ * states for 5 s each — 2 with Bluetooth disabled, 6 with it enabled, 5 under
+ * SD sync and 2 others, one `platform_delayMs` apiece
+ * (`Test/shimmer_test_leds_states.c`). The IC suite's chip probes dominate
  * MAIN. HARDWARE-VERIFY: they have not been timed on a real Shimmer3 or
  * Shimmer3R, so the default timeouts carry generous headroom over them.
  */
@@ -106,7 +108,7 @@ export const SHIMMER3_FACTORY_TEST_TYPES: readonly Shimmer3FactoryTestTypeInfo[]
     description:
       'Holds each operational LED state for five seconds so it can be compared against the sensor. ' +
       'No overall verdict, and the longest of the four.',
-    expectedDurationMs: 70_000,
+    expectedDurationMs: 75_000,
     defaultTimeoutMs: 120_000,
     hasOverall: false,
   }),

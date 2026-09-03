@@ -32,7 +32,8 @@ describe('Shimmer3 factory-test type table', () => {
     expect(byName.ICS.expectedDurationMs).toBe(15_000);
     expect(byName.ICS.defaultTimeoutMs).toBe(60_000);
     expect(byName.ICS.hasOverall).toBe(true);
-    expect(byName.LED_STATES.expectedDurationMs).toBe(70_000);
+    // 15 states, one 5 s dwell each (`Test/shimmer_test_leds_states.c`).
+    expect(byName.LED_STATES.expectedDurationMs).toBe(75_000);
     expect(byName.LED_STATES.defaultTimeoutMs).toBe(120_000);
     expect(byName.LED_STATES.hasOverall).toBe(false);
   });
