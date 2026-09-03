@@ -26,14 +26,21 @@ export const EXG_REGS_RESPONSE = 0x62;
 export const GET_EXG_REGS_COMMAND = 0x63;
 
 /**
- * Number of payload bytes AFTER the {@link EXG_REGS_RESPONSE} opcode. The Java
- * driver declares this response length as 11 (ShimmerBluetooth.java:468) and
- * reads exactly 11 bytes (`readBytes(11, …)`, ShimmerBluetooth.java:1641). The
- * 11 bytes are `[echo][reg0..reg9]`: the driver copies the 10 register bytes
- * from offset 1 (`System.arraycopy(bufferAns, 1, …, 0, 10)`,
- * ShimmerBluetooth.java:1645-1652), so payload byte 0 (the count/chip echo the
- * firmware prepends) is ignored — the chip identity is tracked host-side from
- * the preceding GET instruction, not read from the response
+ * Number of payload bytes AFTER the {@link EXG_REGS_RESPONSE} opcode for a
+ * full-bank read. The Java driver declares this response length as 11
+ * (ShimmerBluetooth.java:468) and reads exactly 11 bytes (`readBytes(11, …)`,
+ * ShimmerBluetooth.java:1641).
+ *
+ * The 11 bytes are `[count][reg0..reg9]`. Payload byte 0 is the number of
+ * registers the firmware is returning, echoed back from the request — the
+ * firmware writes the opcode then `exgLength`
+ * (`log-and-stream-common/Comms/shimmer_bt_uart.c:2223-2229`, both the Shimmer3
+ * and Shimmer3R trees) — which makes the response length-prefixed and, since
+ * this SDK only ever asks for a whole 10-register bank, always 11 here. The
+ * driver ignores that byte and copies the registers from offset 1
+ * (`System.arraycopy(bufferAns, 1, …, 0, 10)`, ShimmerBluetooth.java:1645-1652),
+ * because the chip identity is tracked host-side from the preceding GET
+ * instruction rather than read back from the response
  * (`mTempChipID = insBytes[1]`, ShimmerBluetooth.java:1087-1089).
  */
 export const EXG_REGS_RESPONSE_PAYLOAD_LENGTH = 11;
@@ -85,10 +92,10 @@ export function buildSetExgRegsCommand(chip: ExgChipIndex, bank: Uint8Array): Ui
 /**
  * Extract the 10-byte register bank from an EXG_REGS_RESPONSE frame.
  *
- * The frame is `[0x62][echo][reg0..reg9]` (opcode + {@link EXG_REGS_RESPONSE_PAYLOAD_LENGTH}
+ * The frame is `[0x62][count][reg0..reg9]` (opcode + {@link EXG_REGS_RESPONSE_PAYLOAD_LENGTH}
  * payload bytes). Mirrors the Java `System.arraycopy(bufferAns, 1, …, 0, 10)`
- * (ShimmerBluetooth.java:1645): the byte immediately after the opcode is a
- * count/chip echo that the driver ignores, and the 10 register bytes follow.
+ * (ShimmerBluetooth.java:1645): the byte immediately after the opcode is the
+ * register count, which the driver ignores, and the 10 register bytes follow.
  *
  * @param frame the complete response including the leading 0x62 opcode.
  * @throws RangeError when the frame is too short or does not start with 0x62.

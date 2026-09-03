@@ -50,6 +50,14 @@ const MASK_ALL_EXG_RESOLUTION =
  * resistance amp, and the bridge amp. The resistance amp shares the bridge-amp
  * bit on Shimmer3 (Configuration.java:643), so clearing SENSOR_BRIDGE_AMP
  * covers both.
+ *
+ * NAMING: the internal-ADC labels below are the Java driver's Shimmer3-era
+ * names (A1/A12/A13/A14, the MSP430 ADC input numbers). This SDK's own
+ * `SensorBitmapShimmer3` names the SAME four bits A3/A0/A1/A2, following the
+ * Shimmer3R firmware — so 0x000400 is `SENSOR_INT_A1` in Java but
+ * `SENSOR_INT_A3` here, and 0x000100 is `SENSOR_INT_A13` there and
+ * `SENSOR_INT_A1` here. The masks are what matter and they agree; only the
+ * display names differ by generation.
  */
 export const EXG_CONFLICTING_SENSORS: ReadonlyArray<{ mask: number; label: string }> =
   Object.freeze([
