@@ -3,115 +3,22 @@ import {
   parseVerisenseFactoryTestReport,
   verisenseFactoryTestReportToCsvRows,
 } from '../../src/devices/verisense/factoryTestReport.js';
-
-/** Join fixture lines with CRLF, as the firmware emits them. */
-const crlf = (lines: string[]): string => lines.join('\r\n') + '\r\n';
-
-/**
- * The annotated SR68-9-0 bench report from
- * `verisense-firmware/docs/VERISENSE_FACTORY_TEST_REPORT.md` §2, annotations
- * removed. Battery fails (no cell fitted) and the PPG AFE is absent, giving
- * the documented `0x00000840` mask.
- */
-const SR68_REPORT = crlf([
-  '//*************************** TEST START ***********************************//',
-  'Firmware version: v2.00.024',
-  'INFO: Temperature pass range set to 10-40° C',
-  '',
-  'MCU:',
-  ' - MAC ID: D3E73E4795BC',
-  '   Device ID: 0x736FE67FC7AC4A35',
-  '   Part: 00052840, Variant: AAD0',
-  '   Last reset: 0x00 (power-on/brownout), boot count = 57',
-  ' - WS_TEST_0001 - PASS: VCore = 1819mV (1750-1850mV)',
-  ' - WS_TEST_0002 - PASS: Temperature = 25° C',
-  ' - WS_TEST_0003 - WARNING: LF crystal error = +42.1 ppm (+3.6 s/day) - expected for this hardware revision (undersized crystal load caps), not a fault (warn limit +/-100.0 ppm, LFCLK src=Xtal)',
-  'I/O status:',
-  ' - WS_TEST_0004 - USB power good: Yes',
-  '',
-  'TWIM1 (part 1):',
-  ' - WS_TEST_0005 - PASS: CAT24M01 EEPROM',
-  '',
-  'Shimmer model:',
-  ' - WS_TEST_0006 - PASS',
-  '      Name: Verisense Pulse+ (SR68-9-0)',
-  '      Manufacturing Order|MAC: 25112101|95BC',
-  '      Advertising Prefix: Verisense',
-  '      Passkey ID: 00 (No Passkey)',
-  '',
-  'Battery:',
-  ' - WS_TEST_0007 - FAIL: VBatt = 483mV (3700-4400mV)',
-  ' - WS_TEST_0008 - Charger status: Charging complete',
-  '',
-  'TWIM1 (part2):',
-  ' - WS_TEST_0009 - PASS: VD6283TX Light sensor (350.0 Lux, CCT: 3933 K) (Flicker: 100.0 Hz, 12% mod)',
-  ' - WS_TEST_0010 - PASS: MLX90640 Thermal sensor (Ambient = 26° C, Object = 26° C)',
-  'TWIM0:',
-  ' - WS_TEST_0011 - PASS: MAX32674C Algorithm hub detected (v50.4.4)',
-  ' - WS_TEST_0012 - FAIL: MAX86176 Pulse oximeter - Chip not detected',
-  ' - WS_TEST_0013 - PASS: LIS2DW12 Accelerometer (25° C)',
-  '',
-  'SPIM2:',
-  ' - WS_TEST_0014 - PASS: LSM6DSV (25° C)',
-  '',
-  'Overall Result = FAIL (0x00000840)',
-  '//**************************** TEST END *********************************//',
-]);
-
-/**
- * The captured SR61-5-0 report from
- * `verisense-firmware/docs/VERISENSE_COMMUNICATION_PROTOCOL.md`. Note it
- * carries no `Firmware version:` line — older captures predate it.
- */
-const SR61_REPORT = crlf([
-  '//**************************** TEST START ************************************//',
-  'INFO: Temperature pass range set to 10-40° C',
-  '',
-  'MCU:',
-  ' - MAC ID: CC8B6F80DE63',
-  '   Device ID: 0x48EEEE365C9ABEEB',
-  '   Part: 00052840, Variant: AAD0',
-  '   Last reset: 0x00 (power-on/brownout), boot count = 57',
-  ' - WS_TEST_0001 - PASS: VCore = 1801mV (1750-1850mV)',
-  ' - WS_TEST_0002 - PASS: Temperature = 25° C',
-  ' - WS_TEST_0003 - PASS: LF crystal error = +3.1 ppm (limit +/-25.0 ppm, LFCLK src=Xtal)',
-  'I/O status:',
-  ' - WS_TEST_0004 - USB power good: Yes',
-  '',
-  'TWIM1 (part 1):',
-  ' - WS_TEST_0005 - PASS: CAT24M01 EEPROM',
-  '',
-  'Shimmer model:',
-  ' - WS_TEST_0006 - PASS',
-  '      Name: Verisense IMU (SR61-5-0)',
-  '      Manufacturing Order|MAC: 26011401|DE63',
-  '      Advertising Prefix: Verisense',
-  '      Passkey ID: 00 (No Passkey)',
-  '      Passkey: 0xFFFFFFFFFFFF',
-  '',
-  'Battery:',
-  ' - WS_TEST_0007 - PASS: VBatt = 4115mV (3700-4400mV)',
-  ' - WS_TEST_0009 - PASS: VD6283TX Light sensor (70.0 Lux, CCT: 2964 K)',
-  ' - WS_TEST_0010 - MLX90640 Thermal sensor test not applicable for this model',
-  'TWIM0:',
-  ' - WS_TEST_0011 - MAX32674C Algorithm hub not applicable for this model',
-  ' - WS_TEST_0012 - MAX86176 Pulse oximeter not applicable for this model',
-  ' - WS_TEST_0013 - LIS2DW12 Accelerometer not applicable for this model',
-  '',
-  'SPIM2:',
-  ' - WS_TEST_0014 - PASS: LSM6DSV (25° C)',
-  ' - WS_TEST_0015 - PASS: LIS2MDL (24° C)',
-  'SPIM3:',
-  ' - WS_TEST_0016 - PASS: Main flash test',
-  '      Manufacturer = TOSHIBA',
-  '      Model = TC58CYG2S0HRAIJ',
-  '      Size = 512 MB',
-  ' - WS_TEST_0017 - STF1 Flash test not applicable for this model',
-  ' - WS_TEST_0018 - STF2 Flash test not applicable for this model',
-  '',
-  'Overall Result = PASS',
-  '//***************************** TEST END *************************************//',
-]);
+import {
+  ABORTED_MODEL_REPORT,
+  DEGREE_VARIANT_REPORTS,
+  FUTURE_TEST_REPORT,
+  GATED_LED_REPORT,
+  GLUED_TEST_LINES_REPORT,
+  GLUED_WARNING_REPORT,
+  LED_NARRATION_REPORT,
+  LEGACY_NUMBERING_REPORT,
+  NAND_HEALTH_DOTS_REPORT,
+  NAND_HEALTH_SKIPPED_REPORT,
+  SHORTENED_LF_WARNING_REPORT,
+  SR61_REPORT,
+  SR68_REPORT,
+  UNRECOGNIZED_LINE_REPORT,
+} from './factoryTestFixtures.js';
 
 describe('parseVerisenseFactoryTestReport - SR68 reference report', () => {
   const parsed = parseVerisenseFactoryTestReport(SR68_REPORT);
@@ -237,30 +144,12 @@ describe('parseVerisenseFactoryTestReport - SR61 reference report', () => {
 });
 
 describe('parseVerisenseFactoryTestReport - firmware version differences', () => {
-  // Pre-v2.00.010 numbering: USB power good was 0003, EEPROM 0004, battery
-  // 0006. Keying on content must still land the values in the right columns.
-  const legacy = crlf([
-    '//*** TEST START ***//',
-    'Firmware version: v2.00.009',
-    'MCU:',
-    ' - WS_TEST_0001 - PASS: VCore = 1801mV (1750-1850mV)',
-    ' - WS_TEST_0002 - PASS: Temperature = 25° C',
-    'I/O status:',
-    ' - WS_TEST_0003 - USB power good: Yes',
-    'TWIM1 (part 1):',
-    ' - WS_TEST_0004 - PASS: CAT24M01 EEPROM',
-    'Battery:',
-    ' - WS_TEST_0006 - FAIL: VBatt = 483mV (3700-4400mV)',
-    'Overall Result = FAIL (0x00000020)',
-    '//*** TEST END ***//',
-  ]);
-
   it('detects the legacy numbering scheme', () => {
-    expect(parseVerisenseFactoryTestReport(legacy).idScheme).toBe('legacy');
+    expect(parseVerisenseFactoryTestReport(LEGACY_NUMBERING_REPORT).idScheme).toBe('legacy');
   });
 
   it('puts values in content-derived columns despite the shifted ids', () => {
-    const parsed = parseVerisenseFactoryTestReport(legacy);
+    const parsed = parseVerisenseFactoryTestReport(LEGACY_NUMBERING_REPORT);
     // Id 0003 is the LF crystal test under the new numbering; here it is USB.
     expect(parsed.metrics.usb_power_good).toBe(true);
     expect(parsed.metrics.lfclk_ppm).toBeUndefined();
@@ -270,7 +159,9 @@ describe('parseVerisenseFactoryTestReport - firmware version differences', () =>
 
   it('decodes the fail mask through the ids this report actually used', () => {
     // Bit 5 => id 6, which is the battery test in the legacy numbering.
-    expect(parseVerisenseFactoryTestReport(legacy).overall.failedTestNames).toEqual(['battery']);
+    expect(
+      parseVerisenseFactoryTestReport(LEGACY_NUMBERING_REPORT).overall.failedTestNames,
+    ).toEqual(['battery']);
   });
 });
 
@@ -279,12 +170,7 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
     // The WARNING text was cut down so it fits the firmware's 128-byte report
     // buffer (the long version lost its CRLF and glued the next line on). The
     // warn limit stays in the line; the ppm/s-day figures and limit all parse.
-    const shortened = crlf([
-      '//*** TEST START ***//',
-      ' - WS_TEST_0003 - WARNING: LF crystal error = +49.3 ppm (+4.2 s/day) - expected for this HW rev (warn limit +/-100.0 ppm, LFCLK src=Xtal)',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(shortened);
+    const parsed = parseVerisenseFactoryTestReport(SHORTENED_LF_WARNING_REPORT);
     expect(parsed.metrics.lfclk_result).toBe('WARNING');
     expect(parsed.metrics.lfclk_ppm).toBe(49.3);
     expect(parsed.metrics.lfclk_s_per_day).toBe(4.2);
@@ -298,15 +184,7 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
     // WARNING text overran the shared buffer, losing its CRLF, so the next
     // section header ran straight on. Reports from those builds still exist,
     // so this must keep parsing.
-    const glued = crlf([
-      '//*** TEST START ***//',
-      ' - WS_TEST_0001 - PASS: VCore = 1819mV (1750-1850mV)',
-      ' - WS_TEST_0002 - PASS: Temperature = 29° C',
-      ' - WS_TEST_0003 - WARNING: LF crystal error = +49.3 ppm (+4.2 s/day) - expected for this hardware revision (undersized crystal load caps), not a I/O status:',
-      ' - WS_TEST_0004 - USB power good: Yes',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(glued);
+    const parsed = parseVerisenseFactoryTestReport(GLUED_WARNING_REPORT);
     expect(parsed.metrics.vcore_mv).toBe(1819);
     expect(parsed.metrics.mcu_temp_c).toBe(29);
     expect(parsed.metrics.lfclk_ppm).toBe(49.3);
@@ -318,33 +196,13 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
   });
 
   it('splits two test lines glued into one', () => {
-    const glued = crlf([
-      '//*** TEST START ***//',
-      ' - WS_TEST_0017 - PASS: STF1 Flash test - WS_TEST_0018 - PASS: STF2 Flash test',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(glued);
+    const parsed = parseVerisenseFactoryTestReport(GLUED_TEST_LINES_REPORT);
     expect(parsed.metrics.stf1_result).toBe('PASS');
     expect(parsed.metrics.stf2_result).toBe('PASS');
   });
 
   it('strips NAND health progress dots and reads the health counters', () => {
-    const withDots = crlf([
-      '//*** TEST START ***//',
-      'SPIM3:',
-      ' - WS_TEST_0016 - PASS: Main flash test',
-      '      Manufacturer = TOSHIBA',
-      '      Model = TC58CYG2S0HRAIJ',
-      '      Size = 512 MB',
-      '      NAND health: testing........................',
-      '..........',
-      ' - WS_TEST_0021 - PASS: NAND health test',
-      '      Bad-block census = 3 of 2048 (limit 40)',
-      '      Stress = 16 blocks / 1024 page checks (0 sampled blocks skipped bad)',
-      '      Corrupt pages = 0, unstable pages = 0, erase/write fails = 0/0',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(withDots);
+    const parsed = parseVerisenseFactoryTestReport(NAND_HEALTH_DOTS_REPORT);
     expect(parsed.metrics.nand_health_result).toBe('PASS');
     expect(parsed.metrics.nand_bad_blocks).toBe(3);
     expect(parsed.metrics.nand_bad_block_total).toBe(2048);
@@ -362,20 +220,7 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
     // The LED tests are operator-visual: the report just narrates the steps.
     // "Test all" runs them on every unit, so an INFO column per LED test would
     // be pure noise — which suite ran is already recorded by the caller.
-    const withLeds = crlf([
-      '//*** TEST START ***//',
-      'LED test (WS_TEST_0019):',
-      ' - All LEDs off',
-      ' - Left Red LED on',
-      ' - Left Green LED on',
-      'LED test (WS_TEST_0020):',
-      ' - Right Red LED on',
-      ' - All LEDs off',
-      ' - WS_TEST_0001 - PASS: VCore = 1819mV (1750-1850mV)',
-      'Overall Result = PASS',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(withLeds);
+    const parsed = parseVerisenseFactoryTestReport(LED_NARRATION_REPORT);
     expect(parsed.metrics.led_status_result).toBeUndefined();
     expect(parsed.metrics.led_batt_result).toBeUndefined();
     // The structured entries keep the narration and verdicts.
@@ -383,49 +228,27 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
     expect(ledStatus?.verdict).toBe('INFO');
     expect(ledStatus?.detail).toContain('Left Red LED on');
     // A model-gated LED test still records NOT_APPLICABLE.
-    const gated = parseVerisenseFactoryTestReport(
-      crlf([
-        '//*** TEST START ***//',
-        ' - WS_TEST_0019 - RGB LED test not applicable for this model',
-        '//*** TEST END ***//',
-      ]),
-    );
+    const gated = parseVerisenseFactoryTestReport(GATED_LED_REPORT);
     expect(gated.metrics.led_status_result).toBe('NOT_APPLICABLE');
     expect(parsed.unparsedLines).toEqual([]);
   });
 
   it('reads the NAND health WARNING (skipped, flash not erased) as its own tier', () => {
-    const skipped = crlf([
-      '//*** TEST START ***//',
-      ' - WS_TEST_0021 - WARNING: NAND health test skipped - needs fully erased flash (erase all logged data first)',
-      '//*** TEST END ***//',
-    ]);
-    expect(parseVerisenseFactoryTestReport(skipped).metrics.nand_health_result).toBe('WARNING');
+    expect(
+      parseVerisenseFactoryTestReport(NAND_HEALTH_SKIPPED_REPORT).metrics.nand_health_result,
+    ).toBe('WARNING');
   });
 
   it('handles every way the degree sign can reach us', () => {
-    const variants = ['25° C', '25Â° C', '25� C'];
-    for (const variant of variants) {
-      const parsed = parseVerisenseFactoryTestReport(
-        crlf([
-          '//*** TEST START ***//',
-          ` - WS_TEST_0002 - PASS: Temperature = ${variant}`,
-          '//*** TEST END ***//',
-        ]),
-      );
+    for (const report of DEGREE_VARIANT_REPORTS) {
+      const parsed = parseVerisenseFactoryTestReport(report);
       expect(parsed.metrics.mcu_temp_c).toBe(25);
     }
   });
 
   it('keeps a report that aborts at the model test', () => {
     // A blank board fails production config, which ends the run early.
-    const aborted = crlf([
-      '//*** TEST START ***//',
-      'Firmware version: v2.00.024',
-      'Shimmer model:',
-      ' - WS_TEST_0006 - FAIL: production config not set',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(aborted);
+    const parsed = parseVerisenseFactoryTestReport(ABORTED_MODEL_REPORT);
     expect(parsed.ok).toBe(true);
     expect(parsed.complete).toBe(false);
     expect(parsed.overall.result).toBeNull();
@@ -436,12 +259,7 @@ describe('parseVerisenseFactoryTestReport - firmware quirks', () => {
 
 describe('parseVerisenseFactoryTestReport - forward compatibility', () => {
   it('captures an unknown future test rather than dropping it', () => {
-    const future = crlf([
-      '//*** TEST START ***//',
-      ' - WS_TEST_0027 - PASS: Widget check (Foo = 12 bar)',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(future);
+    const parsed = parseVerisenseFactoryTestReport(FUTURE_TEST_REPORT);
     const test = parsed.tests.find((t) => t.id === 27);
     expect(test?.name).toBe('ws_test_0027');
     expect(test?.verdict).toBe('PASS');
@@ -450,12 +268,7 @@ describe('parseVerisenseFactoryTestReport - forward compatibility', () => {
   });
 
   it('preserves unrecognized lines instead of failing', () => {
-    const odd = crlf([
-      '//*** TEST START ***//',
-      'Some brand new section nobody has seen',
-      '//*** TEST END ***//',
-    ]);
-    const parsed = parseVerisenseFactoryTestReport(odd);
+    const parsed = parseVerisenseFactoryTestReport(UNRECOGNIZED_LINE_REPORT);
     expect(parsed.ok).toBe(true);
     expect(parsed.unparsedLines).toContain('Some brand new section nobody has seen');
   });
