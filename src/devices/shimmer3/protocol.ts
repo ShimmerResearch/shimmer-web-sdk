@@ -20,6 +20,7 @@ import {
   type StreamSchemaField,
 } from '../shimmer3r/streamSchema.js';
 import { u16le } from '../shimmer3r/protocol.js';
+import { EXG_BANK_LENGTH } from '../exg/registers.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -293,6 +294,93 @@ export function shimmer3UsesThreeByteTimestamp(v: Shimmer3FwVersion): boolean {
   }
 }
 
+/**
+ * Hardware-version codes the firmware-version-code ladder below keys off
+ * (`ShimmerVerDetails.HW_ID`).
+ */
+const HW_ID = Object.freeze({
+  SHIMMER_2R: 2,
+  SHIMMER_3: 3,
+  SHIMMER_3R: 10,
+} as const);
+
+/**
+ * Derive the `ShimmerVerObject` "firmware version code" from a parsed FW version
+ * plus a hardware id — a port of the ladder at ShimmerVerObject.java:266-311.
+ *
+ * The code is a single monotonically-increasing capability number derived from
+ * the (HW id, FW id, major.minor.internal) tuple; the Java driver gates several
+ * protocol features on it rather than on the raw version. Returns `-1` when no
+ * rung matches (firmware older than every known threshold), exactly as Java
+ * initialises it.
+ *
+ * Only the rungs reachable by the hardware this SDK talks to are ported.
+ * Java also awards code 7 on a bare hardware-id match for Shimmer4-SDK and
+ * Arduino, code 6 for the two ShimmerGQ 802.15.4 boards and code 5 for SWEATCH,
+ * none of which these clients connect to; and code 7 on `mFirmwareIdentifier ==
+ * FW_ID.STROKARE`, a bespoke firmware build this SDK has no FW_ID for. A device
+ * running one of those would land one rung lower here than in Java — still
+ * above the ExG gate below in every case, so the difference is inert.
+ *
+ * `compareVersions` semantics (UtilShimmer.java:620-629, via :536-543): same HW
+ * id AND same FW id AND `this` version >= the target, comparing major, then
+ * minor, then internal with `>=`.
+ */
+export function deriveShimmer3FirmwareVersionCode(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): number {
+  const { firmwareIdentifier: id, major, minor, internal } = fw;
+  const ge = (tHw: number, tId: number, tMaj: number, tMin: number, tInt: number): boolean => {
+    if (hardwareVersion !== tHw || id !== tId) return false;
+    return (
+      major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)))
+    );
+  };
+  const L = FW_ID.LOGANDSTREAM;
+  const B = FW_ID.BTSTREAM;
+  const S = FW_ID.SDLOG;
+  if (ge(HW_ID.SHIMMER_3, L, 0, 16, 6)) return 9;
+  if (
+    ge(HW_ID.SHIMMER_3R, L, 0, 0, 1) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 13, 7) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 20, 1)
+  ) {
+    return 8;
+  }
+  if (ge(HW_ID.SHIMMER_3, L, 0, 6, 5)) return 7;
+  if (
+    ge(HW_ID.SHIMMER_3, B, 0, 7, 3) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 5, 4) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 11, 5)
+  ) {
+    return 6;
+  }
+  if (ge(HW_ID.SHIMMER_3, B, 0, 5, 0) || ge(HW_ID.SHIMMER_3, L, 0, 3, 0)) return 5;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 4, 0) || ge(HW_ID.SHIMMER_3, L, 0, 2, 0)) return 4;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 3, 0) || ge(HW_ID.SHIMMER_3, L, 0, 1, 0)) return 3;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 2, 0)) return 2;
+  if (ge(HW_ID.SHIMMER_2R, B, 1, 2, 0) || ge(HW_ID.SHIMMER_3, B, 0, 1, 0)) return 1;
+  return -1;
+}
+
+/**
+ * Whether this firmware carries the live ExG GET/SET register commands — the
+ * gate the Java driver applies before every ExG read and write:
+ * `(getFirmwareVersionInternal() >= 8 && getFirmwareVersionCode() == 2) ||
+ * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4015,4025,4204,4222).
+ *
+ * `firmwareVersionCode == 2` is exactly classic-Shimmer3 BtStream in
+ * [0.2.0, 0.3.0), which only gained the ExG commands at internal 8 — hence the
+ * extra `internal >= 8` leg. Everything newer (code > 2: all LogAndStream,
+ * BtStream >= 0.3.0, SDLog, and every Shimmer3R) has them unconditionally.
+ * BtStream 0.1.x (code 1) and anything below every rung (code -1) are rejected.
+ */
+export function shimmer3SupportsExg(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  const code = deriveShimmer3FirmwareVersionCode(fw, hardwareVersion);
+  return (fw.internal >= 8 && code === 2) || code > 2;
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -354,6 +442,19 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     // resync instead.
     if (numChannels > 32) return RESYNC;
     return SHIMMER3_INQ_CHANNELS_OFFSET + numChannels; // 9 + numChannels
+  }
+
+  if (opcode === OPCODES.EXG_REGS_RESPONSE) {
+    // Variable length: [opcode][count][reg0..reg(count-1)]. The count byte is
+    // the number of registers the firmware is returning, echoed from the request
+    // (`*(resPacket + packet_length++) = exgLength`,
+    // `log-and-stream-common/Comms/shimmer_bt_uart.c:2223-2225`). One ADS1292R
+    // bank is `EXG_BANK_LENGTH` registers and the SDK never asks for more, so a
+    // larger "count" is garbage — resync rather than swallow up to 257 bytes of
+    // real control traffic, the same policy as the memory reads below.
+    if (buf.length < 2) return NEED_MORE;
+    if (buf[1] > EXG_BANK_LENGTH) return RESYNC;
+    return 2 + buf[1];
   }
 
   if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
