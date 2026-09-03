@@ -392,6 +392,7 @@ export {
   buildMemWritePayload,
   parseUartPacket,
   wiredPacketLength,
+  classifyFactoryTestAckPacket,
   isBadResponse,
   badResponseReason,
   parseMacId,
