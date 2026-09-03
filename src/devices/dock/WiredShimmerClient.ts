@@ -1,6 +1,7 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { drainByteStream } from '../../core/framing.js';
 import {
   UART_PACKET_CMD,
   UART_PROP,
@@ -25,8 +26,6 @@ import {
   parseExpansionBoard,
   msToRtcBytesLE,
   isSupportedRtcConfigViaUart,
-  NEED_MORE,
-  RESYNC,
   type UartRxPacket,
   type WiredVersionInfo,
   type WiredBatteryStatus,
@@ -727,39 +726,36 @@ export class WiredShimmerClient extends BaseShimmerClient {
 
   /**
    * Extract every complete packet currently buffered and dispatch each to the
-   * temp handlers, keeping the incomplete tail for the next chunk. A packet
-   * whose CRC fails is dropped one byte at a time to resync (matching the Java
-   * `parseSinglePacket` CRC-fail path).
+   * temp handlers, keeping the incomplete tail for the next chunk.
+   *
+   * Runs on the shared {@link drainByteStream} loop, decoding straight to
+   * {@link UartRxPacket} so the temp handlers receive parsed packets. A packet
+   * that frames but fails its CRC (or will not parse) is refused, and the drain
+   * resyncs by ONE byte rather than skipping the whole supposed length —
+   * matching the Java `parseSinglePacket` CRC-fail path, on the reasoning that a
+   * bad CRC means the framing itself was probably wrong.
    */
   private _drain(): void {
-    let buf = this._rxBuf;
-    for (;;) {
-      if (buf.length === 0) break;
-      const len = wiredPacketLength(buf);
-      if (len === NEED_MORE) break;
-      if (len === RESYNC) {
-        this._log(`resync: dropping byte 0x${buf[0].toString(16)}`);
-        buf = buf.subarray(1);
-        continue;
-      }
-      if (buf.length < len) break; // full packet not here yet
-
-      let pkt: UartRxPacket;
-      try {
-        pkt = parseUartPacket(buf);
-      } catch {
-        buf = buf.subarray(1); // malformed — resync
-        continue;
-      }
-      if (!pkt.crcOk) {
-        this._log('bad CRC → dropping 1 byte to resync');
-        buf = buf.subarray(1);
-        continue;
-      }
-      this._emitTemp(pkt);
-      buf = buf.subarray(pkt.length);
-    }
-    this._rxBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
+    const { messages, rest } = drainByteStream<UartRxPacket>(this._rxBuf, {
+      messageLength: wiredPacketLength,
+      decode: (msg) => {
+        let pkt: UartRxPacket;
+        try {
+          pkt = parseUartPacket(msg);
+        } catch {
+          return null; // malformed
+        }
+        return pkt.crcOk ? pkt : null;
+      },
+      onDrop: (byte, reason) =>
+        this._log(
+          reason === 'rejected'
+            ? 'bad CRC or malformed packet → dropping 1 byte to resync'
+            : `resync: dropping byte 0x${byte.toString(16)}`,
+        ),
+    });
+    this._rxBuf = rest;
+    for (const pkt of messages) this._emitTemp(pkt);
   }
 
   private _onTemp(fn: (pkt: UartRxPacket) => void): void {

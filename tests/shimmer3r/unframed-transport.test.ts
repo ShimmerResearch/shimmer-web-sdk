@@ -339,6 +339,49 @@ describe('Shimmer3RClient control plane over a byte stream', () => {
     expect(res.kBps).toBeGreaterThan(0);
   });
 
+  // The throughput A/B between BLE and classic Bluetooth is the whole point of
+  // reaching the sensor over a COM port, so it matters that re-framing does not
+  // bias the number. On a clean stream it does not: both transports report the
+  // same count. Where they differ is interleaved noise - the framed path counts
+  // raw bytes, the drain counts framable ones and resyncs past the rest - so the
+  // figures are comparable to within one byte per stray, which is the honest
+  // caveat on the comparison.
+  it('reports the same byte count as a framed transport on a clean stream', async () => {
+    const PKT = [OPCODES.DATA_RATE_TEST_RESPONSE, 0, 0, 0, 0];
+    const PACKETS = 20;
+
+    const measure = async (framed: boolean, stray: boolean): Promise<number> => {
+      const t = new LoopbackTransport(framed ? {} : { capabilities: { framed: false } });
+      t.setOnWrite((bytes, tr) => {
+        const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        if (b[0] !== OPCODES.SET_DATA_RATE_TEST) return;
+        setTimeout(() => tr.notify([ACK]), 0);
+        if (b[1] !== 1) return;
+        const stream: number[] = [];
+        for (let i = 0; i < PACKETS; i++) {
+          stream.push(...PKT);
+          if (stray && i === 10) stream.push(0x77); // an interleaved unframeable byte
+        }
+        for (let i = 0; i < stream.length; i += 7) {
+          const slice = stream.slice(i, i + 7);
+          setTimeout(() => tr.notify(slice), 1);
+        }
+      });
+      const c = new Shimmer3RClient({ debug: false, transport: t });
+      await c.connect();
+      return (await c.runDataRateTest(80)).bytesReceived;
+    };
+
+    // Clean stream: identical, so the A/B is trustworthy.
+    expect(await measure(false, false)).toBe(PACKETS * PKT.length);
+    expect(await measure(true, false)).toBe(PACKETS * PKT.length);
+
+    // With one stray byte the framed path counts it and the drain resyncs past
+    // it — a one-byte difference, pinned so the divergence stays known.
+    expect(await measure(true, true)).toBe(PACKETS * PKT.length + 1);
+    expect(await measure(false, true)).toBe(PACKETS * PKT.length);
+  });
+
   it('leaves the BLE path untouched: a framed transport still gets raw chunks', async () => {
     // Same scripted reply, framed transport: the client must take the original
     // code path, where one notification is one message.
