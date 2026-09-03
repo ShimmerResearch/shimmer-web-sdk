@@ -9,8 +9,20 @@ import {
   GSR_UNCAL_LIMIT_RANGE3,
   type TimestampFmt,
 } from './constants.js';
-import { SensorBitmapShimmer3 } from './SensorBitmap.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
+import {
+  EXG_BANK_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  exgBanksEqualIgnoringStatus,
+  applyExgPreset,
+  clearExgResolutionFlags,
+  type ExgChipIndex,
+  type ApplicableExgPreset,
+  type ExgResolution,
+} from '../exg/index.js';
 import { buildStreamSchema, type StreamSchemaBase } from './streamSchema.js';
 import {
   calibrateGsrDataToResistanceFromAmplifierEq,
@@ -1462,67 +1474,201 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // ExG configuration helpers
+  // ExG (ADS1292R) live configuration — GET / SET / preset apply
+  //
+  // Codec-driven port of the Java ExG BT command flow
+  // (ShimmerBluetooth.readEXGConfigurations / writeEXGConfiguration, :4010-4227),
+  // replacing the hardcoded 16-bit-only preset instruction arrays this section
+  // used to carry. The register banks now come from the shared, transport-free
+  // codec in `../exg/` and the GET/SET framing from `../exg/live.ts`, so
+  // Shimmer3R and classic Shimmer3 share one definition of both.
   // ---------------------------------------------------------------------------
 
-  /** Enable EMG (ADS1292R) in 16-bit mode on EXG1 & EXG2. */
+  /**
+   * Read both ExG chips' 10-byte register banks over the radio
+   * (GET_EXG_REGS ×2 → EXG_REGS_RESPONSE decode). Ported from
+   * ShimmerBluetooth.readEXGConfigurations, which issues one GET for CHIP1 then
+   * one for CHIP2 (ShimmerBluetooth.java:4010-4014).
+   *
+   * @throws Error when not connected, or while streaming — the read-back needs
+   *   the control plane, which the data plane owns for the duration of a stream.
+   */
+  async readExgConfig(timeoutMs = 2000): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
+    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
+    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    return { exg1, exg2 };
+  }
+
+  /**
+   * Read one chip's bank. EXG_REGS_RESPONSE is `[0x62][count][reg0..reg9]` — the
+   * byte after the opcode is the register COUNT the firmware is returning, which
+   * it echoes from the request (`*(resPacket + packet_length++) = exgLength`,
+   * `log-and-stream-common/Comms/shimmer_bt_uart.c:2227-2229`). That is the same
+   * length-prefixed shape as an InfoMem or daughter-card read, so this reuses
+   * {@link _readLengthPrefixedResponse} and inherits its ACK-piggyback handling,
+   * notification reassembly, and tolerance of firmware that omits the prefix.
+   */
+  private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
+    return this._readLengthPrefixedResponse(
+      buildGetExgRegsCommand(chip),
+      OPCODES.EXG_REGS_RESPONSE,
+      EXG_BANK_LENGTH,
+      `ExG chip ${chip + 1} register read`,
+      1,
+      1500,
+      timeoutMs,
+    );
+  }
+
+  /**
+   * Write both ExG chips' 10-byte register banks over the radio
+   * (SET_EXG_REGS ×2), then read them back and verify.
+   *
+   * Ports ShimmerBluetooth.writeEXGConfiguration (:4200-4227) — one 14-byte
+   * instruction per chip — with the Shimmer3R-specific oversampling-ratio
+   * injection into REG1 (see {@link _injectOversamplingRatio}).
+   *
+   * WRITE-SAFETY DEVIATION FROM JAVA: the Java driver fires SET_EXG_REGS and does
+   * not verify, relying on a timeout→disconnect failsafe if the write silently
+   * fails (ShimmerBluetooth.java:4028-4034; the register array is cached
+   * driver-side on the bare ACK, :2132). The safer flow is ported instead:
+   * SET → await ACK → GET read-back → compare, ignoring only the read-only REG8
+   * status byte → throw on mismatch. A bad or no-op write therefore surfaces here
+   * rather than as a puzzling disconnect later.
+   *
+   * @throws Error when not connected, while streaming, or on a read-back mismatch.
+   * @throws RangeError when either bank is not exactly 10 bytes.
+   */
+  async writeExgConfig(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot write ExG registers while streaming');
+    if (exg1.length !== EXG_BANK_LENGTH || exg2.length !== EXG_BANK_LENGTH) {
+      throw new RangeError(
+        `ExG register banks must be exactly ${EXG_BANK_LENGTH} bytes each, got ${exg1.length}/${exg2.length}.`,
+      );
+    }
+
+    const b1 = this._injectOversamplingRatio(exg1);
+    const b2 = this._injectOversamplingRatio(exg2);
+
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP1, b1), 1500);
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP2, b2), 1500);
+
+    const readBack = await this.readExgConfig();
+    if (
+      !exgBanksEqualIgnoringStatus(b1, readBack.exg1) ||
+      !exgBanksEqualIgnoringStatus(b2, readBack.exg2)
+    ) {
+      throw new Error(
+        'ExG write read-back mismatch: device registers do not match what was written',
+      );
+    }
+    this._emitStatus('ExG registers written and verified.');
+  }
+
+  /**
+   * Shimmer3R-only: overwrite REG1's (bank byte 0) low 3 bits with the ADS1292R
+   * oversampling ratio for the current sampling rate. This reproduces exactly
+   * what the previous `_writeExgPages` did — `exg[4] = ((exg[4] >> 3) << 3) |
+   * ratio`, where byte 4 of the old 14-byte instruction was register byte 0 — and
+   * keeps using {@link getOversamplingRatioADS1292R} rather than the codec's
+   * `exgRateSettingFromFreq`. The two disagree on purpose: this one uses strict
+   * `<` thresholds (calibration.ts:89, the live-BT path) where the docked
+   * InfoMem/config-generation path uses `<=` (SensorEXG.setExGRateFromFreq), so
+   * they differ at exactly the boundary rates. Classic Shimmer3 does neither —
+   * ShimmerBluetooth.writeEXGConfiguration writes reg[0] verbatim (:4220).
+   */
+  private _injectOversamplingRatio(bank: Uint8Array): Uint8Array {
+    const ratio = getOversamplingRatioADS1292R(this.samplingRateHz);
+    const out = new Uint8Array(bank);
+    out[0] = (((out[0] >> 3) << 3) | ratio) & 0xff;
+    return out;
+  }
+
+  /**
+   * Apply an ExG preset live: derive the register banks and the enabled-sensors
+   * bitmap from the client's current inquiry state (sampling rate, enabled
+   * sensors) via the codec's `applyExgPreset`, write the registers, then update
+   * the bitmap.
+   *
+   * ORDER: ExG registers first, enabled sensors LAST. The desktop write flow
+   * marks `writeEnabledSensors(...)` "this should always be the last command"
+   * (ShimmerBluetooth.java:2732,2735) and runs `writeEXGConfiguration()` earlier
+   * in the same flow (:2670). {@link setSensors} re-inquires, so the streaming
+   * schema and `enabledSensors` end up reflecting the new preset.
+   */
+  async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot configure ExG while streaming');
+
+    // 'off' — LIVE disable. Java never pushes zeroed register banks at the chip:
+    // the ADS1292R forces its must-be bits on write (CONFIG2 bit7 = 1 etc.,
+    // ExGConfigBytesDetails.java:507-525), so a zeroed SET would read back
+    // non-zero and fail the verify in writeExgConfig. The disable is done purely
+    // by dropping the ExG bits from the enabled-sensors bitmap
+    // (writeEnabledSensors, ShimmerBluetooth.java:2732,2735; the ExG register
+    // read/write only run while ExG stays enabled, :2670,4010-4014). The DOCKED
+    // path (`applyExgPreset('off')`) does zero the InfoMem banks — InfoMem is
+    // passive storage, and that is what detectExgPreset keys 'off' off.
+    if (preset === 'off') {
+      await this.setSensors(clearExgResolutionFlags(this.enabledSensors));
+      this._emitStatus("ExG preset 'off' applied (ExG chips disabled). Schema updated.");
+      return;
+    }
+
+    // Seeded from the device's current banks so that the oscillator-clock
+    // PRESERVE path is honoured on hardware whose joined-clock state cannot be
+    // inferred from the hardware id (a classic Shimmer3 with a rev >= 4 unified
+    // ExG board). On a Shimmer3R the banks are fully determined by the preset.
+    const current = await this.readExgConfig();
+    const result = applyExgPreset(
+      {
+        exg1: current.exg1,
+        exg2: current.exg2,
+        enabledSensors: this.enabledSensors,
+        samplingRateHz: this.samplingRateHz,
+        hardwareVersion: HW_ID.SHIMMER_3R,
+      },
+      preset,
+      resolution,
+    );
+
+    await this.writeExgConfig(result.exg1, result.exg2);
+    // Enabled sensors last; setSensors re-inquires and refreshes the schema.
+    await this.setSensors(result.enabledSensors);
+    this._emitStatus(`ExG preset '${preset}' (${resolution}) applied. Schema updated.`);
+  }
+
+  /**
+   * Enable EMG (ADS1292R) in 16-bit mode.
+   *
+   * Thin wrapper over {@link applyExgPresetLive} so the preset bytes have exactly
+   * one source (`EXG_PRESET_ARRAYS` in `../exg/presets.ts`). NOTE that, following
+   * the Java driver, the EMG preset powers chip 2 down and so enables the chip-1
+   * resolution flag ONLY (SensorEXG.setExgChannelBitsPerMode, :2162-2182); the
+   * hardcoded version of this helper enabled both chips' 16-bit flags and
+   * streamed two channels of powered-down noise.
+   */
   async enableEMG16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x69, 0x60, 0x20, 0x00, 0x00, 0x02, 0x03,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0xe1, 0xe1, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('EMG 16-bit enabled on EXG1 & EXG2. Schema updated.');
+    await this.applyExgPresetLive('emg', '16bit');
   }
 
-  /** Enable EXG test signal in 16-bit mode (useful for verifying ExG hardware). */
+  /**
+   * Enable the ExG test signal in 16-bit mode (useful for verifying ExG hardware).
+   * Thin wrapper over {@link applyExgPresetLive} — see {@link enableEMG16Bit}.
+   */
   async enableEXGTestSignal16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xab, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa3, 0x10, 0x15, 0x15, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('EXG test signal 16-bit enabled. Schema updated.');
+    await this.applyExgPresetLive('test-signal', '16bit');
   }
 
-  /** Enable ECG in 16-bit mode on EXG1 & EXG2. */
+  /**
+   * Enable ECG in 16-bit mode on EXG1 & EXG2.
+   * Thin wrapper over {@link applyExgPresetLive} — see {@link enableEMG16Bit}.
+   */
   async enableECG16Bit(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    await this._writeExgPages(
-      new Uint8Array([
-        0x61, 0x00, 0x00, 0x0a, 0x02, 0xa8, 0x10, 0x40, 0x40, 0x2d, 0x00, 0x00, 0x02, 0x03,
-      ]),
-      new Uint8Array([
-        0x61, 0x01, 0x00, 0x0a, 0x02, 0xa0, 0x10, 0x40, 0x47, 0x00, 0x00, 0x00, 0x02, 0x01,
-      ]),
-    );
-    this._emitStatus('ECG 16-bit enabled on EXG1 & EXG2. Schema updated.');
-  }
-
-  private async _writeExgPages(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
-    const oversamplingRatio = getOversamplingRatioADS1292R(this.samplingRateHz);
-    exg1 = new Uint8Array(exg1);
-    exg2 = new Uint8Array(exg2);
-    exg1[4] = (((exg1[4] >> 3) << 3) | oversamplingRatio) & 0xff;
-    exg2[4] = (((exg2[4] >> 3) << 3) | oversamplingRatio) & 0xff;
-
-    await this._write(exg1);
-    await new Promise<void>((r) => setTimeout(r, 200));
-    await this._write(exg2);
-    await new Promise<void>((r) => setTimeout(r, 50));
-
-    const targetBits =
-      (SensorBitmapShimmer3.SENSOR_EXG1_16BIT | SensorBitmapShimmer3.SENSOR_EXG2_16BIT) >>> 0;
-    const newMask = ((this.enabledSensors >>> 0) | targetBits) & 0xffffff;
-    await this.setSensors(newMask);
+    await this.applyExgPresetLive('ecg', '16bit');
   }
 
   // ---------------------------------------------------------------------------
