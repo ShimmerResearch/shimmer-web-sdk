@@ -2822,6 +2822,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
           'Stop the stream first.',
       );
     }
+    /*
+     * Nothing else may be mid-conversation. Once the capture is armed it owns
+     * every inbound byte, so another command's response would be swallowed as
+     * report text and its waiter would sit there until it timed out — and the
+     * buffer flush below would take that command's partial response with it.
+     * Both signals are needed: `_expectingAck` covers a command whose ACK has
+     * not landed, and `_temps` covers one that has been acknowledged and is
+     * still waiting for its payload (or an SD transfer, whose handler stays
+     * attached for the whole transfer).
+     */
+    if (this._expectingAck > 0 || this._temps.size > 0) {
+      throw new FactoryTestError(
+        'busy',
+        'Another command is still waiting for its response. A factory test takes over the whole ' +
+          'link, so it cannot start until that one has finished.',
+      );
+    }
     if (opts.signal?.aborted) {
       throw new DOMException('Factory test aborted', 'AbortError');
     }

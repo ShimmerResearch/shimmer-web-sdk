@@ -248,6 +248,40 @@ describe('runFactoryTest — refusals and state', () => {
     await expect(client.setInternalExpPower(1)).resolves.toBeTruthy();
   });
 
+  it('refuses to start while another command is waiting for its answer', async () => {
+    /* Once the capture is armed it owns every inbound byte, so the other
+       command's response would be swallowed as report text and its caller
+       left waiting for a timeout. */
+    const t = new LoopbackTransport({ capabilities: { framed: true } });
+    let answer: (() => void) | null = null;
+    t.setOnWrite((raw) => {
+      const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        // Held: the version read is in flight for as long as we like.
+        answer = () =>
+          t.notify(
+            new Uint8Array([ACK, OPCODES.FW_VERSION_RESPONSE, 0x03, 0x00, 0x01, 0x00, 0x0c, 0x00]),
+          );
+        return;
+      }
+      setTimeout(() => t.notify(new Uint8Array([ACK])), 0);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    const version = client.readFwVersion();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const before = t.writes.length;
+    await expect(
+      client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.MAIN, { preflight: false }),
+    ).rejects.toMatchObject({ reason: 'busy' });
+    expect(t.writes.length).toBe(before);
+
+    // …and the command that was in flight still completes.
+    answer!();
+    await expect(version).resolves.toBeTruthy();
+  });
+
   it('refuses to start while streaming, before anything is written', async () => {
     const { t, client } = await connected({ framed: true });
     (client as unknown as { _streaming: boolean })._streaming = true;
