@@ -305,13 +305,43 @@ export class WiredShimmerClient extends BaseShimmerClient {
           'await whenFactoryTestIdle() first.',
       );
     }
-    return this._serialize(() => this._runFactoryTestImpl(info, opts));
+    /*
+     * The queue is held until the capture is IDLE, not until the caller has
+     * its answer. Those are different moments: an aborted or timed-out run
+     * rejects at once while the sensor goes on printing, and a command that
+     * started in that window would have its response swallowed as report text
+     * and then hang until its own timeout. Holding the queue through the drain
+     * says the true thing — the link is not free yet — and makes the next
+     * command wait rather than fail.
+     *
+     * So the caller is handed the capture's own promise, while the serialized
+     * unit runs on to the drain's end.
+     */
+    let settle!: (value: Promise<string>) => void;
+    let fail!: (err: unknown) => void;
+    const started = new Promise<Promise<string>>((resolve, reject) => {
+      settle = resolve;
+      fail = reject;
+    });
+    const queued = this._serialize(async () => {
+      try {
+        await this._runFactoryTestImpl(info, opts, settle);
+      } catch (err) {
+        fail(err);
+        throw err;
+      }
+    });
+    // The queue's own promise is bookkeeping; the caller never sees it, and a
+    // rejection it carried would otherwise surface as unhandled.
+    void queued.catch(() => {});
+    return started.then((result) => result);
   }
 
   private async _runFactoryTestImpl(
     info: Shimmer3FactoryTestTypeInfo,
     opts: FactoryTestRunOptions,
-  ): Promise<string> {
+    settle: (value: Promise<string>) => void,
+  ): Promise<void> {
     const transport = this._transport;
     if (!transport) throw new Error('Not connected');
     if (opts.signal?.aborted) throw new DOMException('Factory test aborted', 'AbortError');
@@ -348,7 +378,12 @@ export class WiredShimmerClient extends BaseShimmerClient {
         ),
       );
     }
-    return capture.result;
+    /* The caller's answer is the capture's own promise, so a cancelled run
+       rejects for them at once… */
+    settle(capture.result);
+    /* …while this serialized unit — and with it the command queue — runs on
+       until the sensor has really stopped printing. */
+    await capture.idle;
   }
 
   /**

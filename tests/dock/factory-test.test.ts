@@ -154,6 +154,45 @@ describe('WiredShimmerClient.runFactoryTest', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('holds the queue through the drain, so a cancelled run cannot strand the next command', async () => {
+    /* The caller's rejection and the link being free are different moments.
+       A command that started in between would have its response swallowed as
+       report text and hang until its own timeout. */
+    const { t, client } = await connected({
+      answer: () => cat(ackPacket(), bytesOf(START_BANNER)),
+    });
+    const ctl = new AbortController();
+    const run = client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.LEDS, {
+      signal: ctl.signal,
+      drainIdleMs: 300,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    ctl.abort();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    // The caller knows at once; the sensor does not.
+    expect(client.factoryTestState).toBe('draining');
+
+    let ran = false;
+    const next = client
+      .setConfig(
+        { component: 0x02, property: 0x00, permission: 'READ_WRITE', name: 'ENABLE' },
+        new Uint8Array([1]),
+      )
+      .then(() => {
+        ran = true;
+      });
+    await new Promise((r) => setTimeout(r, 50));
+    // Still queued: the link is not free, so it has not been sent.
+    expect(ran).toBe(false);
+    expect(t.writes.some((w) => w.bytes[1] === UART_PACKET_CMD.WRITE && w.bytes[3] === 0x02)).toBe(
+      false,
+    );
+
+    await client.whenFactoryTestIdle();
+    await next;
+    expect(ran).toBe(true);
+  });
+
   it('fails an in-flight run when the dock link drops', async () => {
     const { t, client } = await connected({
       answer: () => cat(ackPacket(), bytesOf(START_BANNER)),
