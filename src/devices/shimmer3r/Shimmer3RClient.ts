@@ -621,8 +621,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * when it consumes an ACK. Batching would evaluate the coalescing decision
      * for a second ACK+response pair in the same read against a stale count. */
     const { rest, stopped } = drainByteStream(this._ctrlBuf, {
-      messageLength: (buf) =>
-        shimmer3rControlMessageLength(buf, { statusPayloadBytes: this._statusPayloadBytes }),
+      messageLength: this._controlMessageLength,
       onMessage: (msg) => this._handleFramedChunk(msg),
       // DATA_PACKET belongs to the stream plane even before `_streaming` is set
       // (the window between START_STREAMING and its ACK). Its length comes from
@@ -653,11 +652,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Two ACKs are never merged: the second would masquerade as the first's
    * response body.
    */
+  /**
+   * The framer, told how wide this platform's status response is.
+   *
+   * Only STATUS_RESPONSE's length depends on that — one byte on a Shimmer3, two
+   * on a Shimmer3R — and only this client knows which is answering. Both the
+   * drain and the coalescing check go through here rather than calling the
+   * framer directly, because supplying the option in one place and forgetting
+   * it in the other is not a hypothetical: it made a complete Shimmer3 status
+   * look perpetually one byte short, so the ACK and its response were never
+   * coalesced and the waiter timed out.
+   */
+  private _controlMessageLength = (buf: Uint8Array): number =>
+    shimmer3rControlMessageLength(buf, { statusPayloadBytes: this._statusPayloadBytes });
+
   private _coalesceAckWithResponse = (msg: Uint8Array, rest: Uint8Array): number => {
     if (msg.length !== 1 || msg[0] !== OPCODES.ACK_COMMAND_PROCESSED) return 0;
     if (this._expectingAck <= 0) return 0;
     if (rest.length === 0 || rest[0] === OPCODES.ACK_COMMAND_PROCESSED) return 0;
-    const nextLen = shimmer3rControlMessageLength(rest);
+    const nextLen = this._controlMessageLength(rest);
     if (nextLen === NEED_MORE || nextLen === RESYNC || rest.length < nextLen) return 0;
     return nextLen;
   };

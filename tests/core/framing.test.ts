@@ -270,3 +270,34 @@ describe('drainByteStream', () => {
     expect(r.stopped).toBe(false);
   });
 });
+
+describe('drainByteStream type soundness', () => {
+  it('refuses a decoded type with no decode to inhabit it', () => {
+    interface MyPacket {
+      kind: 'mine';
+      n: number;
+    }
+    const len = (b: Uint8Array): number => (b.length >= 2 ? 2 : NEED_MORE);
+
+    // A compile-time assertion, not a runtime one. Without the overload split
+    // this call type-checks, and the implementation's `payload as unknown as T`
+    // then hands `onMessage` a raw Uint8Array the compiler believes is a
+    // MyPacket -- a cast that only fails much later, wherever the caller first
+    // reads a property that was never there. Written as @ts-expect-error so the
+    // build fails if the call ever becomes legal again.
+    // @ts-expect-error `decode` is required whenever T is not Uint8Array
+    drainByteStream<MyPacket>(new Uint8Array([1, 2]), {
+      messageLength: len,
+      onMessage: (m: MyPacket) => void m.n,
+    });
+
+    // The same call WITH a decode is the supported form, and does compile.
+    const decoded: MyPacket[] = [];
+    drainByteStream<MyPacket>(new Uint8Array([1, 2]), {
+      messageLength: len,
+      decode: (msg) => ({ kind: 'mine', n: msg.length }),
+      onMessage: (m) => decoded.push(m),
+    });
+    expect(decoded).toEqual([{ kind: 'mine', n: 2 }]);
+  });
+});
