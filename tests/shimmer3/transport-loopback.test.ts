@@ -630,6 +630,93 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The BMPX80 pressure pair, end to end over the unframed classic path
+// ---------------------------------------------------------------------------
+//
+// A Shimmer3 packs BMP_TEMPERATURE as 2 big-endian bytes and BMP_PRESSURE as 3
+// (bmpX80.h:103-105; i2c.c:389-394 emits them in that order). The schema
+// builder used to describe neither, assumed 2 little-endian bytes for both, and
+// so computed a frame one byte shorter than the firmware sends — which put
+// every channel after pressure at the wrong offset and, on a byte stream with
+// no message boundaries, stopped the parser resynchronising at all. Pressure is
+// a stock sensor: any host that enabled it got this.
+describe('Shimmer3Client streaming with pressure enabled', () => {
+  /** Inquiry with LN accel X, temperature, pressure, GSR — Shimmer3 layout. */
+  const INQUIRY_PRESSURE = [
+    INQ_RSP,
+    0x80,
+    0x02,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x04, // numChannels
+    0x01, // bufferSize
+    0x00,
+    0x1a,
+    0x1b,
+    0x1c,
+  ];
+
+  const ACCEL_X = 1234;
+  const TEMPERATURE = 0xabcd;
+  const PRESSURE = 0x123456;
+  const GSR = 3054;
+
+  /** 13-byte frame: preamble + u24 ts + i16 accel + u16be temp + u24be press + u16 gsr. */
+  function pressureFrame(ts: number): number[] {
+    return [
+      0x00,
+      ts & 0xff,
+      (ts >> 8) & 0xff,
+      (ts >> 16) & 0xff,
+      ACCEL_X & 0xff,
+      (ACCEL_X >> 8) & 0xff,
+      (TEMPERATURE >> 8) & 0xff,
+      TEMPERATURE & 0xff,
+      (PRESSURE >> 16) & 0xff,
+      (PRESSURE >> 8) & 0xff,
+      PRESSURE & 0xff,
+      GSR & 0xff,
+      (GSR >> 8) & 0xff,
+    ];
+  }
+
+  it('sizes the frame as the firmware packs it and decodes the channel after pressure', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_PRESSURE]), 0);
+    });
+    const info = await client.inquiry();
+
+    // 1 preamble + 3 ts + 2 accel + 2 temperature + 3 pressure + 2 gsr = 13.
+    expect(info.schema.frameBytes).toBe(13);
+    expect(info.schema.frameBytes).toBe(pressureFrame(0).length);
+    expect(info.schema.trusted).toBe(true);
+
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.startStreaming();
+
+    t.notify([...pressureFrame(100), ...pressureFrame(200), ...pressureFrame(300)]);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+    const oc = frames[0];
+    expect(oc.get('LN_ACCEL_X', 'raw')!.value).toBe(ACCEL_X);
+    expect(oc.get('TEMPERATURE', 'raw')!.value).toBe(TEMPERATURE);
+    expect(oc.get('PRESSURE', 'raw')!.value).toBe(PRESSURE);
+    // The trailing channel: 2748 (0x0ABC) under the old assumption, which is a
+    // perfectly plausible GSR reading and a completely wrong one.
+    expect(oc.get('GSR', 'raw')!.value).toBe(GSR);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Gate interleaving (Copilot review on the shared-drain PR)
 // ---------------------------------------------------------------------------
 

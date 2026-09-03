@@ -346,6 +346,14 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
   // the Shimmer3 and Shimmer3R header layouts.
   const gsrRange = (bytes[11] >> 1) & 0x07;
 
+  // Bytes 56-65 / 66-75: the two ADS1292R (ExG) register banks, at the same
+  // offsets on both the Shimmer3 and Shimmer3R modern-header branches —
+  // ShimmerSDLog#processSDLogHeader copies from 56 then 66 in each
+  // (ShimmerSDLog.java:253-254 Shimmer3R, :323-324 Shimmer3). All-zero on a
+  // non-ExG device; decode with `decodeExgRegisters` from the ExG codec.
+  const exg1 = bytes.slice(56, 66);
+  const exg2 = bytes.slice(66, 76);
+
   // Bytes 44-51: RTC difference, signed 64-bit MSB-first.
   let rtc = 0n;
   for (let i = 44; i <= 51; i++) rtc = (rtc << 8n) | BigInt(bytes[i]);
@@ -457,6 +465,8 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     expansionBoard,
     imuRanges: parseImuRanges(bytes, hardwareVersion),
     calibration: [],
+    exg1,
+    exg2,
   };
 
   return { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz };

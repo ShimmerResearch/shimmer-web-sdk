@@ -268,6 +268,8 @@ class VirtualCard {
 interface SimOptions {
   /** Notification chunk size — small values exercise reassembly. */
   chunkSize?: number;
+  /** Firmware patch version reported by the sim (default 11 = the gate). */
+  fwPatch?: number;
   maxEntriesPerPage?: number;
   /** Corrupt the CRC of the given (sessionId-agnostic) block seq once. */
   corruptSeqOnce?: number;
@@ -299,8 +301,9 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
 
     switch (cmd[0]) {
       case 0x2e: {
-        // GET_FW_VERSION → LogAndStream (3), v1.01.009
-        send([ACK, 0x2f, 3, 0, 1, 0, 1, 9]);
+        // GET_FW_VERSION → LogAndStream (3), v1.01.<fwPatch> — default 11, the
+        // corruption-free gate (v1.01.009/.010 transfer but corrupt)
+        send([ACK, 0x2f, 3, 0, 1, 0, 1, opts.fwPatch ?? 11]);
         return;
       }
       case OP.LIST_DIR_COMMAND: {
@@ -495,6 +498,19 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
     await expect(client.supportsSdTransfer()).resolves.toBe(true);
   });
 
+  // v1.01.009 and v1.01.010 SERVE the transfer commands but corrupt every
+  // 512-byte block in transit (misaligned sector DMA, CRC computed after the
+  // fact), so the gate must refuse them — and the sd* entry points must
+  // enforce it rather than trust callers to ask first.
+  it.each([9, 10])('gates OUT corrupting firmware v1.01.0%02d', async (fwPatch) => {
+    const { client } = await makeClient(makeCard(), { fwPatch });
+    await expect(client.supportsSdTransfer()).resolves.toBe(false);
+    await expect(client.sdListDir('data')).rejects.toThrow(/v1\.01\.011/);
+    await expect(client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1024)).rejects.toThrow(
+      /v1\.01\.011/,
+    );
+  });
+
   it('sdListDir reassembles responses fragmented into 20-byte notifications', async () => {
     const { client } = await makeClient(makeCard(), { chunkSize: 20 });
     const entries = await client.sdListDir('data/Trial_1');
@@ -621,7 +637,7 @@ describe('Shimmer3RClient SD commands over an UNFRAMED transport', () => {
       fwId: 3,
       major: 1,
       minor: 1,
-      patch: 9,
+      patch: 11,
     });
   });
 

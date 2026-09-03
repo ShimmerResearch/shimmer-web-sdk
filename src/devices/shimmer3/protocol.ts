@@ -13,10 +13,14 @@
  *   com.shimmerresearch.bluetooth.ShimmerBluetooth (response byte layouts + handshake)
  */
 
-import { OPCODES, TIMESTAMP_FIELD, type TimestampFmt } from '../shimmer3r/constants.js';
-import { CHANNEL_FORMATS } from '../shimmer3r/channelFormats.js';
-import { SensorBitmapShimmer3 } from '../shimmer3r/SensorBitmap.js';
-import { u16le, hex2 } from '../shimmer3r/protocol.js';
+import { OPCODES, type TimestampFmt } from '../shimmer3r/constants.js';
+import {
+  buildStreamSchema,
+  type StreamSchemaBase,
+  type StreamSchemaField,
+} from '../shimmer3r/streamSchema.js';
+import { u16le } from '../shimmer3r/protocol.js';
+import { EXG_BANK_LENGTH } from '../exg/registers.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -82,24 +86,24 @@ export const SHIMMER3_SAMPLING_CLOCK_FREQ = 32768;
 // Stream schema
 // ---------------------------------------------------------------------------
 
-/** One decoded channel within a streaming data frame. */
-export interface Shimmer3ChannelField {
-  id: number;
-  name: string;
-  fmt: string;
-  endian: string;
-  sizeBytes: number;
-}
+/**
+ * One decoded channel within a streaming data frame.
+ *
+ * Structurally identical to the Shimmer3R client's field type — the two
+ * families share the channel vocabulary — and kept as its own name because it
+ * is exported. See {@link StreamSchemaField} for what `assumed` and
+ * `offsetTrusted` mean.
+ */
+export type Shimmer3ChannelField = StreamSchemaField;
 
-/** Describes how to slice a streaming data frame, built from an inquiry. */
-export interface Shimmer3StreamSchema {
-  timestampFmt: TimestampFmt;
-  fields: Shimmer3ChannelField[];
-  /** Total bytes per frame, including the 0x00 DATA_PACKET preamble byte. */
-  frameBytes: number;
-  enabledSensors: number;
-  dataPreambleByte: number;
-}
+/**
+ * Describes how to slice a streaming data frame, built from an inquiry.
+ *
+ * `dataPreambleByte` is 0x00 (DATA_PACKET) and `frameBytes` includes it.
+ * `trusted` is the field to check before believing the numbers — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export type Shimmer3StreamSchema = StreamSchemaBase;
 
 /** Typed result of decoding an INQUIRY_RESPONSE. */
 export interface Shimmer3InquiryResult {
@@ -125,78 +129,31 @@ export interface Shimmer3InquiryResult {
 /**
  * Build a stream schema from the channel-ID list reported by the inquiry.
  *
- * Mirrors ShimmerObject#interpretDataPacketFormat (the channel→format mapping is
- * identical for Shimmer3 and Shimmer3R, so `CHANNEL_FORMATS` and
- * `SensorBitmapShimmer3` are reused verbatim). The only Shimmer3-relevant knob is
- * the timestamp width (u24 for firmware code ≥ 6, else u16 — see
- * ShimmerObject#updateTimestampByteLength).
+ * Mirrors ShimmerObject#interpretDataPacketFormat. The generation is fixed at
+ * `'shimmer3'`: this file is the classic-Bluetooth Shimmer3 path, so unlike
+ * `Shimmer3RClient` — which the same firmware answers on both platforms — there
+ * is nothing to determine and nothing to assume. That matters for the BMP
+ * channels, which are 2-byte big-endian temperature + 3-byte big-endian
+ * pressure here and 3 little-endian bytes each on a Shimmer3R
+ * (see `CHANNEL_FORMAT_OVERRIDES`).
+ *
+ * The only Shimmer3-relevant knob is the timestamp width (u24 for firmware code
+ * ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength).
+ *
+ * @param onProblem optional sink for the message an unrecognised channel ID
+ *   produces; `Shimmer3Client` wires it to `onStatus`. The schema's `trusted`
+ *   and `unknownChannelIds` say the same thing to code rather than to a log.
  */
 export function buildShimmer3Schema(
   channelIds: number[],
   timestampFmt: TimestampFmt,
+  onProblem?: (message: string) => void,
 ): Shimmer3StreamSchema {
-  const fields: Shimmer3ChannelField[] = [];
-  const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
-  let frameBytes = 1 + ts.sizeBytes; // 1 = DATA_PACKET (0x00) preamble
-  let enabledSensors = 0;
-
-  for (const id of channelIds) {
-    const fmt = CHANNEL_FORMATS[id];
-    if (!fmt) {
-      fields.push({ id, name: `CH_${hex2(id)}`, fmt: 'i16', endian: 'le', sizeBytes: 2 });
-      frameBytes += 2;
-      continue;
-    }
-    fields.push({ id, ...fmt });
-    frameBytes += fmt.sizeBytes ?? 2;
-    enabledSensors |= channelIdToSensorBit(id);
-  }
-
-  return { timestampFmt, fields, frameBytes, enabledSensors, dataPreambleByte: 0x00 };
-}
-
-/** Map a channel/signal ID to its SensorBitmapShimmer3 enable bit (0 if none). */
-function channelIdToSensorBit(id: number): number {
-  switch (id) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-      return SensorBitmapShimmer3.SENSOR_A_ACCEL;
-    case 0x04:
-    case 0x05:
-    case 0x06:
-      return SensorBitmapShimmer3.SENSOR_D_ACCEL;
-    case 0x14:
-    case 0x15:
-    case 0x16:
-      return SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
-    case 0x07:
-    case 0x08:
-    case 0x09:
-      return SensorBitmapShimmer3.SENSOR_MAG;
-    case 0x0a:
-    case 0x0b:
-    case 0x0c:
-      return SensorBitmapShimmer3.SENSOR_GYRO;
-    case 0x12:
-      return SensorBitmapShimmer3.SENSOR_INT_A1;
-    case 0x1c:
-      return SensorBitmapShimmer3.SENSOR_GSR;
-    case 0x23:
-    case 0x24:
-      return SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
-    case 0x25:
-    case 0x26:
-      return SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
-    case 0x1e:
-    case 0x1f:
-      return SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
-    case 0x21:
-    case 0x22:
-      return SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
-    default:
-      return 0;
-  }
+  return buildStreamSchema(channelIds, timestampFmt, {
+    generation: 'shimmer3',
+    dataPreambleByte: 0x00,
+    onProblem,
+  });
 }
 
 /**
@@ -207,10 +164,14 @@ function channelIdToSensorBit(id: number): number {
  * works, matching Shimmer3RClient's `base` handling).
  *
  * Ported from ShimmerObject#interpretInqResponse, HW_ID.SHIMMER_3 branch.
+ *
+ * @param onProblem optional sink for schema problems (an unrecognised channel
+ *   ID); see {@link buildShimmer3Schema}.
  */
 export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
+  onProblem?: (message: string) => void,
 ): Shimmer3InquiryResult {
   let base = 0;
   if (u8[0] === OPCODES.INQUIRY_RESPONSE) base = 1;
@@ -234,7 +195,7 @@ export function interpretShimmer3InquiryResponse(
   const chStart = base + 8;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
-  const schema = buildShimmer3Schema(channelIds, timestampFmt);
+  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
 
   return {
     opcode: u8[0],
@@ -333,6 +294,93 @@ export function shimmer3UsesThreeByteTimestamp(v: Shimmer3FwVersion): boolean {
   }
 }
 
+/**
+ * Hardware-version codes the firmware-version-code ladder below keys off
+ * (`ShimmerVerDetails.HW_ID`).
+ */
+const HW_ID = Object.freeze({
+  SHIMMER_2R: 2,
+  SHIMMER_3: 3,
+  SHIMMER_3R: 10,
+} as const);
+
+/**
+ * Derive the `ShimmerVerObject` "firmware version code" from a parsed FW version
+ * plus a hardware id — a port of the ladder at ShimmerVerObject.java:266-311.
+ *
+ * The code is a single monotonically-increasing capability number derived from
+ * the (HW id, FW id, major.minor.internal) tuple; the Java driver gates several
+ * protocol features on it rather than on the raw version. Returns `-1` when no
+ * rung matches (firmware older than every known threshold), exactly as Java
+ * initialises it.
+ *
+ * Only the rungs reachable by the hardware this SDK talks to are ported.
+ * Java also awards code 7 on a bare hardware-id match for Shimmer4-SDK and
+ * Arduino, code 6 for the two ShimmerGQ 802.15.4 boards and code 5 for SWEATCH,
+ * none of which these clients connect to; and code 7 on `mFirmwareIdentifier ==
+ * FW_ID.STROKARE`, a bespoke firmware build this SDK has no FW_ID for. A device
+ * running one of those would land one rung lower here than in Java — still
+ * above the ExG gate below in every case, so the difference is inert.
+ *
+ * `compareVersions` semantics (UtilShimmer.java:620-629, via :536-543): same HW
+ * id AND same FW id AND `this` version >= the target, comparing major, then
+ * minor, then internal with `>=`.
+ */
+export function deriveShimmer3FirmwareVersionCode(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): number {
+  const { firmwareIdentifier: id, major, minor, internal } = fw;
+  const ge = (tHw: number, tId: number, tMaj: number, tMin: number, tInt: number): boolean => {
+    if (hardwareVersion !== tHw || id !== tId) return false;
+    return (
+      major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)))
+    );
+  };
+  const L = FW_ID.LOGANDSTREAM;
+  const B = FW_ID.BTSTREAM;
+  const S = FW_ID.SDLOG;
+  if (ge(HW_ID.SHIMMER_3, L, 0, 16, 6)) return 9;
+  if (
+    ge(HW_ID.SHIMMER_3R, L, 0, 0, 1) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 13, 7) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 20, 1)
+  ) {
+    return 8;
+  }
+  if (ge(HW_ID.SHIMMER_3, L, 0, 6, 5)) return 7;
+  if (
+    ge(HW_ID.SHIMMER_3, B, 0, 7, 3) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 5, 4) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 11, 5)
+  ) {
+    return 6;
+  }
+  if (ge(HW_ID.SHIMMER_3, B, 0, 5, 0) || ge(HW_ID.SHIMMER_3, L, 0, 3, 0)) return 5;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 4, 0) || ge(HW_ID.SHIMMER_3, L, 0, 2, 0)) return 4;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 3, 0) || ge(HW_ID.SHIMMER_3, L, 0, 1, 0)) return 3;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 2, 0)) return 2;
+  if (ge(HW_ID.SHIMMER_2R, B, 1, 2, 0) || ge(HW_ID.SHIMMER_3, B, 0, 1, 0)) return 1;
+  return -1;
+}
+
+/**
+ * Whether this firmware carries the live ExG GET/SET register commands — the
+ * gate the Java driver applies before every ExG read and write:
+ * `(getFirmwareVersionInternal() >= 8 && getFirmwareVersionCode() == 2) ||
+ * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4015,4026,4205,4223).
+ *
+ * `firmwareVersionCode == 2` is exactly classic-Shimmer3 BtStream in
+ * [0.2.0, 0.3.0), which only gained the ExG commands at internal 8 — hence the
+ * extra `internal >= 8` leg. Everything newer (code > 2: all LogAndStream,
+ * BtStream >= 0.3.0, SDLog, and every Shimmer3R) has them unconditionally.
+ * BtStream 0.1.x (code 1) and anything below every rung (code -1) are rejected.
+ */
+export function shimmer3SupportsExg(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  const code = deriveShimmer3FirmwareVersionCode(fw, hardwareVersion);
+  return (fw.internal >= 8 && code === 2) || code > 2;
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -394,6 +442,19 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     // resync instead.
     if (numChannels > 32) return RESYNC;
     return SHIMMER3_INQ_CHANNELS_OFFSET + numChannels; // 9 + numChannels
+  }
+
+  if (opcode === OPCODES.EXG_REGS_RESPONSE) {
+    // Variable length: [opcode][count][reg0..reg(count-1)]. The count byte is
+    // the number of registers the firmware is returning, echoed from the request
+    // (`*(resPacket + packet_length++) = exgLength`,
+    // `log-and-stream-common/Comms/shimmer_bt_uart.c:2223-2225`). One ADS1292R
+    // bank is `EXG_BANK_LENGTH` registers and the SDK never asks for more, so a
+    // larger "count" is garbage — resync rather than swallow up to 257 bytes of
+    // real control traffic, the same policy as the memory reads below.
+    if (buf.length < 2) return NEED_MORE;
+    if (buf[1] > EXG_BANK_LENGTH) return RESYNC;
+    return 2 + buf[1];
   }
 
   if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {

@@ -43,9 +43,15 @@ describe('WebSerialTransport DTR/RTS on connect', () => {
   beforeEach(() => {
     hadNavigator = 'navigator' in g;
     savedNavigator = g.navigator;
-    // connect() gates on `'serial' in navigator` before using the injected port.
+    /*
+     * connect() gates on the capability before using the injected port, and that
+     * gate is "requestPort is callable" rather than "the serial property exists"
+     * - a navigator.serial of null or {} would throw on first use, so it counts
+     * as unavailable. These tests inject their own port and never call
+     * requestPort; the stub just has to be shaped like a usable API.
+     */
     Object.defineProperty(globalThis, 'navigator', {
-      value: { serial: {} },
+      value: { serial: { requestPort() {} } },
       configurable: true,
       writable: true,
     });

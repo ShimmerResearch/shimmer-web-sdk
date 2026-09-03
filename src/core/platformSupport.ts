@@ -1,0 +1,263 @@
+/**
+ * Which link types this browser can actually reach, and what to tell the user
+ * when it cannot.
+ *
+ * Every consumer of this SDK was hand-writing the same advice — "Web Serial not
+ * supported, use Chrome/Edge on desktop" — in its own words, in six places
+ * across three repos. All six were wrong in the same way once Chrome shipped Web
+ * Serial on Android, so the knowledge lives here once instead.
+ *
+ * The split this module insists on:
+ *
+ * - **Gate on capability.** `webSerial` / `webBluetooth` report whether the API's
+ *   entry point is *callable* — stricter than `'serial' in navigator`, because a
+ *   property that is `null`, a non-object, or an object without the entry point
+ *   satisfies `in` and still throws the moment anything uses it. Whether calling
+ *   would throw is a fact, and that is what a control's enabled state may rest on.
+ * - **Message on platform.** `isAndroid` / `isIOS` come from the user-agent, and
+ *   are used only to choose which words to show. A UA string is a guess, and
+ *   guesses must never decide what a user is allowed to click.
+ *
+ * The awkward case that shaped the API is Android. Chrome 138+ implements Web
+ * Serial there, but deliberately only for Bluetooth RFCOMM port emulation —
+ * wired ports are a separate feature still rolling out. So `navigator.serial` is
+ * present and callable, and `webSerial` is correctly `true`: the API is usable,
+ * but only for RFCOMM. A wired dock still will not appear in the picker, and no
+ * amount of feature detection separates the two. That is why
+ * {@link transportAvailability} returns three states rather than a boolean:
+ * `'unlikely'` is the honest answer for a wired port on Android, and it maps to
+ * "leave the button enabled and warn" rather than "disable", so devices that do
+ * gain wired support are not locked out.
+ *
+ * iOS is the opposite shape — a harder "no" than an unimplemented API. Every iOS
+ * browser is WebKit, which ships neither API, and iOS exposes no
+ * classic-Bluetooth serial access to third-party apps at any layer: Core
+ * Bluetooth is BLE-only, and classic profiles such as SPP require MFi licensing.
+ * So classic Bluetooth there is impossible rather than merely absent, and no
+ * future browser release changes that. BLE via a browser that bundles its own
+ * stack (Bluefy, WebBLE) is the ceiling.
+ */
+
+/**
+ * The parts of `navigator` this module reads. Injectable so the logic is
+ * testable without a browser — the reason this belongs in the SDK rather than
+ * being copy-pasted into pages, where it could never be unit-tested.
+ */
+export interface NavigatorLike {
+  userAgent?: string;
+  userAgentData?: { platform?: string };
+  maxTouchPoints?: number;
+  serial?: unknown;
+  bluetooth?: unknown;
+}
+
+/** A link the caller wants to offer, independent of how it is implemented. */
+export type TransportNeed = 'ble' | 'classicBluetooth' | 'wiredSerial';
+
+/**
+ * How likely a {@link TransportNeed} is to work here.
+ *
+ * - `available` — the API is present and unrestricted for this need.
+ * - `unlikely` — the API is present but probably cannot serve this need. Keep the
+ *   control enabled and warn; a hard disable would lock out the devices where it
+ *   does work.
+ * - `unavailable` — the API is absent. Disable the control.
+ */
+export type Availability = 'available' | 'unlikely' | 'unavailable';
+
+export interface PlatformSupport {
+  /**
+   * `typeof navigator.serial?.requestPort === 'function'`. Safe to gate on.
+   *
+   * False whenever calling would throw: `serial` missing, `null`, `undefined`, a
+   * non-object, an object without `requestPort`, or a `requestPort` that is not a
+   * function. Note this is a stronger claim than "the property exists" — do not
+   * read it as `'serial' in navigator`.
+   */
+  readonly webSerial: boolean;
+  /**
+   * `typeof navigator.bluetooth?.requestDevice === 'function'`. Safe to gate on.
+   *
+   * False whenever calling would throw: `bluetooth` missing, `null`, `undefined`,
+   * a non-object, an object without `requestDevice`, or a `requestDevice` that is
+   * not a function. All of those satisfy `'bluetooth' in navigator` while still
+   * throwing synchronously on first use, which is why this is the stronger check.
+   */
+  readonly webBluetooth: boolean;
+  /** UA hint. Advice only — never gate on this. */
+  readonly isAndroid: boolean;
+  /** UA hint. Advice only — never gate on this. */
+  readonly isIOS: boolean;
+  /**
+   * Web Serial is present but expected to expose Bluetooth RFCOMM ports only,
+   * so a wired dock will not appear in the picker. True on Android.
+   */
+  readonly serialBluetoothOnly: boolean;
+}
+
+function readNavigator(nav?: NavigatorLike): NavigatorLike {
+  if (nav) return nav;
+  const g = globalThis as { navigator?: NavigatorLike };
+  return g.navigator ?? {};
+}
+
+/**
+ * Whether an API entry point is actually callable.
+ *
+ * Deliberately stricter than "the property exists". `null`, `undefined`, a
+ * non-object, an object lacking the method, and a method that is not a function
+ * all satisfy `'bluetooth' in navigator` while still throwing a synchronous
+ * TypeError the moment anything calls them — so treating the property's presence
+ * as the capability hands callers a flag they cannot safely gate on, which is the
+ * entire job of these fields. The optional chain covers null/undefined and the
+ * typeof covers the rest.
+ * Reported as unavailable instead: an API that cannot be called is, for every
+ * purpose here, absent.
+ */
+function callable(api: unknown, method: string): boolean {
+  return typeof (api as Record<string, unknown> | null | undefined)?.[method] === 'function';
+}
+
+/**
+ * Snapshot what this browser can reach. Call once and pass the result around;
+ * nothing here changes during a page's lifetime.
+ *
+ * Safe outside a browser — with no `navigator` every capability reads `false`,
+ * so a Node or React Native caller gets "nothing available" rather than a throw.
+ */
+export function describePlatformSupport(nav?: NavigatorLike): PlatformSupport {
+  const n = readNavigator(nav);
+  const ua = n.userAgent ?? '';
+  const isAndroid = /Android/i.test(n.userAgentData?.platform || ua);
+  /*
+   * iPadOS 13+ reports itself as "Macintosh" to look like a desktop, so the UA
+   * alone cannot separate an iPad from a Mac — the touch-point count is what
+   * does. Requiring more than one point keeps desktop macOS out, including a Mac
+   * with a stray touch-capable peripheral.
+   */
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (/Mac/.test(ua) && (n.maxTouchPoints ?? 0) > 1);
+  const webSerial = callable(n.serial, 'requestPort');
+  return {
+    webSerial,
+    webBluetooth: callable(n.bluetooth, 'requestDevice'),
+    isAndroid,
+    isIOS,
+    serialBluetoothOnly: webSerial && isAndroid,
+  };
+}
+
+/**
+ * Whether to offer `need` here — see {@link Availability} for how to map the
+ * three states onto a control's enabled state.
+ */
+export function transportAvailability(support: PlatformSupport, need: TransportNeed): Availability {
+  if (need === 'ble') return support.webBluetooth ? 'available' : 'unavailable';
+  if (!support.webSerial) return 'unavailable';
+  /*
+   * Both remaining needs ride Web Serial, and on Android it serves only one of
+   * them: a paired sensor's RFCOMM port is exactly what it exposes, while a
+   * wired dock is the feature that has not arrived.
+   */
+  if (need === 'wiredSerial' && support.serialBluetoothOnly) return 'unlikely';
+  return 'available';
+}
+
+/**
+ * What to tell the user about `need` on this platform, or `null` when there is
+ * nothing worth saying (the API is present and unrestricted).
+ *
+ * Returning `null` on the happy path is deliberate: it lets a caller write
+ * `const msg = transportAdvice(...); if (msg) log(msg);` without first working
+ * out whether this platform is interesting.
+ */
+export function transportAdvice(support: PlatformSupport, need: TransportNeed): string | null {
+  const availability = transportAvailability(support, need);
+
+  if (need === 'ble') {
+    if (availability === 'available') return null;
+    return support.isIOS
+      ? 'Web Bluetooth is not available on iOS — every iOS browser uses WebKit, which does not implement it. Bluefy or WebBLE (App Store) bundle their own BLE stack and can run this page.'
+      : 'Web Bluetooth is not available in this browser. Use Chrome or Edge — desktop or Android — over HTTPS or on localhost.';
+  }
+
+  if (availability === 'unavailable') {
+    if (support.isIOS) {
+      /*
+       * On iOS the only possible route is BLE, so the advice turns on whether
+       * this browser has it. If Web Bluetooth is present we are already inside
+       * Bluefy or WebBLE, and recommending them would tell the user to install
+       * what they are using.
+       *
+       * Deliberately conditional on the *sensor* too. BLE is not a substitute
+       * for classic Bluetooth in general - a classic-only Shimmer3 (the RN42
+       * fleet has no BLE radio at all) cannot be reached from iOS by any route.
+       * Promising "connect over BLE instead" would send exactly the user who
+       * needs classic Bluetooth off after something that cannot work for them.
+       */
+      const route = support.webBluetooth
+        ? 'A sensor that also supports BLE can be reached that way instead.'
+        : 'A sensor that also supports BLE can be reached with Bluefy or WebBLE (App Store), which bundle their own BLE stack.';
+      return need === 'classicBluetooth'
+        ? `Classic Bluetooth cannot be reached from iOS at all: iOS gives apps no classic-Bluetooth serial access (Core Bluetooth is BLE-only, and SPP requires MFi licensing). ${route} A classic-Bluetooth-only sensor cannot be used from iOS.`
+        : `Web Serial is not available on iOS — WebKit does not implement it, so a wired dock cannot be opened. ${route}`;
+    }
+    return need === 'classicBluetooth'
+      ? 'Web Serial is not available in this browser, so classic Bluetooth cannot be used. Use Chrome or Edge on desktop, or Chrome 138+ on Android, over HTTPS or on localhost.'
+      : 'Web Serial is not available in this browser, so the USB/dock connection cannot be used. Use Chrome or Edge on desktop, over HTTPS or on localhost.';
+  }
+
+  if (availability === 'unlikely') {
+    /*
+     * Only reachable for a wired port on Android — see serialBluetoothOnly.
+     *
+     * The classic-Bluetooth alternative is conditional, not prescribed. This
+     * advice is device-agnostic (TransportNeed says nothing about the sensor),
+     * and a Verisense reaches the host over wired USB serial or BLE and has no
+     * RFCOMM at all — so telling every Android caller to "pair over classic
+     * Bluetooth instead" sends wired-only users after a connection that cannot
+     * exist. Same failure as promising BLE on iOS above.
+     */
+    return 'Android Chrome exposes Web Serial for paired Bluetooth devices only, so a wired USB/dock connection will most likely find nothing (wired serial support is still rolling out). A sensor that supports classic Bluetooth can be paired and reached that way instead.';
+  }
+
+  /*
+   * Classic Bluetooth works here, but on Android the picker is empty until the
+   * sensor is paired in system settings — which reads as a bug unless said up
+   * front. Worth a note even though nothing is wrong.
+   */
+  if (need === 'classicBluetooth' && support.isAndroid) {
+    /*
+     * "Pair it first" is necessary but not sufficient, and the insufficient case
+     * is the common one. A dual-mode sensor advertising both radios invites
+     * Android to create an **LE** bond, which satisfies the user ("it's paired")
+     * while leaving no BR/EDR link key and therefore no classic SDP record. Web
+     * Serial enumerates paired devices by their cached SDP service classes, so a
+     * sensor bonded that way is absent from the picker no matter how long you
+     * stare at Bluetooth settings.
+     *
+     * Confirmed on hardware: `dumpsys bluetooth_manager` showed the sensor as
+     * `bredr_linkkey_known:F, le_linkkey_known:T` with an all-zeros UUID list,
+     * while every device that DID list had a BR/EDR key and SPP cached. Pairing
+     * again with the sensor's BLE radio disabled flipped it to
+     * `bredr_linkkey_known:T` with `SPP,…` cached, and it appeared immediately.
+     *
+     * The remedy names the BLE-off/on cycle specifically because the obvious
+     * alternative does not exist: an earlier version of this message suggested
+     * forcing the bond from a classic serial-terminal app, and that was tested
+     * and does not work. Android keeps classic pairing in Settings, and those
+     * apps redirect to it and only list devices already bonded. Sending users
+     * after a route that cannot work is worse than a longer instruction.
+     *
+     * Re-enabling BLE afterwards is safe and was verified: the BR/EDR link key
+     * and the cached `SPP` record both survive, so the sensor keeps working over
+     * both radios and the dance is once per phone, not once per session.
+     *
+     * The "also has a BLE radio" qualifier is load-bearing: this advice is
+     * device-agnostic, and a classic-only sensor (the RN42 Shimmer3 fleet) cannot
+     * have taken an LE bond — for it, "paired but missing" has some other cause,
+     * and the BLE-off dance is a dead end.
+     */
+    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If a sensor that also has a BLE radio is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find. To fix it: disable the sensor’s BLE radio, unpair it on the phone, pair again from Bluetooth settings, then re-enable BLE — the classic bond survives, so this is once per phone.';
+  }
+  return null;
+}

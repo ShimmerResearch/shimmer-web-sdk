@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { RtcDriftMonitor } from '../../src/core/RtcDriftMonitor.js';
-import { csvCell } from '../../src/core/csv.js';
+import { csvCell, csvRow, objectClusterColumns, objectClusterRow } from '../../src/core/csv.js';
+import { ObjectCluster } from '../../src/core/ObjectCluster.js';
 
 /** Feed `n` samples at `cadenceSec` cadence with the device drifting at
  * `ppm`, starting from unix time `t0`. */
@@ -138,5 +139,175 @@ describe('csvCell', () => {
   it('renders null/undefined as empty', () => {
     expect(csvCell(null)).toBe('');
     expect(csvCell(undefined)).toBe('');
+  });
+});
+
+describe('csvRow', () => {
+  it('escapes each cell and joins with commas', () => {
+    expect(csvRow(['a', 1, null, 'x,y'])).toBe('a,1,,"x,y"');
+  });
+
+  it('emits no trailing newline — the caller owns the line ending', () => {
+    // A file destined for Excel on Windows wants CRLF, which only the caller
+    // knows.
+    expect(csvRow(['a'])).toBe('a');
+    expect(csvRow([])).toBe('');
+  });
+
+  it('writes a value of 0 as a cell, not as an empty one', () => {
+    // The trap in every hand-rolled CSV writer: `value || ''` blanks a zero,
+    // so a stationary axis reads as missing data.
+    expect(csvRow([0, 0.0, -0])).toBe('0,0,0');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ObjectCluster -> table
+// ---------------------------------------------------------------------------
+
+/** A frame shaped like a real one: kindless timestamp, then raw/cal pairs. */
+function frame(gx: number, gxCal: number, gsr?: number): ObjectCluster {
+  const oc = new ObjectCluster('Shimmer3R-TEST');
+  oc.add('TIMESTAMP', 1234, 'ticks', null);
+  oc.add('GYRO_X', gx, null, 'raw');
+  oc.add('GYRO_X', gxCal, 'deg/s', 'cal');
+  if (gsr !== undefined) oc.add('GSR', gsr, 'kOhms', 'cal');
+  return oc;
+}
+
+describe('objectClusterColumns', () => {
+  it('follows the frame field order and names each column by kind', () => {
+    const cols = objectClusterColumns(frame(10, 1.5));
+    expect(cols.map((c) => c.header)).toEqual(['TIMESTAMP', 'GYRO_X_RAW', 'GYRO_X_CAL']);
+    expect(cols.map((c) => c.unit)).toEqual(['ticks', null, 'deg/s']);
+    expect(cols.map((c) => c.kind)).toEqual([null, 'raw', 'cal']);
+    expect(cols.every((c) => c.name === 'TIMESTAMP' || c.name === 'GYRO_X')).toBe(true);
+  });
+
+  it('filters to the requested kinds', () => {
+    const oc = frame(10, 1.5);
+    expect(objectClusterColumns(oc, { kinds: ['cal'] }).map((c) => c.header)).toEqual([
+      'GYRO_X_CAL',
+    ]);
+    expect(objectClusterColumns(oc, { kinds: ['raw'] }).map((c) => c.header)).toEqual([
+      'GYRO_X_RAW',
+    ]);
+    // Include null to keep the timestamp — a cal-only file drops it otherwise,
+    // which is rarely what the caller meant.
+    expect(objectClusterColumns(oc, { kinds: ['cal', null] }).map((c) => c.header)).toEqual([
+      'TIMESTAMP',
+      'GYRO_X_CAL',
+    ]);
+  });
+
+  it('contributes one column per name/kind pair, even if a frame repeats it', () => {
+    const oc = new ObjectCluster('dup');
+    oc.add('A', 1, null, 'raw');
+    oc.add('A', 2, null, 'raw');
+    const cols = objectClusterColumns(oc);
+    expect(cols).toHaveLength(1);
+    // The first occurrence wins, and the row reader must agree.
+    expect(objectClusterRow(oc, cols)).toEqual([1]);
+  });
+
+  it('returns nothing for an empty frame rather than throwing', () => {
+    expect(objectClusterColumns(new ObjectCluster('empty'))).toEqual([]);
+  });
+});
+
+describe('objectClusterRow', () => {
+  it('projects a frame onto the columns in column order', () => {
+    const cols = objectClusterColumns(frame(10, 1.5, 42));
+    expect(objectClusterRow(frame(11, 1.6, 43), cols)).toEqual([1234, 11, 1.6, 43]);
+  });
+
+  it('writes null for a column the frame does not carry', () => {
+    // The reason a column set is fixed once: without this the GSR-less frame
+    // would produce a short row and every later cell would shift left.
+    const cols = objectClusterColumns(frame(10, 1.5, 42));
+    expect(objectClusterRow(frame(11, 1.6), cols)).toEqual([1234, 11, 1.6, null]);
+  });
+
+  it('matches the column kind exactly, unlike ObjectCluster.get', () => {
+    // `get(name, null)` means "any kind", so a kindless column would otherwise
+    // pick up the raw field sharing its name.
+    const oc = new ObjectCluster('ambiguous');
+    oc.add('A', 7, null, 'raw');
+    oc.add('A', 9, null, null);
+    const cols = objectClusterColumns(oc);
+    expect(cols.map((c) => c.header)).toEqual(['A_RAW', 'A']);
+    expect(objectClusterRow(oc, cols)).toEqual([7, 9]);
+    // ObjectCluster.get would have answered 7 for the kindless lookup.
+    expect(oc.get('A')?.value).toBe(7);
+  });
+
+  it('writes null for a kindless column when only a raw field shares the name', () => {
+    // The other half of the exact-kind rule: with no kindless field at all,
+    // there must be no fallback to the raw one — the cell stays empty.
+    const oc = new ObjectCluster('raw only');
+    oc.add('A', 7, null, 'raw');
+    const cols = [{ name: 'A', kind: null, unit: null, header: 'A' }] as const;
+    expect(objectClusterRow(oc, cols)).toEqual([null]);
+  });
+
+  it('takes the FIRST of a repeated name/kind pair, not the last', () => {
+    // A repeat is a parser bug rather than a supported shape, but which one
+    // wins must not drift: `objectClusterColumns` documents the first
+    // occurrence, and a row that read the last would silently disagree with
+    // the header its own column set produced. Three values, so "first" cannot
+    // be mistaken for "last" by a two-element fixture.
+    const oc = new ObjectCluster('dup');
+    oc.add('A', 1, null, 'raw');
+    oc.add('A', 2, null, 'raw');
+    oc.add('A', 3, null, 'raw');
+    const cols = objectClusterColumns(oc);
+    expect(cols.map((c) => c.header)).toEqual(['A_RAW']);
+    expect(objectClusterRow(oc, cols)).toEqual([1]);
+  });
+
+  it('resolves a repeated name per kind, first within each kind', () => {
+    // The same name duplicated across BOTH kinds: each column takes the first
+    // field of its own kind, and the kinds do not contaminate each other.
+    const oc = new ObjectCluster('dup pairs');
+    oc.add('A', 1, null, 'raw');
+    oc.add('A', 10, 'g', 'cal');
+    oc.add('A', 2, null, 'raw');
+    oc.add('A', 20, 'g', 'cal');
+    oc.add('A', 100, 'ticks', null);
+    oc.add('A', 200, 'ticks', null);
+    const cols = objectClusterColumns(oc);
+    expect(cols.map((c) => c.header)).toEqual(['A_RAW', 'A_CAL', 'A']);
+    expect(objectClusterRow(oc, cols)).toEqual([1, 10, 100]);
+  });
+
+  it('reads columns in column order, not frame order', () => {
+    // The lookup is an index now, so prove it is still addressed by the column
+    // rather than by whatever position the field happened to land in.
+    const oc = frame(10, 1.5, 42);
+    const cols = objectClusterColumns(oc).slice().reverse();
+    expect(cols.map((c) => c.header)).toEqual(['GSR_CAL', 'GYRO_X_CAL', 'GYRO_X_RAW', 'TIMESTAMP']);
+    expect(objectClusterRow(oc, cols)).toEqual([42, 1.5, 10, 1234]);
+  });
+
+  it('keeps a zero value distinct from a missing one', () => {
+    const cols = objectClusterColumns(frame(0, 0, 0));
+    expect(objectClusterRow(frame(0, 0), cols)).toEqual([1234, 0, 0, null]);
+  });
+
+  it('composes with csvRow into a whole file', () => {
+    const first = frame(10, 1.5, 42);
+    const cols = objectClusterColumns(first);
+    const lines = [
+      csvRow(cols.map((c) => c.header)),
+      csvRow(cols.map((c) => c.unit)),
+      csvRow(objectClusterRow(first, cols)),
+      csvRow(objectClusterRow(frame(11, 1.6), cols)),
+    ];
+    expect(lines).toEqual([
+      'TIMESTAMP,GYRO_X_RAW,GYRO_X_CAL,GSR_CAL',
+      'ticks,,deg/s,kOhms',
+      '1234,10,1.5,42',
+      '1234,11,1.6,',
+    ]);
   });
 });
