@@ -993,15 +993,26 @@ export function writeInfoMemFieldValue(
     }
     case 'mac6[]': {
       const macs = value as readonly string[];
+      // The list is terminated by the first all-0xFF slot, which is where
+      // readInfoMemFieldValue stops. So a missing, malformed or all-0xFF entry
+      // ends the list and every later slot is padded: a MAC written behind a
+      // terminator is unreachable on the next read and would leave the image
+      // holding bytes that contradict the list it parses as.
+      let terminated = false;
       for (let n = 0; n < MAX_NODES; n++) {
         const at = idx + n * MAC_LEN;
-        const mac = macs[n];
-        if (mac === undefined || !/^[0-9a-fA-F]{12}$/.test(mac)) {
+        const mac = terminated ? undefined : macs[n];
+        const parsed =
+          mac !== undefined && /^[0-9a-fA-F]{12}$/.test(mac)
+            ? Array.from({ length: MAC_LEN }, (_unused, b) =>
+                Number.parseInt(mac.slice(b * 2, b * 2 + 2), 16),
+              )
+            : null;
+        if (parsed === null || parsed.every((b) => b === 0xff)) {
+          terminated = true;
           for (let b = 0; b < MAC_LEN; b++) bytes[at + b] = 0xff;
         } else {
-          for (let b = 0; b < MAC_LEN; b++) {
-            bytes[at + b] = Number.parseInt(mac.slice(b * 2, b * 2 + 2), 16);
-          }
+          for (let b = 0; b < MAC_LEN; b++) bytes[at + b] = parsed[b];
         }
       }
       return;
