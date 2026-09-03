@@ -527,7 +527,13 @@ export function classifyFactoryTestAckPacket(buf: Uint8Array): AckVerdict {
   if (buf[0] !== UART_PACKET_HEADER) return { kind: 'text' };
   const total = wiredPacketLength(buf);
   if (total === NEED_MORE) return { kind: 'need-more' };
-  if (total === RESYNC) return { kind: 'text' };
+  /* A header byte followed by something that is not a command byte: line
+     noise, or the tail of a packet that was corrupted mid-flight. Drop one
+     byte and look again, which is what RESYNC means everywhere else in this
+     file — and the same treatment the CRC-bad packet below gets. Calling it
+     text instead would end the search for the ACK and fold whatever follows,
+     the real ACK packet included, into the report. */
+  if (total === RESYNC) return { kind: 'ignore', consumed: 1 };
   if (buf.length < total) return { kind: 'need-more' };
 
   let packet;

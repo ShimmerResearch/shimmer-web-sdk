@@ -198,6 +198,28 @@ describe('classifyFactoryTestAckPacket', () => {
     });
   });
 
+  it('resyncs past a header with an unknown command byte', () => {
+    /* Line noise, not the start of a report: dropping a byte keeps the search
+       for the acknowledgement alive, where calling it text would fold the real
+       ACK packet into the report. */
+    expect(
+      classifyFactoryTestAckPacket(new Uint8Array([UART_PACKET_HEADER, 0x55, 0x00, 0x00])),
+    ).toEqual({ kind: 'ignore', consumed: 1 });
+  });
+
+  it('finds the acknowledgement behind a repeated header byte', () => {
+    /* `$` is not a command byte, so the head is unsizeable — resyncing past it
+       reaches the real packet, where calling it text would have swallowed it. */
+    const noisy = new Uint8Array([UART_PACKET_HEADER, ...ackPacket()]);
+    let at = 0;
+    let verdict = classifyFactoryTestAckPacket(noisy.subarray(at));
+    while (verdict.kind === 'ignore') {
+      at += verdict.consumed;
+      verdict = classifyFactoryTestAckPacket(noisy.subarray(at));
+    }
+    expect(verdict).toEqual({ kind: 'ack', consumed: ackPacket().length });
+  });
+
   it('skips one byte of a CRC-corrupt packet rather than calling it text', () => {
     /* The report has not started yet; one bad byte must not turn the rest of a
        legitimate packet into report content. */
