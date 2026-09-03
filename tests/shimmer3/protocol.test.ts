@@ -6,6 +6,8 @@ import {
   parseShimmer3FwVersionResponse,
   shimmer3UsesThreeByteTimestamp,
   shimmer3ControlMessageLength,
+  deriveShimmer3FirmwareVersionCode,
+  shimmer3SupportsExg,
   FW_ID,
   ACK,
   NACK,
@@ -261,5 +263,87 @@ describe('shimmer3ControlMessageLength (unframed-stream framing primitive)', () 
 
   it('empty buffer needs more', () => {
     expect(shimmer3ControlMessageLength(new Uint8Array([]))).toBe(NEED_MORE);
+  });
+
+  it('EXG_REGS_RESPONSE length comes from its own count byte', () => {
+    const rsp = OPCODES.EXG_REGS_RESPONSE; // 0x62
+    // The count byte is not there yet.
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp]))).toBe(NEED_MORE);
+    // A full bank: [0x62][10][reg0..reg9] = 12 bytes, known from 2 bytes in.
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 10]))).toBe(12);
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 10, ...new Array(10).fill(0)]))).toBe(
+      12,
+    );
+    // A short read is self-describing too.
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 3, 1, 2, 3]))).toBe(5);
+    // A count above one bank cannot be real — resync rather than swallow it.
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 11]))).toBe(RESYNC);
+    expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 0xff]))).toBe(RESYNC);
+  });
+});
+
+describe('deriveShimmer3FirmwareVersionCode (ShimmerVerObject ladder)', () => {
+  const fw = (id: number, major: number, minor: number, internal: number) => ({
+    firmwareIdentifier: id,
+    major,
+    minor,
+    internal,
+  });
+
+  it('places each rung at the Java threshold', () => {
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 16, 6), 3)).toBe(9);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 16, 5), 3)).toBe(8);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 13, 7), 3)).toBe(8);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 13, 6), 3)).toBe(7);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.SDLOG, 0, 20, 1), 3)).toBe(8);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 6, 5), 3)).toBe(7);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 7, 3), 3)).toBe(6);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.SDLOG, 0, 11, 5), 3)).toBe(6);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 5, 0), 3)).toBe(5);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 4, 0), 3)).toBe(4);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 3, 0), 3)).toBe(3);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 2, 0), 3)).toBe(2);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 1, 0), 3)).toBe(1);
+    // Shimmer2R BtStream 1.2.0 is the other code-1 rung.
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 1, 2, 0), 2)).toBe(1);
+  });
+
+  it('is hardware-id gated: a Shimmer3R rung never matches a Shimmer3', () => {
+    // LogAndStream 0.0.1 on a 3R is code 8; on a Shimmer3 no rung matches.
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 0, 1), 10)).toBe(8);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 0, 1), 3)).toBe(-1);
+  });
+
+  it('returns -1 below every rung', () => {
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.BTSTREAM, 0, 0, 9), 3)).toBe(-1);
+    expect(deriveShimmer3FirmwareVersionCode(fw(FW_ID.LOGANDSTREAM, 0, 0, 0), 3)).toBe(-1);
+  });
+});
+
+describe('shimmer3SupportsExg (the Java ExG command gate)', () => {
+  const fw = (id: number, major: number, minor: number, internal: number) => ({
+    firmwareIdentifier: id,
+    major,
+    minor,
+    internal,
+  });
+
+  it('accepts every code > 2', () => {
+    expect(shimmer3SupportsExg(fw(FW_ID.LOGANDSTREAM, 0, 15, 0), 3)).toBe(true); // code 8
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 3, 0), 3)).toBe(true); // code 3
+    expect(shimmer3SupportsExg(fw(FW_ID.LOGANDSTREAM, 0, 0, 1), 10)).toBe(true); // 3R, code 8
+  });
+
+  it('accepts code 2 only from internal 8 up (BtStream 0.2.8)', () => {
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 2, 8), 3)).toBe(true);
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 2, 7), 3)).toBe(false);
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 2, 0), 3)).toBe(false);
+  });
+
+  it('rejects code 1 and code -1', () => {
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 1, 0), 3)).toBe(false);
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 0, 0), 3)).toBe(false);
+    // An internal >= 8 does NOT rescue a firmware whose code is not exactly 2.
+    expect(shimmer3SupportsExg(fw(FW_ID.BTSTREAM, 0, 1, 9), 3)).toBe(false);
   });
 });
