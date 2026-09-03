@@ -30,7 +30,7 @@ function toyLength(buf: Uint8Array): number {
  * the `onMessage` callbacks below would receive `unknown` and `r.messages`
  * would not be a `Uint8Array[]`, so none of this file would type-check.
  */
-const drain = (bytes: number[], opts: Partial<DrainOptions> = {}) =>
+const drain = (bytes: number[], opts: Partial<Omit<DrainOptions, 'decode'>> = {}) =>
   drainByteStream(new Uint8Array(bytes), { messageLength: toyLength, ...opts });
 
 const asArrays = (msgs: Uint8Array[]): number[][] => msgs.map((m) => Array.from(m));

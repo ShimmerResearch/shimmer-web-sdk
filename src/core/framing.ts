@@ -138,6 +138,23 @@ export interface DrainResult<T = Uint8Array> {
  * extracted. That ordering matters whenever `inspect` or `coalesce` consult state
  * a handler mutates synchronously — see that option's note.
  */
+export function drainByteStream(
+  buf: Uint8Array,
+  opts: DrainOptions<Uint8Array> & { decode?: undefined },
+): DrainResult<Uint8Array>;
+/**
+ * Drain into decoded values of type `T`.
+ *
+ * `decode` is REQUIRED in this form, and that is the whole point of splitting
+ * the signature: `T` is only ever inhabited by what `decode` returns, so
+ * `drainByteStream<MyPacket>(buf, { messageLength, onMessage })` — no `decode` —
+ * must not compile. It used to, and the implementation's cast then handed
+ * `onMessage` a raw `Uint8Array` that the compiler believed was a `MyPacket`.
+ */
+export function drainByteStream<T>(
+  buf: Uint8Array,
+  opts: DrainOptions<T> & { decode: (msg: Uint8Array) => T | null },
+): DrainResult<T>;
 export function drainByteStream<T = Uint8Array>(
   buf: Uint8Array,
   opts: DrainOptions<T>,
@@ -201,8 +218,9 @@ export function drainByteStream<T = Uint8Array>(
       }
       deliver(decoded);
     } else {
-      // No decode: T is its default, Uint8Array. The cast is the price of one
-      // signature serving both the raw and the decoded case.
+      // No decode: T is Uint8Array, guaranteed by the overloads above — the
+      // decoded form cannot be reached without a `decode`. The cast is confined
+      // to this implementation signature and is unobservable to callers.
       deliver(payload as unknown as T);
     }
     rest = rest.subarray(consumed);
