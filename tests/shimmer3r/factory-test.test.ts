@@ -248,6 +248,27 @@ describe('runFactoryTest — refusals and state', () => {
     await expect(client.setInternalExpPower(1)).resolves.toBeTruthy();
   });
 
+  it('routes the bytes after TEST END before telling the host the link is free', async () => {
+    /* The state callback fires from inside the capture, which the notify
+       handler calls BEFORE it routes the tail. A host that sent its next
+       command straight out of a synchronous callback could have that command's
+       acknowledgement satisfied by the test's own leftovers. */
+    const { client } = await connected({
+      framed: true,
+      answer: () => cat(new Uint8Array([ACK]), bytesOf(REPORT), STATUS_PUSH),
+    });
+    const order: string[] = [];
+    client.onDeviceStatus = () => order.push('tail-routed');
+    client.onFactoryTestStateChange = (s) => {
+      if (s === 'idle') order.push('host-told');
+    };
+    await client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.MAIN, {
+      preflight: false,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual(['tail-routed', 'host-told']);
+  });
+
   it('refuses to start while another command is waiting for its answer', async () => {
     /* Once the capture is armed it owns every inbound byte, so the other
        command's response would be swallowed as report text and its caller

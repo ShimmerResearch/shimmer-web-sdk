@@ -357,11 +357,22 @@ export class WiredShimmerClient extends BaseShimmerClient {
            command straight out of this callback is not refused by the run it
            was just told had ended. */
         if (state === 'idle') this._releaseFactoryTest();
-        try {
-          this.onFactoryTestStateChange?.(state);
-        } catch (e) {
-          this._log('onFactoryTestStateChange handler error', e);
-        }
+        /* …and the host is told on a MICROTASK, not from inside `feed()`.
+         * The capture is called from the notify handler, which has not yet
+         * routed the tail bytes `feed()` just handed back — a late ACK, or a
+         * status push glued to the TEST END banner. A host that sent its next
+         * command straight out of a synchronous callback could have that
+         * command's acknowledgement satisfied by the test's own leftovers.
+         * Deferring by one microtask puts the callback after the routing and
+         * before anything else, which is also where `whenFactoryTestIdle()`
+         * already resolves. */
+        queueMicrotask(() => {
+          try {
+            this.onFactoryTestStateChange?.(state);
+          } catch (e) {
+            this._log('onFactoryTestStateChange handler error', e);
+          }
+        });
       },
     });
 
