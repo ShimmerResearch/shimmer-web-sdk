@@ -123,6 +123,20 @@ export const FACTORY_TEST_DRAIN_IDLE_MS = 10_000;
 const TEST_START_SENTINEL = 'TEST START';
 const TEST_END_SENTINEL = 'TEST END';
 
+/**
+ * Cap on the in-progress line, in characters.
+ *
+ * `_line` exists only to spot a sentinel, and it is emptied at every newline —
+ * so on any report it stays around the firmware's own 128-character write, or
+ * twice that where a truncated write glued two lines together. A device that
+ * sent no newline at all would otherwise grow it without limit, and the drain
+ * is exactly the state a misbehaving device is left in. Four times the
+ * firmware's buffer is far past any real line and still bounded; the head is
+ * what gets dropped, because a sentinel sits at the END of the line that
+ * carries it.
+ */
+const MAX_LINE_CHARS = 512;
+
 /** Options shared by every client's `runFactoryTest`. */
 export interface FactoryTestRunOptions {
   /**
@@ -449,6 +463,9 @@ export class FactoryTestCapture {
          nothing. */
       if (accumulate) text += ch;
       this._line += ch;
+      if (this._line.length > MAX_LINE_CHARS) {
+        this._line = this._line.slice(-MAX_LINE_CHARS);
+      }
       if (b !== 0x0a) continue;
 
       const line = this._line.replace(/\r?\n$/, '');

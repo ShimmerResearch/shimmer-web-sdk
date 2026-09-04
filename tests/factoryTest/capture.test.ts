@@ -446,6 +446,45 @@ describe('FactoryTestCapture', () => {
   });
 });
 
+describe('FactoryTestCapture line buffering', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not grow without limit on a device that never sends a newline', () => {
+    /* `_line` is emptied at every newline, so a report keeps it near the
+       firmware's own 128-character write. A device that sends none would grow
+       it for as long as the drain lasts — and the drain is the state a
+       misbehaving device is left in. */
+    const cap = new FactoryTestCapture(classify, { timeoutMs: 30_000 });
+    cap.start();
+    cap.feed(u8(ACK));
+    for (let i = 0; i < 200; i++) cap.feed(bytes('x'.repeat(1000)));
+    const line = (cap as unknown as { _line: string })._line;
+    expect(line.length).toBeLessThanOrEqual(512);
+  });
+
+  it('still finds the sentinel on a line long enough to be capped', () => {
+    // The head is what is dropped, and a sentinel sits at the line's end.
+    const cap = new FactoryTestCapture(classify, { timeoutMs: 30_000 });
+    cap.start();
+    cap.feed(u8(ACK));
+    cap.feed(
+      bytes(`${START_BANNER}
+`),
+    );
+    cap.feed(bytes('y'.repeat(5000)));
+    cap.feed(
+      bytes(`${END_BANNER}
+`),
+    );
+    expect(cap.state).toBe('idle');
+  });
+});
+
 describe('FactoryTestCapture.fail() while draining', () => {
   beforeEach(() => {
     vi.useFakeTimers();
