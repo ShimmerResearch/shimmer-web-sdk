@@ -1436,7 +1436,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * The guard is **only** as good as `_streaming`, which tracks the streams
    * this client started. The firmware blocks configuration writes for anything
    * it considers sensing, SD logging included, and this client holds no local
-   * SD-logging flag — `readStatus()` is the only way to learn about a log
+   * SD-logging flag — {@link getStatus} is the only way to learn about a log
    * started before it connected or by another host. So a write can still be
    * refused by the device after passing this check; that refusal arrives as a
    * NACK and is reported as one. The message says as much rather than implying

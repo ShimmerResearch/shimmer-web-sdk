@@ -159,4 +159,41 @@ describe('VerisenseBleDevice over LoopbackTransport', () => {
     expect(t.connected).toBe(false);
     expect(disconnected).toHaveLength(1);
   });
+
+  it('reports an unexpected drop through the shared onDisconnect contract', async () => {
+    /* `onDisconnect` is inherited from BaseShimmerClient and documented as
+       part of every client's surface, but it is only armed by the client that
+       connects — so this one used to hand callers a slot that could never
+       fire. The `disconnected` event stays the idiom here; both must work. */
+    const t = new LoopbackTransport();
+    scriptBootstrap(t);
+    const v = new VerisenseBleDevice({ debug: false, transport: t });
+    await v.connect();
+
+    const events: unknown[] = [];
+    const callbacks: unknown[] = [];
+    v.on('disconnected', (e) => events.push(e));
+    v.onDisconnect = (reason) => callbacks.push(reason ?? null);
+
+    // The transport's own error is the only thing that says WHY the link went.
+    const cause = new Error('gatt disconnected');
+    t.emitDisconnect(cause);
+    expect(events).toHaveLength(1);
+    expect(callbacks).toEqual([cause]);
+  });
+
+  it('stays silent on a teardown the application asked for', async () => {
+    const t = new LoopbackTransport();
+    scriptBootstrap(t);
+    const v = new VerisenseBleDevice({ debug: false, transport: t });
+    await v.connect();
+
+    const callbacks: unknown[] = [];
+    v.onDisconnect = () => callbacks.push(1);
+
+    await v.disconnect();
+    // A transport event arriving after our own disconnect is not a fault.
+    t.emitDisconnect();
+    expect(callbacks).toHaveLength(0);
+  });
 });

@@ -343,8 +343,16 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   /** Subscribe to a transport's notify/disconnect streams. */
   private _wireTransport(transport: ShimmerTransport): void {
     this._transport = transport;
+    /* Arm the base class's `onDisconnect` for this connection as well as this
+       client's own `disconnected` event. Both exist for a reason: the event is
+       what every Verisense consumer here listens to, while `onDisconnect` is
+       part of the shared client contract, and a caller written against that
+       contract was previously handed a callback that could never fire. */
+    this._armDisconnectNotification();
     this._notifyUnsub = transport.onNotify((bytes) => this._feedStreamBytes(bytes));
-    this._disconnectUnsub = transport.onDisconnect(() => this._handleTransportDisconnect());
+    this._disconnectUnsub = transport.onDisconnect((reason) =>
+      this._handleTransportDisconnect(reason),
+    );
   }
 
   /** Drop the current transport's notify/disconnect subscriptions. */
@@ -364,12 +372,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   /** Handle an unexpected / requested transport disconnect (link drop). */
-  private _handleTransportDisconnect(): void {
+  private _handleTransportDisconnect(reason?: Error): void {
     const kind: TransportKind = this._transportKind === 'serial' ? 'serial' : 'ble';
     this._mode = 'idle';
     this._transportKind = null;
-    if (this._suppressDisconnectedEvent) return;
+    if (this._suppressDisconnectedEvent) {
+      // Application-initiated teardown is not a fault for either channel.
+      this._suppressDisconnectNotification();
+      return;
+    }
     this.emit('disconnected', { kind });
+    /* The transport's own error, not a synthesised one: it is the only thing
+       that says WHY the link went, and the other clients forward it. The
+       `disconnected` event keeps its existing shape. */
+    this._emitDisconnect(reason);
   }
 
   /**
