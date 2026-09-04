@@ -487,7 +487,9 @@ describe('Shimmer3Client daughter-card memory', () => {
   it('writeDaughterCardMem sends [cmd, len, offLSB, offMSB, data...] and resolves on ACK', async () => {
     const data = [0xde, 0xad, 0xbe, 0xef];
     const { t, client } = await connected();
-    t.setOnWrite((_bytes, tr) => setTimeout(() => tr.notify([ACK]), 0));
+    t.setOnWrite((_bytes, tr) => {
+      setTimeout(() => tr.notify([ACK]), 0);
+    });
 
     await client.writeDaughterCardMem(OFFSET, Uint8Array.from(data));
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { WiredShimmerClient } from '../../src/devices/dock/WiredShimmerClient.js';
 import { SmartDockClient } from '../../src/devices/dock/SmartDockClient.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { uartArg } from '../dock/uartArg.js';
 import { buildUartPacket, parseUartPacket } from '../../src/devices/dock/protocol.js';
 import { UART_PACKET_CMD } from '../../src/devices/dock/constants.js';
 import { generateInfoMem, parseInfoMem, INFOMEM_SIZE } from '../../src/devices/infomem/index.js';
@@ -35,12 +36,6 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
     const req = parseUartPacket(bytes);
     const c = req.component;
     const p = req.property;
-    const arg = (comp: number, prop: number) => ({
-      component: comp,
-      property: prop,
-      permission: 'READ_WRITE' as const,
-      name: 'x',
-    });
 
     if (req.command === UART_PACKET_CMD.READ) {
       if (c === 0x01 && p === 0x02) return reply(MAC_PAYLOAD);
@@ -53,7 +48,7 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
         const view = store.slice();
         if (opts.divergeReadback) opts.divergeReadback(view);
         const data = view.slice(off, off + size);
-        const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(0x01, 0x06), data);
+        const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, uartArg(0x01, 0x06), data);
         if (opts.corruptInfoMemCrc) rsp[rsp.length - 1] ^= 0xff;
         setTimeout(() => tr.notify(rsp), 0);
       }
@@ -71,7 +66,7 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
 
     function reply(payload: Uint8Array): void {
       setTimeout(
-        () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(c!, p!), payload)),
+        () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, uartArg(c!, p!), payload)),
         0,
       );
     }

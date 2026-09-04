@@ -7,6 +7,7 @@ import {
 } from '../../src/devices/dock/protocol.js';
 import { UART_PACKET_CMD, UART_PROP } from '../../src/devices/dock/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { uartArg } from './uartArg.js';
 
 // Drive WiredShimmerClient against a scripted in-memory dock over a transport
 // marked `framed: false` (dock UART is an unframed serial byte stream). These
@@ -38,7 +39,7 @@ function scriptDock(t: LoopbackTransport, opts: { corruptCrc?: boolean } = {}): 
       else if (c === 0x02 && p === 0x02) payload = BAT_PAYLOAD;
       else if (c === 0x03 && p === 0x02) payload = CARDID_PAYLOAD;
       if (payload) {
-        const arg = { component: c!, property: p!, permission: 'READ_ONLY' as const, name: 'x' };
+        const arg = uartArg(c!, p!, 'READ_ONLY');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, payload);
         if (opts.corruptCrc) rsp[rsp.length - 1] ^= 0xff;
         setTimeout(() => tr.notify(rsp), 0);
@@ -144,12 +145,7 @@ describe('WiredShimmerClient config', () => {
       if (req.command === UART_PACKET_CMD.READ && req.component === 0x01 && req.property === 0x06) {
         // Echo the requested size worth of bytes.
         const size = req.payload[0];
-        const arg = {
-          component: 0x01,
-          property: 0x06,
-          permission: 'READ_WRITE' as const,
-          name: 'INFOMEM',
-        };
+        const arg = uartArg(0x01, 0x06, 'READ_WRITE', 'INFOMEM');
         const data = Uint8Array.from({ length: size }, (_, i) => i);
         setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, data)), 0);
       }
@@ -174,12 +170,7 @@ describe('WiredShimmerClient robustness (unframed stream)', () => {
     t.setOnWrite((bytes, tr) => {
       const req = parseUartPacket(bytes);
       if (req.command === UART_PACKET_CMD.READ) {
-        const arg = {
-          component: 0x01,
-          property: 0x02,
-          permission: 'READ_ONLY' as const,
-          name: 'MAC',
-        };
+        const arg = uartArg(0x01, 0x02, 'READ_ONLY', 'MAC');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, MAC_PAYLOAD);
         dribble(tr, [...rsp]);
       }
@@ -212,12 +203,7 @@ describe('WiredShimmerClient robustness (unframed stream)', () => {
     t.setOnWrite((bytes, tr) => {
       const req = parseUartPacket(bytes);
       if (req.command === UART_PACKET_CMD.READ) {
-        const arg = {
-          component: 0x02,
-          property: 0x02,
-          permission: 'READ_ONLY' as const,
-          name: 'BAT',
-        };
+        const arg = uartArg(0x02, 0x02, 'READ_ONLY', 'BAT');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, BAT_PAYLOAD);
         // Prepend non-header noise; the client should resync on the '$'.
         setTimeout(() => tr.notify(Uint8Array.from([0x11, 0x22, ...rsp])), 0);

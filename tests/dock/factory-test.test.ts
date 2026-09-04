@@ -42,8 +42,8 @@ const cat = (...parts: Uint8Array[]) => {
   return out;
 };
 
-const ackPacket = () => buildUartPacket(UART_PACKET_CMD.ACK_RESPONSE);
-const badCmdPacket = () => buildUartPacket(UART_PACKET_CMD.BAD_CMD_RESPONSE);
+const ackPacket = () => buildUartPacket(UART_PACKET_CMD.ACK_RESPONSE, null);
+const badCmdPacket = () => buildUartPacket(UART_PACKET_CMD.BAD_CMD_RESPONSE, null);
 
 async function connected(opts: {
   answer?: (cmd: Uint8Array) => Uint8Array | null;

@@ -4,7 +4,11 @@ import { VerisenseBleDevice } from '../../src/devices/verisense/VerisenseClient.
 // connectWithRetry() drives this.connect() in a loop; stub connect (and the
 // GATT cleanup helper, which touches Web Bluetooth objects) so the retry
 // policy itself can be exercised without a browser BLE stack.
-type Stubbed = VerisenseBleDevice & {
+// `connect` is REPLACED, not intersected: VerisenseBleDevice#connect takes an
+// options object and returns Promise<boolean>, which has no overlap with the
+// mock's signature, so a plain intersection reduces the whole type to `never`
+// and every member access below fails.
+type Stubbed = Omit<VerisenseBleDevice, 'connect'> & {
   connect: ReturnType<typeof vi.fn>;
   _cleanupFailedBleConnectAttempt: ReturnType<typeof vi.fn>;
 };

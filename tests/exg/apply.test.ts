@@ -10,6 +10,7 @@ import {
   type ApplicableExgPreset,
   type ExgResolution,
 } from '../../src/devices/exg/index.js';
+import type { ExgApplyInput } from '../../src/devices/exg/apply.js';
 
 // Sensor-bitmap resolution masks (ConfigByteLayoutShimmer3.java:300-303).
 const EXG1_24BIT = 0x000010;
@@ -29,7 +30,11 @@ const zeros = () => new Uint8Array(10);
 const u8 = (a: readonly number[]): Uint8Array => new Uint8Array(a);
 
 /** A fresh (unconfigured) apply input at a given rate / hardware version. */
-const freshInput = (samplingRateHz: number, hardwareVersion?: number, enabledSensors = 0) => ({
+const freshInput = (
+  samplingRateHz: number,
+  hardwareVersion?: number,
+  enabledSensors = 0,
+): ExgApplyInput => ({
   exg1: zeros(),
   exg2: zeros(),
   enabledSensors,

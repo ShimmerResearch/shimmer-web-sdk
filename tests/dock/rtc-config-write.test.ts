@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { WiredShimmerClient } from '../../src/devices/dock/WiredShimmerClient.js';
 import { SmartDockClient } from '../../src/devices/dock/SmartDockClient.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { uartArg } from './uartArg.js';
 import {
   buildUartPacket,
   parseUartPacket,
@@ -63,12 +64,6 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
     const req = parseUartPacket(bytes);
     const c = req.component;
     const p = req.property;
-    const arg = (comp: number, prop: number) => ({
-      component: comp,
-      property: prop,
-      permission: 'READ_WRITE' as const,
-      name: 'x',
-    });
 
     if (req.command === UART_PACKET_CMD.READ) {
       if (c === 0x01 && p === 0x02) return reply(MAC_PAYLOAD);
@@ -79,7 +74,8 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
         const off = addr >= 0x1800 ? addr - 0x1800 : addr;
         const data = store.slice(off, off + size);
         setTimeout(
-          () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(0x01, 0x06), data)),
+          () =>
+            tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, uartArg(0x01, 0x06), data)),
           0,
         );
       }
@@ -100,7 +96,7 @@ function scriptDock(t: LoopbackTransport, opts: DockOpts = {}): { store: Uint8Ar
 
     function reply(payload: Uint8Array): void {
       setTimeout(
-        () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg(c!, p!), payload)),
+        () => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, uartArg(c!, p!), payload)),
         0,
       );
     }

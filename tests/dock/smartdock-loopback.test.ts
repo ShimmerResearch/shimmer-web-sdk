@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SmartDockClient } from '../../src/devices/dock/SmartDockClient.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { uartArg } from './uartArg.js';
 import { buildUartPacket, parseUartPacket } from '../../src/devices/dock/protocol.js';
 import { UART_PACKET_CMD } from '../../src/devices/dock/constants.js';
 
@@ -64,7 +65,7 @@ function scriptShimmer(t: LoopbackTransport, state: BaseState): void {
     else if (c === 0x02 && p === 0x02) payload = BAT_PAYLOAD;
     else if (c === 0x03 && p === 0x02) payload = CARDID_PAYLOAD;
     if (payload) {
-      const arg = { component: c!, property: p!, permission: 'READ_ONLY' as const, name: 'x' };
+      const arg = uartArg(c!, p!, 'READ_ONLY');
       setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, payload!)), 0);
     }
   });
