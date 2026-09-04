@@ -1,4 +1,5 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { HandlerSet } from '../../core/handlerSet.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { drainByteStream } from '../../core/framing.js';
@@ -126,7 +127,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private _disconnectUnsub: Unsubscribe | null = null;
 
   private _rxBuf: Uint8Array = new Uint8Array(0);
-  private _temps: Set<(pkt: UartRxPacket) => void> = new Set();
+  private readonly _temps = new HandlerSet<UartRxPacket>((e) => this._log('temp handler error', e));
 
   /**
    * Serialization queue. Every public command method chains onto this so that
@@ -979,12 +980,6 @@ export class WiredShimmerClient extends BaseShimmerClient {
     this._temps.delete(fn);
   }
   private _emitTemp(pkt: UartRxPacket): void {
-    this._temps.forEach((fn) => {
-      try {
-        fn(pkt);
-      } catch (e) {
-        this._log('temp handler error', e);
-      }
-    });
+    this._temps.emit(pkt);
   }
 }
