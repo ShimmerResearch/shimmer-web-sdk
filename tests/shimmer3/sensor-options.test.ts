@@ -152,7 +152,9 @@ describe('Shimmer3 option tables: coverage of the client setter ranges', () => {
     // Drive the real setters rather than restating their bounds: this fails if
     // a table grows past what the client validates, in either direction.
     const t = new LoopbackTransport({ deviceName: 'Shimmer3R-TEST' });
-    t.setOnWrite((_bytes, tr) => setTimeout(() => tr.notify([0xff]), 0));
+    t.setOnWrite((_bytes, tr) => {
+      setTimeout(() => tr.notify([0xff]), 0);
+    });
     const client = new Shimmer3RClient({ debug: false, transport: t });
     await client.connect();
 
@@ -288,7 +290,9 @@ describe('sampling rate <-> divisor', () => {
 
   it('matches what the client applies, rather than a second opinion', async () => {
     const t = new LoopbackTransport({ deviceName: 'Shimmer3R-TEST' });
-    t.setOnWrite((_bytes, tr) => setTimeout(() => tr.notify([0xff]), 0));
+    t.setOnWrite((_bytes, tr) => {
+      setTimeout(() => tr.notify([0xff]), 0);
+    });
     const client = new Shimmer3RClient({ debug: false, transport: t });
     await client.connect();
     for (const hz of SHIMMER3_SAMPLING_RATES_HZ) {

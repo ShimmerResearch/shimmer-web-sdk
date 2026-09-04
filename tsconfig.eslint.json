@@ -2,7 +2,11 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": ".",
-    "noEmit": true
+    "noEmit": true,
+    // Tests read package.json / package-lock.json through node:fs. Kept out of
+    // tsconfig.json so src/ still cannot reach Node globals -- that config is
+    // what npm run build compiles, and it is the gate that should refuse them.
+    "types": ["web-bluetooth", "node"]
   },
   "include": ["src/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist"]

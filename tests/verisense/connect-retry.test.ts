@@ -1,12 +1,23 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type MockedFunction } from 'vitest';
 import { VerisenseBleDevice } from '../../src/devices/verisense/VerisenseClient.js';
 
 // connectWithRetry() drives this.connect() in a loop; stub connect (and the
 // GATT cleanup helper, which touches Web Bluetooth objects) so the retry
 // policy itself can be exercised without a browser BLE stack.
-type Stubbed = VerisenseBleDevice & {
-  connect: ReturnType<typeof vi.fn>;
-  _cleanupFailedBleConnectAttempt: ReturnType<typeof vi.fn>;
+// `connect` is REPLACED, not intersected: VerisenseBleDevice#connect takes an
+// options object and returns Promise<boolean>, which has no overlap with the
+// mock's signature, so a plain intersection reduces the whole type to `never`
+// and every member access below fails.
+//
+// Both mocks carry the real signatures rather than `ReturnType<typeof vi.fn>`,
+// which is effectively `any`: a stub that drifted from what the class declares
+// would then sail through the very typecheck gate this suite now runs under.
+// `_cleanupFailedBleConnectAttempt` is private, so its signature cannot be
+// indexed off the class and is restated here — keep it in step with
+// VerisenseClient.ts if that method changes.
+type Stubbed = Omit<VerisenseBleDevice, 'connect'> & {
+  connect: MockedFunction<VerisenseBleDevice['connect']>;
+  _cleanupFailedBleConnectAttempt: MockedFunction<(retrySettleMs: number) => Promise<void>>;
 };
 
 function makeClient(): Stubbed {

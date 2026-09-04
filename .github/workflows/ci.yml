@@ -44,3 +44,10 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      # Nothing else type-checks the tests: tsconfig.json excludes them, vitest
+      # transpiles without checking, and eslint reports lint rules rather than
+      # compile errors. Without this step a test file that does not compile
+      # still goes green.
+      - name: Typecheck
+        run: npm run typecheck
