@@ -342,8 +342,8 @@ function writeSd(out: Uint8Array, config: InfoMemDeviceConfig, layout: InfoMemLa
   if (!layout.supportsSdLogSync) return;
   const sd = config.sd;
   out[layout.idxSDBTInterval] = sd.btInterval & 0xff;
-  out[layout.idxEstimatedExpLengthMsb] = (sd.estimatedExpLengthMin >> 8) & 0xff;
-  out[layout.idxEstimatedExpLengthLsb] = sd.estimatedExpLengthMin & 0xff;
+  out[layout.idxEstimatedExpLengthMsb] = (sd.estimatedExpLengthSec >> 8) & 0xff;
+  out[layout.idxEstimatedExpLengthLsb] = sd.estimatedExpLengthSec & 0xff;
   out[layout.idxMaxExpLengthMsb] = (sd.maxExpLengthMin >> 8) & 0xff;
   out[layout.idxMaxExpLengthLsb] = sd.maxExpLengthMin & 0xff;
 }

@@ -146,22 +146,30 @@ export interface InfoMemSdConfig {
    */
   btInterval: number;
   /**
-   * Estimated experiment length, big-endian u16 at idx 220 (MSB) / 221 (LSB)
-   * — ShimmerObject.java:5316-5317, used for SD sync.
+   * Estimated experiment length in SECONDS, big-endian u16 at idx 220 (MSB) /
+   * 221 (LSB) — ShimmerObject.java:5316-5317, used for SD sync.
    *
-   * UNIT MISMATCH: the Java accessor is `getTrialDurationEstimatedInSecs()`
-   * while the firmware struct field is
-   * `experimentLengthEstimatedInSecMsb/Lsb`; the Java layout comment says
-   * "Maximum and Estimated Length in minutes". The codec stores the raw u16
-   * either way — HARDWARE-VERIFY the unit before labelling it in a UI.
+   * The unit is the firmware's, which is the byte-level oracle here: the
+   * struct field is `experimentLengthEstimatedInSecMsb/Lsb` and its accessors
+   * are `ShimConfig_experimentLengthEstimatedInSecSet/Get`
+   * (log-and-stream-common `Configuration/shimmer_config.h:403-404, 539-540`).
+   * The Java accessor `getTrialDurationEstimatedInSecs()` agrees; only Java's
+   * layout comment ("Maximum and Estimated Length in minutes") disagrees, and
+   * it is wrong for this field.
+   *
+   * This property was called `estimatedExpLengthMin` up to 0.1.25 — a name
+   * that asserted minutes for a value the firmware counts in seconds.
    */
-  estimatedExpLengthMin: number;
+  estimatedExpLengthSec: number;
   /**
-   * Maximum experiment length (auto-stop), big-endian u16 at idx 222 (MSB) /
-   * 223 (LSB) — ShimmerObject.java:5318-5319. Firmware struct field is
-   * `experimentLengthMaxInMinutesMsb/Lsb` (minutes) while the Java accessor is
-   * `getTrialDurationMaximumInSecs()`; see the note on
-   * {@link estimatedExpLengthMin}.
+   * Maximum experiment length (auto-stop) in MINUTES, big-endian u16 at idx
+   * 222 (MSB) / 223 (LSB) — ShimmerObject.java:5318-5319.
+   *
+   * Minutes here and seconds above is the firmware's own asymmetry, not a
+   * transcription slip: the struct field is
+   * `experimentLengthMaxInMinutesMsb/Lsb` (`shimmer_config.h:405-406`). The
+   * Java accessor `getTrialDurationMaximumInSecs()` is the one that is wrong
+   * about this one.
    */
   maxExpLengthMin: number;
 }

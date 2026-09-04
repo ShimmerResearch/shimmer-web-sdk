@@ -122,11 +122,11 @@ function u16be(bytes: Uint8Array, msbIdx: number, lsbIdx: number): number {
  */
 function parseSd(bytes: Uint8Array, layout: InfoMemLayout): InfoMemSdConfig {
   if (!layout.supportsSdLogSync) {
-    return { btInterval: 0, estimatedExpLengthMin: 0, maxExpLengthMin: 0 };
+    return { btInterval: 0, estimatedExpLengthSec: 0, maxExpLengthMin: 0 };
   }
   return {
     btInterval: bytes[layout.idxSDBTInterval] & 0xff,
-    estimatedExpLengthMin: u16be(
+    estimatedExpLengthSec: u16be(
       bytes,
       layout.idxEstimatedExpLengthMsb,
       layout.idxEstimatedExpLengthLsb,
@@ -260,7 +260,7 @@ function emptyConfig(raw: Uint8Array): InfoMemDeviceConfig {
       altMagRate: 0,
       altAccelRate: 0,
     },
-    sd: { btInterval: 0, estimatedExpLengthMin: 0, maxExpLengthMin: 0 },
+    sd: { btInterval: 0, estimatedExpLengthSec: 0, maxExpLengthMin: 0 },
     calibration: {
       lnAccel: new Uint8Array(GENERAL_CALIBRATION_LENGTH),
       gyro: new Uint8Array(GENERAL_CALIBRATION_LENGTH),
