@@ -1,5 +1,8 @@
 /**
- * A set of listeners whose exceptions never reach the emitter.
+ * A set of listeners: one that throws neither stops the others nor reaches the
+ * emitter — as long as the `onError` reporter does not itself throw, which is
+ * the single way an exception can still escape {@link HandlerSet.emit}. See the
+ * constructor.
  *
  * Every client keeps one of these for its "temp" handlers — the short-lived
  * callbacks a request registers to catch its own reply — and all four had
