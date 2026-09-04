@@ -168,7 +168,7 @@ describe('transportAvailability', () => {
     expect(transportAvailability(s, 'wiredSerial')).toBe('available');
   });
 
-  it('is the crux on Android: classic BT works, wired is only unlikely', () => {
+  it('is the crux on Android: Classic BT works, wired is only unlikely', () => {
     const s = describePlatformSupport(android());
     expect(transportAvailability(s, 'ble')).toBe('available');
     expect(transportAvailability(s, 'classicBluetooth')).toBe('available');
@@ -228,7 +228,7 @@ describe('transportAdvice', () => {
     expect(bluefy).toMatch(/BLE/);
   });
 
-  it('explains that iOS classic Bluetooth is impossible, not merely missing', () => {
+  it('explains that iOS Classic Bluetooth is impossible, not merely missing', () => {
     const msg = transportAdvice(describePlatformSupport(iosSafari()), 'classicBluetooth');
     expect(msg).toMatch(/MFi/);
   });
@@ -239,13 +239,13 @@ describe('transportAdvice', () => {
     expect(transportAdvice(s, 'classicBluetooth')).toMatch(/Android/);
   });
 
-  it('never promises BLE as a substitute for classic Bluetooth on iOS', () => {
+  it('never promises BLE as a substitute for Classic Bluetooth on iOS', () => {
     /* A classic-only Shimmer3 (RN42 has no BLE radio) cannot be reached from iOS
      * by any route, so the advice must not send that user chasing BLE. */
     for (const nav of [iosSafari(), iosBluefy()]) {
       const msg = transportAdvice(describePlatformSupport(nav), 'classicBluetooth');
       expect(msg).toMatch(/A sensor that also supports BLE/);
-      expect(msg).toMatch(/classic-Bluetooth-only sensor cannot be used from iOS/);
+      expect(msg).toMatch(/Classic-Bluetooth-only sensor cannot be used from iOS/);
     }
   });
 });
@@ -308,7 +308,7 @@ describe('WebSerialTransport advice when Web Serial is absent', () => {
     });
   }
 
-  it('calls it classic Bluetooth when a service class is allowed', async () => {
+  it('calls it Classic Bluetooth when a service class is allowed', async () => {
     const msg = await messageFor({ allowedBluetoothServiceClassIds: [SPP] });
     expect(msg).toMatch(/Classic Bluetooth cannot be reached from iOS/);
   });
@@ -338,7 +338,7 @@ describe('advice never prescribes a link the device may not have', () => {
    * BLE) and a Verisense (wired USB serial + BLE, no RFCOMM at all). Advice that
    * prescribes rather than qualifies will be wrong for one of them.
    */
-  it('does not tell an Android wired-serial caller to use classic Bluetooth', () => {
+  it('does not tell an Android wired-serial caller to use Classic Bluetooth', () => {
     const s = describePlatformSupport({
       userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/138.0 Mobile',
       serial: { requestPort() {} },
@@ -347,8 +347,8 @@ describe('advice never prescribes a link the device may not have', () => {
     });
     const msg = transportAdvice(s, 'wiredSerial');
     // Qualified, not prescribed - a Verisense has no RFCOMM to fall back to.
-    expect(msg).toMatch(/A sensor that supports classic Bluetooth/);
-    expect(msg).not.toMatch(/Pair the sensor over classic Bluetooth instead/);
+    expect(msg).toMatch(/A sensor that supports Classic Bluetooth/);
+    expect(msg).not.toMatch(/Pair the sensor over Classic Bluetooth instead/);
   });
 
   it('qualifies every cross-link suggestion it makes', () => {
@@ -425,7 +425,7 @@ describe('capability means callable, not merely present', () => {
   });
 });
 
-describe('Android classic-Bluetooth advice covers the LE-bond trap', () => {
+describe('Android Classic-Bluetooth advice covers the LE-bond trap', () => {
   /*
    * Hardware-confirmed failure mode, and the common one: a dual-mode sensor
    * advertising both radios invites Android to create an LE bond, which looks

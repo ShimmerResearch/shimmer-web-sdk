@@ -6,26 +6,26 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 | Device                             | Class                | Radio / port                 | Links this SDK can drive                                       |
 | ---------------------------------- | -------------------- | ---------------------------- | -------------------------------------------------------------- |
-| Shimmer3R                          | `Shimmer3RClient`    | nRF52 (BLE) + RN4678 + USB-C | BLE, classic Bluetooth (SPP)                                   |
-| Shimmer3, RN4678 (SR31-6-0 onward) | `Shimmer3Client`     | RN4678 (dual-mode)           | classic Bluetooth (SPP); BLE possible in principle — see below |
-| Shimmer3, RN42 (earlier boards)    | `Shimmer3Client`     | RN42 (classic only)          | classic Bluetooth (SPP)                                        |
+| Shimmer3R                          | `Shimmer3RClient`    | nRF52 (BLE) + RN4678 + USB-C | BLE, Classic Bluetooth (SPP)                                   |
+| Shimmer3, RN4678 (SR31-6-0 onward) | `Shimmer3Client`     | RN4678 (dual-mode)           | Classic Bluetooth (SPP); BLE possible in principle — see below |
+| Shimmer3, RN42 (earlier boards)    | `Shimmer3Client`     | RN42 (classic only)          | Classic Bluetooth (SPP)                                        |
 | Shimmer3R over USB-C               | `WiredShimmerClient` | USB-C CDC                    | wired serial (dock protocol, not LiteProtocol)                 |
 | Shimmer3/3R in a BasicDock or Base | `WiredShimmerClient` | Dock FTDI UART               | wired serial (injected transport only)                         |
 | SmartDock multi-slot base          | `SmartDockClient`    | Dock FTDI UART               | wired serial                                                   |
 | Verisense (IMU, Pulse+)            | `VerisenseBleDevice` | nRF52 (BLE) + USB            | BLE, wired serial                                              |
 
 **Which radio a Shimmer3 has matters.** Boards up to expansion-board revision 5
-carry an **RN42**, which is classic Bluetooth (BR/EDR) only — there is no BLE
+carry an **RN42**, which is Classic Bluetooth (BR/EDR) only — there is no BLE
 radio on them at all, so no browser can reach one except through a paired SPP
 port. Revision 6 and later carry an **RN4678**, which is dual-mode: the
 LogAndStream firmware picks the radio from two EEPROM bits at start-up
 (`ShimBt_startCommon`, log-and-stream-common `Comms/shimmer_bt_uart.c`), and a
-unit with no EEPROM at all is forced to classic Bluetooth precisely because
+unit with no EEPROM at all is forced to Classic Bluetooth precisely because
 that is the RN42 fleet.
 
 BLE on an RN4678 is real but **slow** — the module carries the LiteProtocol
 over its transparent-UART service, and throughput is a small fraction of what
-SPP or a Shimmer3R's native nRF52 BLE gives, which is why classic Bluetooth
+SPP or a Shimmer3R's native nRF52 BLE gives, which is why Classic Bluetooth
 stayed the streaming link for the Shimmer3. This SDK has **no built-in BLE
 transport for a Shimmer3**: `Shimmer3Client` requires an injected transport
 whichever radio is in play, so an RN4678 BLE link is a matter of writing a
@@ -41,7 +41,7 @@ table used to blur:
 | Link                    | Browser API    | Transport                                            | Notes                                                                                                                                       |
 | ----------------------- | -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | BLE                     | Web Bluetooth  | `WebBluetoothTransport` (built by `connect()`)       | Shimmer3R and Verisense. Nordic UART service; notification boundaries preserved.                                                            |
-| classic Bluetooth (SPP) | Web **Serial** | `WebSerialTransport` + `SHIMMER3_SPP_SERIAL_OPTIONS` | Shimmer3 **and** Shimmer3R, identically: pairing exposes the sensor as a virtual COM port and Web Serial opens it. Byte stream, no framing. |
+| Classic Bluetooth (SPP) | Web **Serial** | `WebSerialTransport` + `SHIMMER3_SPP_SERIAL_OPTIONS` | Shimmer3 **and** Shimmer3R, identically: pairing exposes the sensor as a virtual COM port and Web Serial opens it. Byte stream, no framing. |
 | wired USB / dock        | Web Serial     | `WebSerialTransport` (no Bluetooth options)          | A different protocol — `$`-header dock packets, not LiteProtocol. No streaming.                                                             |
 
 Two consequences worth stating, because both have caused confusion:
@@ -61,7 +61,7 @@ Two consequences worth stating, because both have caused confusion:
 Everything here rests on two Chromium-only APIs, and both need a **secure
 context** — HTTPS, or `localhost` for development.
 
-| Browser                                 | Web Bluetooth (BLE)                               | Web Serial (classic BT, dock) | Directory picker (SD download) |
+| Browser                                 | Web Bluetooth (BLE)                               | Web Serial (Classic BT, dock) | Directory picker (SD download) |
 | --------------------------------------- | ------------------------------------------------- | ----------------------------- | ------------------------------ |
 | Chrome / Edge, desktop                  | yes                                               | yes (89+)                     | yes                            |
 | Chrome, Android                         | yes                                               | 138+, **RFCOMM only**         | no (`showSaveFilePicker` only) |
@@ -82,7 +82,7 @@ that module exists.
 
 Per link, since that is where the differences actually fall:
 
-| Host                  | BLE                  | classic Bluetooth (SPP)                                     | Wired USB / dock                             |
+| Host                  | BLE                  | Classic Bluetooth (SPP)                                     | Wired USB / dock                             |
 | --------------------- | -------------------- | ----------------------------------------------------------- | -------------------------------------------- |
 | Windows 10 / 11       | yes                  | yes — pair, then the sensor is a `COMx` port                | yes                                          |
 | macOS                 | yes                  | yes — pair, then `/dev/cu.*-SPPDev`                         | yes                                          |
@@ -93,7 +93,7 @@ Per link, since that is where the differences actually fall:
 
 Three of those cells need more than a word:
 
-- **Android, classic Bluetooth.** The picker lists paired devices by their
+- **Android, Classic Bluetooth.** The picker lists paired devices by their
   cached classic service records, so a sensor has to be paired in system
   settings first. A dual-mode sensor advertising both radios invites Android to
   create an **LE** bond instead, which satisfies the user while leaving no
@@ -108,7 +108,7 @@ Three of those cells need more than a word:
   why `transportAvailability()` answers `'unlikely'` rather than
   `'unavailable'` — the control stays enabled so devices that do gain wired
   support are not locked out.
-- **iOS, classic Bluetooth.** Not "not yet": Core Bluetooth is BLE-only and
+- **iOS, Classic Bluetooth.** Not "not yet": Core Bluetooth is BLE-only and
   classic profiles such as SPP need MFi licensing, so no browser release can
   change it. A classic-only Shimmer3 — the whole RN42 fleet — cannot be reached
   from iOS by any route.
@@ -402,7 +402,7 @@ ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
 
 `runFactoryTest` asks the sensor to run the suite its firmware runs on the
 production line, and returns the report it prints. It is available on
-`Shimmer3RClient` (BLE and classic Bluetooth) and on `WiredShimmerClient`
+`Shimmer3RClient` (BLE and Classic Bluetooth) and on `WiredShimmerClient`
 (dock UART, and a Shimmer3R's USB-C port).
 
 ```js

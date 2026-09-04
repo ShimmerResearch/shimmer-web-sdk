@@ -278,7 +278,7 @@ interface SimOptions {
   dropSeqOnce?: number;
   /**
    * Report the transport as unframed (`capabilities.framed = false`), i.e. a
-   * byte stream — Web Serial over USB or over the COM port a classic-Bluetooth
+   * byte stream — Web Serial over USB or over the COM port a Classic-Bluetooth
    * pairing creates. Combine with a small `chunkSize` to split messages.
    */
   framed?: boolean;
@@ -616,7 +616,7 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
 // The same firmware simulator, but over a transport that reports itself as an
 // unframed byte stream and chops every reply into chunks far smaller than a
 // message. This is a Shimmer reached over Web Serial — either USB or the virtual
-// COM port a classic-Bluetooth pairing creates — where a read can split a
+// COM port a Classic-Bluetooth pairing creates — where a read can split a
 // response down the middle or carry several messages at once.
 //
 // Which of these the re-framing drain is actually load-bearing for: the two

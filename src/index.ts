@@ -5,7 +5,7 @@
  *
  * Exports:
  * - {@link Shimmer3RClient} — Shimmer3R BLE client
- * - {@link Shimmer3Client} — classic-Bluetooth (RFCOMM/SPP) Shimmer3 client
+ * - {@link Shimmer3Client} — Classic-Bluetooth (RFCOMM/SPP) Shimmer3 client
  * - {@link VerisenseBleDevice} — Verisense BLE + Web Serial client
  * - {@link ObjectCluster} — shared sensor data frame container
  * - {@link SensorBitmapShimmer3} — Shimmer3R sensor enable bitmasks
@@ -94,7 +94,7 @@ export {
 } from './devices/shimmer3r/constants.js';
 export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
 // Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
-// the COM port a classic-Bluetooth pairing creates) — needed only when writing
+// the COM port a Classic-Bluetooth pairing creates) — needed only when writing
 // a custom transport; the clients apply it themselves.
 //
 // NEED_MORE / RESYNC are the canonical sentinels every framer returns. The
@@ -265,7 +265,7 @@ export type {
 // Host-side directory-tree creation (File System Access API)
 export { ensureDirectoryPath } from './devices/verisense/protocolDataFlow.js';
 
-// Shimmer3 (classic Bluetooth / RFCOMM)
+// Shimmer3 (Classic Bluetooth / RFCOMM)
 export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
 export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';
 export {

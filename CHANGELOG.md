@@ -187,6 +187,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Documentation
 
+- **"classic Bluetooth" is now "Classic Bluetooth" throughout**, which is the form Android's own documentation uses and the form the demo repositories' UI labels were already using in places. It matters because these strings are user-visible: `transportAdvice` returns whole sentences that a page shows beside its own text, and a page saying "Connect Classic Bluetooth" under advice about "classic Bluetooth" reads as two different things. Wording only — no behaviour, and the tests that assert on those sentences moved with them.
+
 - **The README's device table said the wrong thing about two radios, and two different things about one link.** Both are Mark's findings:
 
   - Every Shimmer3 was listed as one row with one radio. Boards up to expansion-board revision 5 carry an **RN42**, classic Bluetooth only; revision 6 and later carry an **RN4678**, which is dual-mode, and the firmware picks the radio from two EEPROM bits at start-up (`ShimBt_startCommon`) — forcing classic Bluetooth on a unit with no EEPROM precisely because that is the RN42 fleet. So "Shimmer3 has no BLE" was true of the fleet the table was written against and false of the boards shipping now. BLE on an RN4678 works but is slow (LiteProtocol over the module's transparent-UART service), which is why classic Bluetooth stayed the streaming link; the SDK has no transport for it, and that is now said rather than implied by omission.

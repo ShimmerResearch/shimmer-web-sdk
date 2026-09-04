@@ -447,13 +447,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     /*
      * Status text follows the transport rather than assuming BLE. These four
-     * messages used to be emitted unconditionally, so a classic-Bluetooth session
+     * messages used to be emitted unconditionally, so a Classic-Bluetooth session
      * reported "GATT connected", "RX/TX obtained" and "Notifications started" -
      * none of which exist on an RFCOMM link, which has no GATT server, no
      * characteristics and no notifications.
      *
      * That is not cosmetic. Debugging a Shimmer3R that would not appear in
-     * Android's classic-Bluetooth picker, this log read as proof the button had
+     * Android's Classic-Bluetooth picker, this log read as proof the button had
      * silently fallen back to BLE; only port.getInfo() reporting an SPP service
      * class showed the link was in fact correct and the words were wrong. A log
      * that misreports the mechanism costs more than one with less detail.
@@ -532,7 +532,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Transport entry point. A framed transport (BLE) delivers one firmware
    * message per call and goes straight to {@link _handleFramedChunk}; an
-   * unframed one (Web Serial over USB or over a classic-Bluetooth COM port)
+   * unframed one (Web Serial over USB or over a Classic-Bluetooth COM port)
    * is re-framed first, then funnelled through the very same handler.
    *
    * A running factory test is served FIRST, before either path. Its report is
@@ -1253,7 +1253,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * `opts.chunkBytes` defaults to **64 over a framed (BLE) transport and 128
    * over an unframed one**. 128 is the firmware's ceiling and the page size the
-   * dock path uses, and it is what a byte stream — classic Bluetooth over
+   * dock path uses, and it is what a byte stream — Classic Bluetooth over
    * RFCOMM, or the dock UART — carries happily. Over BLE the proven size is 64:
    * that is what the brand-record write survives on real hardware, where a
    * 128-byte command has to cross four notifications into a firmware receive
@@ -2537,7 +2537,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * Worth asking even though this client is named for the Shimmer3R: the two
    * platforms share this firmware and this command set, so a Shimmer3 reached
-   * over classic Bluetooth answers here too — and answers some commands with
+   * over Classic Bluetooth answers here too — and answers some commands with
    * fewer bytes than a Shimmer3R does (see {@link getStatus}). Cached, so the
    * gating call sites can ask freely.
    */
@@ -2698,7 +2698,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * `durationMs`. This measures the pipe itself (BLE connection interval and
    * MTU, or RFCOMM/serial buffering) independent of the SD/file-transfer
    * protocol, so it gives an upper bound for transfer rates on a given
-   * host/adapter/OS — and a direct BLE-vs-classic-Bluetooth comparison.
+   * host/adapter/OS — and a direct BLE-vs-Classic-Bluetooth comparison.
    * The device must be idle (the firmware NACKs the test while sensing).
    */
   async runDataRateTest(

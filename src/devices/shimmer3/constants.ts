@@ -28,7 +28,7 @@ export { SHIMMER3_SPP_UUID, SHIMMER3_SAMPLING_CLOCK_FREQ } from './protocol.js';
 import { SHIMMER3_SPP_UUID as SPP_UUID } from './protocol.js';
 
 /**
- * The `WebSerialTransport` options that reach a Shimmer over classic Bluetooth.
+ * The `WebSerialTransport` options that reach a Shimmer over Classic Bluetooth.
  *
  * Both Bluetooth fields are required and they do different jobs, which is the
  * whole reason this is a constant rather than something each caller assembles:
