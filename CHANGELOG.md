@@ -5,6 +5,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`InfoMemSdConfig.estimatedExpLengthMin` is now `estimatedExpLengthSec`, because the value is in seconds.** The firmware counts this one in seconds and its sibling in minutes — `experimentLengthEstimatedInSecMsb/Lsb` and `experimentLengthMaxInMinutesMsb/Lsb`, with matching accessors (log-and-stream-common `Configuration/shimmer_config.h:403-406, 539-540`) — so the old name asserted the wrong unit by a factor of sixty. Java agrees for the estimated field (`getTrialDurationEstimatedInSecs()`); only Java's layout comment, "Maximum and Estimated Length in minutes", disagrees, and it is wrong for it.
+
+  The docblocks previously called the unit ambiguous and deferred to a hardware check. That was the honest position when only the Java sources were to hand; with the firmware struct as the oracle there is no ambiguity left, and a name that states a unit ought to state the right one. `maxExpLengthMin` keeps its name: minutes really is what the firmware counts there, and the mismatched pair is the firmware's own asymmetry, now pinned by a test so it cannot be tidied away.
+
+  The two schema fields also carry their units in their labels now, which is the point of resolving it: a host that renders the form no longer shows two adjacent duration fields with no way to tell what either means.
+
+  **Breaking** for anyone reading or constructing `InfoMemSdConfig` by hand. The InfoMem bytes are unchanged, so saved images, devices and the schema's own field keys are unaffected, and no consumer in these repositories referenced the old property name. It still breaks the exported type, so this release takes the minor — `0.2.0`, the first time this project has moved off `0.1.x` — rather than hiding a rename behind a patch bump or leaving a deprecated alias behind for a name nothing ever used.
+
 ### Added
 
 - **The factory self-test, over Bluetooth and over the dock.** `SET_FACTORY_TEST` (0xA8) had been in the opcode table with no caller since the table was written, and the dock's TEST component was not in `UART_PROP` at all. `Shimmer3RClient.runFactoryTest(type, opts)` and `WiredShimmerClient.runFactoryTest(type, opts)` now run the suite the firmware runs on the production line and return its report as text; `SHIMMER3_FACTORY_TEST_TYPES` is the four-entry table a host builds its picker from (MAIN, LEDS, ICS, LED_STATES — the firmware's own `factory_test_t`), carrying each suite's expected duration, a default timeout and whether it prints an overall verdict.

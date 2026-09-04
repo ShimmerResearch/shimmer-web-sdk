@@ -180,7 +180,10 @@ describe('InfoMem sd group (interval / experiment lengths)', () => {
     const img = fullFieldInfoMem();
     const sd = parseInfoMem(img, ctx).sd;
     expect(sd.btInterval).toBe(60);
-    expect(sd.estimatedExpLengthMin).toBe(0x0102);
+    /* Seconds and minutes, in that order — the firmware's own asymmetry
+       (`experimentLengthEstimatedInSec*` / `experimentLengthMaxInMinutes*`),
+       and the reason these two properties are not named alike. */
+    expect(sd.estimatedExpLengthSec).toBe(0x0102);
     expect(sd.maxExpLengthMin).toBe(0x0304);
   });
 
@@ -189,7 +192,7 @@ describe('InfoMem sd group (interval / experiment lengths)', () => {
     zero[0] = 1;
     const cfg = parseInfoMem(zero, ctx);
     const out = generateInfoMem(
-      { ...cfg, sd: { btInterval: 0x2a, estimatedExpLengthMin: 0x1234, maxExpLengthMin: 0x5678 } },
+      { ...cfg, sd: { btInterval: 0x2a, estimatedExpLengthSec: 0x1234, maxExpLengthMin: 0x5678 } },
       ctx,
       { base: zero },
     );
@@ -209,7 +212,7 @@ describe('InfoMem sd group (interval / experiment lengths)', () => {
     };
     const img = fullFieldInfoMem();
     const cfg = parseInfoMem(img, btstream);
-    expect(cfg.sd).toEqual({ btInterval: 0, estimatedExpLengthMin: 0, maxExpLengthMin: 0 });
+    expect(cfg.sd).toEqual({ btInterval: 0, estimatedExpLengthSec: 0, maxExpLengthMin: 0 });
     const lb = resolveInfoMemLayout(btstream);
     const out = generateInfoMem(cfg, btstream, { base: img });
     expect(out[lb.idxSDBTInterval]).toBe(60); // preserved from base, not zeroed
