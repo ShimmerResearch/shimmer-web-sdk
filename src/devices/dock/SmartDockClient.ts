@@ -1,4 +1,5 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { HandlerSet } from '../../core/handlerSet.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { concatU8 } from './protocol.js';
@@ -143,7 +144,7 @@ export class SmartDockClient extends BaseShimmerClient {
   private _disconnectUnsub: Unsubscribe | null = null;
 
   private _rxBuf: Uint8Array = new Uint8Array(0);
-  private _temps: Set<(line: string) => void> = new Set();
+  private readonly _temps = new HandlerSet<string>((e) => this._log('temp handler error', e));
 
   /**
    * Serialization queue: all public operations chain onto this so slot
@@ -577,12 +578,6 @@ export class SmartDockClient extends BaseShimmerClient {
     this._temps.delete(fn);
   }
   private _emitTemp(line: string): void {
-    this._temps.forEach((fn) => {
-      try {
-        fn(line);
-      } catch (e) {
-        this._log('temp handler error', e);
-      }
-    });
+    this._temps.emit(line);
   }
 }

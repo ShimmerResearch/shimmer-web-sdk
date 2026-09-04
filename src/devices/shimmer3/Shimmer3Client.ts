@@ -1,4 +1,5 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
@@ -150,7 +151,7 @@ export class Shimmer3Client extends BaseShimmerClient {
 
   // Protocol state
   private _rxBuf: Uint8Array = new Uint8Array(0);
-  private _temps: Set<(chunk: Uint8Array) => void> = new Set();
+  private readonly _temps = new HandlerSet<Uint8Array>((e) => this._log('temp handler error', e));
   private schema: Shimmer3StreamSchema | null = null;
   private _forceTimestampFmt: TimestampFmt | undefined;
   private _timestampFmt: TimestampFmt;
@@ -1306,12 +1307,6 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._temps.delete(fn);
   }
   private _emitTemp(buf: Uint8Array): void {
-    this._temps.forEach((fn) => {
-      try {
-        fn(buf);
-      } catch (e) {
-        this._log('temp handler error', e);
-      }
-    });
+    this._temps.emit(buf);
   }
 }
