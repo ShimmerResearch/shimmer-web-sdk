@@ -13,7 +13,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   The two schema fields also carry their units in their labels now, which is the point of resolving it: a host that renders the form no longer shows two adjacent duration fields with no way to tell what either means.
 
-  **Breaking** for anyone reading or constructing `InfoMemSdConfig` by hand. The InfoMem bytes are unchanged, so saved images, devices and the schema's own field keys are unaffected, and no consumer in these repositories referenced the old property name.
+  **Breaking** for anyone reading or constructing `InfoMemSdConfig` by hand. The InfoMem bytes are unchanged, so saved images, devices and the schema's own field keys are unaffected, and no consumer in these repositories referenced the old property name. It still breaks the exported type, so this release takes the minor — `0.2.0`, the first time this project has moved off `0.1.x` — rather than hiding a rename behind a patch bump or leaving a deprecated alias behind for a name nothing ever used.
 
 ### Added
 
