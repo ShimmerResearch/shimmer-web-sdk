@@ -175,9 +175,11 @@ describe('VerisenseBleDevice over LoopbackTransport', () => {
     v.on('disconnected', (e) => events.push(e));
     v.onDisconnect = (reason) => callbacks.push(reason ?? null);
 
-    t.emitDisconnect();
+    // The transport's own error is the only thing that says WHY the link went.
+    const cause = new Error('gatt disconnected');
+    t.emitDisconnect(cause);
     expect(events).toHaveLength(1);
-    expect(callbacks).toHaveLength(1);
+    expect(callbacks).toEqual([cause]);
   });
 
   it('stays silent on a teardown the application asked for', async () => {

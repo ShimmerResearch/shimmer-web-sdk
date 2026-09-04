@@ -350,7 +350,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
        contract was previously handed a callback that could never fire. */
     this._armDisconnectNotification();
     this._notifyUnsub = transport.onNotify((bytes) => this._feedStreamBytes(bytes));
-    this._disconnectUnsub = transport.onDisconnect(() => this._handleTransportDisconnect());
+    this._disconnectUnsub = transport.onDisconnect((reason) =>
+      this._handleTransportDisconnect(reason),
+    );
   }
 
   /** Drop the current transport's notify/disconnect subscriptions. */
@@ -370,7 +372,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   /** Handle an unexpected / requested transport disconnect (link drop). */
-  private _handleTransportDisconnect(): void {
+  private _handleTransportDisconnect(reason?: Error): void {
     const kind: TransportKind = this._transportKind === 'serial' ? 'serial' : 'ble';
     this._mode = 'idle';
     this._transportKind = null;
@@ -380,7 +382,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       return;
     }
     this.emit('disconnected', { kind });
-    this._emitDisconnect();
+    /* The transport's own error, not a synthesised one: it is the only thing
+       that says WHY the link went, and the other clients forward it. The
+       `disconnected` event keeps its existing shape. */
+    this._emitDisconnect(reason);
   }
 
   /**
