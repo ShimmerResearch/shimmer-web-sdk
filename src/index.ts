@@ -250,6 +250,7 @@ export {
   deleteDownloadedFromCard,
   formatSdImportStamp,
   consensysBackupSegments,
+  consensysMacFolderName,
   CONSENSYS_UNKNOWN_DEVICE,
 } from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 export type {
