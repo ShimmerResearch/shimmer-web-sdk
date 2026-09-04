@@ -43,6 +43,17 @@ import {
 } from './protocol.js';
 import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
 import {
+  FactoryTestCapture,
+  FactoryTestError,
+  type FactoryTestRunOptions,
+  type FactoryTestState,
+} from '../factoryTest/capture.js';
+import {
+  buildSetFactoryTestCommand,
+  classifyLiteProtocolAck,
+  requireShimmer3FactoryTestType,
+} from './factoryTest.js';
+import {
   parseShimmer3DeviceVersionResponse,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
@@ -274,6 +285,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _statusReadsInFlight = 0;
 
   /**
+   * The in-flight factory-test capture, or null when none is running.
+   *
+   * Non-null for the whole time the link is unusable — from the write until the
+   * report ends, INCLUDING the drain after a cancelled or timed-out run, because
+   * the firmware has no abort command and keeps printing regardless. Every
+   * command write is refused while it is set; see {@link runFactoryTest}.
+   */
+  private _factoryTest: FactoryTestCapture | null = null;
+
+  /**
    * How many status payload bytes a STATUS_RESPONSE must carry before it is
    * worth parsing.
    *
@@ -348,6 +369,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * notice that a recording stopped mid-stream; poll {@link getStatus} instead.
    */
   onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
+
+  /**
+   * Invoked whenever {@link factoryTestState} changes, synchronously. A host uses
+   * it to hold its own "the link is busy" gate through the whole run — including
+   * the `draining` phase after a cancel, when the sensor is still printing and no
+   * other command will be accepted.
+   */
+  onFactoryTestStateChange: ((state: FactoryTestState) => void) | null = null;
 
   constructor(opts: Shimmer3RClientOptions = {}) {
     super(opts);
@@ -451,6 +480,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // Application-initiated teardown is not a fault, so `onDisconnect` stays
     // silent — including when this call is the cleanup that follows a drop.
     this._suppressDisconnectNotification();
+    // Fail an in-flight capture BEFORE the transport goes: no further bytes are
+    // coming, so there is nothing left to drain, and a caller awaiting the
+    // report must be told rather than left on a timer for the whole budget.
+    this._failFactoryTest('Disconnected while the factory self-test was running.');
     try {
       this._notifyUnsub?.();
       this._disconnectUnsub?.();
@@ -477,9 +510,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _handleTransportDisconnect = (reason?: Error): void => {
     this._streaming = false;
     this._sdKnownSession = null;
+    this._failFactoryTest('The link dropped during the factory self-test.');
     this._emitStatus('Device disconnected');
     this._emitDisconnect(reason);
   };
+
+  /**
+   * Abandon an in-flight factory-test capture because the link has gone. No
+   * drain: draining exists only to keep a still-arriving report out of the
+   * framer, and nothing is arriving on a link that is closed.
+   */
+  private _failFactoryTest(message: string): void {
+    this._factoryTest?.fail(new FactoryTestError('disconnected', message));
+  }
 
   // ---------------------------------------------------------------------------
   // Notify handler (fed raw notification chunks by the transport)
@@ -490,13 +533,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * message per call and goes straight to {@link _handleFramedChunk}; an
    * unframed one (Web Serial over USB or over a classic-Bluetooth COM port)
    * is re-framed first, then funnelled through the very same handler.
+   *
+   * A running factory test is served FIRST, before either path. Its report is
+   * bare ASCII with no opcode, no length and no CRC, so the framer would treat
+   * every line as garbage and resync through it one byte at a time — and the
+   * temp handlers, which only ever see whole framed messages, would never see it
+   * at all. What the capture hands back is what was NOT report traffic (a status
+   * push glued after `TEST END`, a late ACK), and that continues down the normal
+   * path.
    */
   private _handleNotify = (chunk: Uint8Array): void => {
+    let bytes = chunk;
+    if (this._factoryTest) {
+      const rest = this._factoryTest.feed(bytes);
+      if (!rest || rest.length === 0) return;
+      bytes = rest;
+    }
     if (this._unframed) {
-      this._handleUnframedChunk(chunk);
+      this._handleUnframedChunk(bytes);
       return;
     }
-    this._handleFramedChunk(chunk);
+    this._handleFramedChunk(bytes);
   };
 
   private _handleFramedChunk = (chunk: Uint8Array): void => {
@@ -1254,8 +1311,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * time and only then the InfoMem — the order desktop
    * `CallableWriteConfig.call()` uses (BasicDock.java:1556-1587). An RTC failure
    * ABORTS the config write rather than being tolerated: the InfoMem write is
-   * not attempted, matching the Java rethrow. Note (DEV-900) that the device
-   * treats the RWC as LOCAL civil time; {@link setRtcTime} carries the detail.
+   * not attempted, matching the Java rethrow. The clock is written as a plain
+   * Unix epoch; {@link setRtcTime} carries the detail.
    *
    * `opts.verify` (default `true`) re-reads the image afterwards and byte-
    * compares it against what was sent, EXCLUDING the ranges a device write
@@ -1493,9 +1550,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * same {@link msToRtcBytesLE} helper as the dock path (truncating, matching
    * the Java driver's `(long)(ms * 32.768)`). Call with `Date.now()` to sync
    * the device clock to the host before a drift run.
-   * NOTE (DEV-900): the device treats RWC as LOCAL civil time — pass a
-   * local-adjusted value if that distinction matters for the use case; for
-   * drift measurement only the rate matters, not the epoch.
+   * The value is a plain Unix epoch: desktop Consensys and the Java dock
+   * driver both write `System.currentTimeMillis() * 32.768`, and hardware set
+   * by either reads back as UTC. (The Verisense console's local-civil
+   * convention is that product's, not this one's — do not carry it across.)
+   * For drift measurement only the rate matters, not the epoch.
    */
   async setRtcTime(unixMs: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
@@ -2298,6 +2357,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private async _write(u8: Uint8Array): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    /*
+     * Nothing may be written while a factory test holds the link. The firmware's
+     * main loop is blocked for the whole suite (`shimmer_taskList.c:164`), so a
+     * command sent now is not merely unanswered — it sits in the RX buffer and is
+     * acted on minutes later, and its ACK lands in the middle of somebody's
+     * report. Refusing here is what makes the report trustworthy.
+     *
+     * {@link runFactoryTest} writes its own command through the transport
+     * directly, so this guard cannot lock out the very command that arms it.
+     */
+    if (this._factoryTest) {
+      throw new FactoryTestError(
+        'busy',
+        'A factory test is running, or its report is still draining — ' +
+          'await whenFactoryTestIdle() before sending another command.',
+      );
+    }
     this._log('Write', u8);
     await this._transport.write(u8);
   }
@@ -2672,6 +2748,263 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._rxBuf = new Uint8Array(0);
       this._ctrlBuf = new Uint8Array(0);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Factory self-test (SET_FACTORY_TEST 0xA8) and the red-LED override
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What the factory-test runner is doing: `idle` when the link is free,
+   * `running` while the report is being captured, `draining` while a cancelled
+   * or timed-out report is still being swallowed.
+   */
+  get factoryTestState(): FactoryTestState {
+    return this._factoryTest?.state ?? 'idle';
+  }
+
+  /**
+   * Resolve when the link is free again. Never rejects — a failed run still
+   * releases the link, and this is the wait a host needs after cancelling one.
+   */
+  whenFactoryTestIdle(): Promise<void> {
+    return this._factoryTest?.idle ?? Promise.resolve();
+  }
+
+  /**
+   * Run the sensor's built-in factory self-test and return its report.
+   *
+   * `SET_FACTORY_TEST` (0xA8) with one type byte
+   * (`Comms/shimmer_bt_uart.c:1285-1293`) makes the firmware ACK and then print
+   * the same report it prints on the production line — as raw ASCII on this very
+   * link, with no framing and no CRC (`Test/shimmer_test.c:22-61`). The
+   * {@link FactoryTestCapture} owns those bytes for the duration; see its
+   * docblock for the phases and the tail handoff.
+   *
+   * Three things about this command are unlike every other one here:
+   * - **It cannot be stopped.** The firmware has no abort; its main loop is
+   *   blocked for the whole suite (`shimmer_taskList.c:164`). `opts.signal`
+   *   stops this client *listening*, and the link stays busy until the report
+   *   ends — {@link whenFactoryTestIdle} is how a host waits that out.
+   * - **Nothing else may be written meanwhile.** Every other command rejects
+   *   with a {@link FactoryTestError} of reason `busy` until the capture is idle.
+   * - **It is refused while sensing.** `ShimBt_isCmdBlockedWhileSensing`
+   *   (`Comms/shimmer_bt_uart.c:2985`) NACKs it while streaming or logging, and
+   *   also when SD sync is enabled.
+   *
+   * @param type 0 MAIN, 1 LEDS, 2 ICS, 3 LED_STATES (`Test/shimmer_test.h:21-27`).
+   * @param opts see {@link FactoryTestRunOptions}; `timeoutMs` defaults to the
+   *   type's own entry in `SHIMMER3_FACTORY_TEST_TYPES`.
+   * @returns the report text, CRLF line endings intact.
+   * @throws RangeError for a type the firmware would ACK and then print nothing
+   *   for; {@link FactoryTestError} with reason `nack` (sensing), `busy`
+   *   (another run), `no-response`, `timeout` or `disconnected`; or a
+   *   `DOMException` named `AbortError` when `opts.signal` fires.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3 or Shimmer3R has run this path yet.
+   */
+  async runFactoryTest(type: number, opts: FactoryTestRunOptions = {}): Promise<string> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    // Validated before anything is written, so an out-of-range type costs the
+    // caller an exception rather than a minute of silence.
+    const info = requireShimmer3FactoryTestType(type);
+    if (this._factoryTest) {
+      throw new FactoryTestError(
+        'busy',
+        'A factory test is already running, or its report is still draining — ' +
+          'await whenFactoryTestIdle() first.',
+      );
+    }
+    if (this._streaming) {
+      throw new FactoryTestError(
+        'nack',
+        'The sensor is streaming, and the firmware refuses a factory self-test while it is. ' +
+          'Stop the stream first.',
+      );
+    }
+    /*
+     * Nothing else may be mid-conversation. Once the capture is armed it owns
+     * every inbound byte, so another command's response would be swallowed as
+     * report text and its waiter would sit there until it timed out — and the
+     * buffer flush below would take that command's partial response with it.
+     * Both signals are needed: `_expectingAck` covers a command whose ACK has
+     * not landed, and `_temps` covers one that has been acknowledged and is
+     * still waiting for its payload (or an SD transfer, whose handler stays
+     * attached for the whole transfer).
+     */
+    if (this._expectingAck > 0 || this._temps.size > 0) {
+      throw new FactoryTestError(
+        'busy',
+        'Another command is still waiting for its response. A factory test takes over the whole ' +
+          'link, so it cannot start until that one has finished.',
+      );
+    }
+    if (opts.signal?.aborted) {
+      throw new DOMException('Factory test aborted', 'AbortError');
+    }
+
+    /*
+     * Preflight: ask what the sensor is doing so a refusal can say "it is
+     * sensing" instead of arriving as a bare 0xFE two seconds later — the button
+     * on the sensor can have started an SD recording this host knows nothing
+     * about. Deliberately NOT fatal when the status read itself fails: an old or
+     * busy firmware that will happily run the test must not be blocked by a
+     * diagnostic.
+     */
+    if (opts.preflight ?? true) {
+      try {
+        const status = await this.getStatus();
+        if (status.sensing) {
+          throw new FactoryTestError(
+            'nack',
+            'The sensor is sensing — streaming, or recording to its SD card — and the firmware ' +
+              'refuses a factory self-test while it is. Stop the stream or the SD recording first.',
+          );
+        }
+      } catch (err) {
+        if (err instanceof FactoryTestError) throw err;
+        this._emitStatus(
+          `Factory-test preflight status read failed (${(err as Error).message}); running anyway.`,
+        );
+      }
+    }
+    const transport = this._transport;
+    if (!transport) throw new Error('Not connected (RX missing)');
+
+    // Nothing left over from before may be mistaken for the first report line.
+    this._rxBuf = new Uint8Array(0);
+    this._ctrlBuf = new Uint8Array(0);
+
+    const capture = new FactoryTestCapture(classifyLiteProtocolAck, {
+      ...opts,
+      timeoutMs: opts.timeoutMs ?? info.defaultTimeoutMs,
+      onStateChange: (state) => {
+        /* The release runs BEFORE the host is told, so a host that issues its
+         * next command straight out of this callback is not refused by the busy
+         * guard the run it was just told had ended. */
+        if (state === 'idle') this._releaseFactoryTest();
+        /* …and the host is told on a MICROTASK, not from inside `feed()`.
+         * The capture is called from the notify handler, which has not yet
+         * routed the tail bytes `feed()` just handed back — a late ACK, or a
+         * status push glued to the TEST END banner. A host that sent its next
+         * command straight out of a synchronous callback could have that
+         * command's acknowledgement satisfied by the test's own leftovers.
+         * Deferring by one microtask puts the callback after the routing and
+         * before anything else, which is also where `whenFactoryTestIdle()`
+         * already resolves. */
+        queueMicrotask(() => {
+          try {
+            this.onFactoryTestStateChange?.(state);
+          } catch (e) {
+            this._log('onFactoryTestStateChange handler error', e);
+          }
+        });
+      },
+    });
+
+    this._factoryTest = capture;
+    capture.start();
+    this._emitStatus(`SET_FACTORY_TEST ${info.name} → the sensor will print its report…`);
+    try {
+      // Straight to the transport: `_write` refuses everything while a capture
+      // exists, and that guard must not lock out the command that arms it.
+      await transport.write(buildSetFactoryTestCommand(info.value));
+    } catch (err) {
+      capture.fail(
+        new FactoryTestError(
+          'disconnected',
+          `Could not send the factory-test command: ${(err as Error).message}`,
+        ),
+      );
+    }
+    return capture.result;
+  }
+
+  /**
+   * Let go of the link at the end of a run: clear the capture, then drop
+   * anything the report left in the accumulators. Called from the capture's own
+   * `idle` transition, so it happens before the tail bytes it hands back are
+   * routed through the framer.
+   */
+  private _releaseFactoryTest(): void {
+    this._factoryTest = null;
+    this._rxBuf = new Uint8Array(0);
+    this._ctrlBuf = new Uint8Array(0);
+    this._emitStatus('Factory test finished — the link is free again');
+  }
+
+  /**
+   * Flip the firmware's red-LED override (`TOGGLE_LED_COMMAND` 0x06,
+   * `Comms/shimmer_bt_uart.c:603, :910-914`).
+   *
+   * The command toggles `shimmerStatus.toggleLedRedCmd`, and while it is set the
+   * LED manager holds the LOWER LED solid red (`LEDs/shimmer_leds.c:425-428`) —
+   * above the SD-error and battery indications, below a button press. That makes
+   * it the "which sensor is this one" aid.
+   *
+   * Two things to know: the flag is **never cleared by the firmware**, so it
+   * survives a disconnect and stays lit until it is toggled again or the sensor
+   * loses power; and it is readable back as status bit 7
+   * (`ShimBt_assembleStatusBytes`, `:2920-2932`) — {@link Shimmer3DeviceStatus}
+   * `redLedOn` — which is what {@link setRedLed} uses to make "on"/"off" mean
+   * something.
+   *
+   * While streaming this writes without waiting for the ACK: every inbound byte
+   * belongs to the data plane then, so the ACK would be consumed by the schema
+   * parser and the wait would time out on a command the firmware did in fact run.
+   *
+   * HARDWARE-VERIFY: that the lower LED visibly lights, and that the flag really
+   * does survive a disconnect, want confirming on a sensor.
+   */
+  async toggleLed(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const cmd = new Uint8Array([OPCODES.TOGGLE_LED_COMMAND]);
+    if (this._streaming) {
+      await this._write(cmd);
+      this._emitStatus('TOGGLE_LED written (no ACK wait — streaming)');
+      return;
+    }
+    await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('TOGGLE_LED ACKed');
+  }
+
+  /**
+   * Drive the red-LED override to a definite state rather than flipping it.
+   *
+   * The firmware offers only a toggle, so this is a read-modify-verify:
+   * {@link getStatus} for the current bit, {@link toggleLed} only if it differs,
+   * then a second read to confirm. Calling it twice with the same argument
+   * writes nothing the second time.
+   *
+   * @returns the LED state read back from the sensor.
+   * @throws when the sensor is streaming (the status reads are unavailable), or
+   *   when the read-back does not match — which means something else moved the
+   *   flag between the two reads, and silently reporting success would be worse
+   *   than saying so.
+   */
+  async setRedLed(on: boolean): Promise<boolean> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) {
+      throw new Error(
+        'The red LED cannot be set while streaming: the state read it needs is lost in the ' +
+          'stream data. Use toggleLed() if a blind flip will do.',
+      );
+    }
+    const before = await this.getStatus();
+    if (before.redLedOn === on) {
+      this._emitStatus(`Red LED already ${on ? 'on' : 'off'}`);
+      return on;
+    }
+    await this.toggleLed();
+    const after = await this.getStatus();
+    if (after.redLedOn !== on) {
+      throw new Error(
+        `Red LED did not follow: asked for ${on ? 'on' : 'off'}, the sensor reports ` +
+          `${after.redLedOn ? 'on' : 'off'}.`,
+      );
+    }
+    this._emitStatus(`Red LED ${on ? 'on' : 'off'}`);
+    return after.redLedOn;
   }
 
   // ---------------------------------------------------------------------------
