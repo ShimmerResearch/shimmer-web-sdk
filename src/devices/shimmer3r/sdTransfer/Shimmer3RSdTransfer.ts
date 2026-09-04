@@ -26,14 +26,36 @@ import {
  *   `data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
  * - `consensysBackup` nests that same tree under the two levels Consensys
  *   expects inside its workspace `Backup` folder:
- *   `<import-stamp>/<ShimmerName>/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
+ *   `<import-stamp>/<mac-id>/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<file>`
  *   so the download can be imported via
  *   *Application Settings -> Manage Data -> Import Data From Backup Directory*.
  */
 export type SdDestinationLayout = 'card' | 'consensysBackup';
 
-/** Device-name folder used when a session folder is not `<Name>-<NNN>`. */
+/**
+ * Device folder used when no MAC id is available and the session folder is not
+ * `<Name>-<NNN>` either.
+ */
 export const CONSENSYS_UNKNOWN_DEVICE = 'Unknown_Shimmer';
+
+/**
+ * Normalise a MAC id to the form Consensys names its device folders with:
+ * twelve LOWERCASE hex digits, no separators (`e8eb1b9767a0`).
+ *
+ * Lowercase because that is what Consensys writes, and what
+ * {@link import('../../sdlog/header.js').parseSdLogHeader} reports for the same
+ * six bytes inside the file - the two have to agree for an import to match a
+ * folder to the sessions in it. Windows is case-insensitive about paths, so
+ * this is cosmetic there and load-bearing on macOS and Linux.
+ *
+ * Returns null for anything that is not six bytes of hex, so a caller can tell
+ * "no MAC" from "a MAC I could not use" and fall back deliberately rather than
+ * creating a folder named after a truncated or unprovisioned address.
+ */
+export function consensysMacFolderName(macId: string | null | undefined): string | null {
+  const hex = String(macId ?? '').replace(/[^0-9a-fA-F]/g, '');
+  return hex.length === 12 ? hex.toLowerCase() : null;
+}
 
 /**
  * Format an import-time folder name as Consensys does: `yyyy-MM-dd_HH.mm.ss`
@@ -50,12 +72,38 @@ export function formatSdImportStamp(date: Date = new Date()): string {
 /**
  * Map a card directory chain to its Consensys Backup destination.
  *
- * The device name is taken from the session folder (`<ShimmerName>-<NNN>`)
- * rather than from the connected device, so sessions recorded under a previous
- * device name - or on a card that has been moved between devices - still file
- * under the name they were recorded with, which is what Consensys shows.
+ * The level between the import stamp and the card tree is the device's **MAC
+ * id**, twelve lowercase hex digits:
+ *
+ *     <import-stamp>/e8eb1b9767a0/data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>
+ *
+ * It is the MAC and not the Shimmer name because that is what Consensys itself
+ * writes and what its importer looks for - a name folder produces a tree the
+ * import walks straight past. The MAC is also the identifier that cannot drift:
+ * a device renamed between two trials keeps one folder, where the name would
+ * have split its sessions in two.
+ *
+ * `macId` is the CONNECTED device's MAC, so it is right whenever the card is
+ * being read out of the device that wrote it - which is the only way this
+ * transfer path can be reached at all. A card physically moved from another
+ * device would be filed under the reading device's MAC; the alternative,
+ * reading each session's first file header for the MAC stored in it, costs a
+ * round trip per session to cover a case Bluetooth download cannot produce.
+ *
+ * With no usable MAC (`null`, or anything that is not six bytes of hex) it
+ * falls back to the Shimmer name taken from the session folder, and then to
+ * {@link CONSENSYS_UNKNOWN_DEVICE}. That tree is NOT importable by Consensys -
+ * the fallback exists so a download still lands somewhere sensible and
+ * separates two devices' sessions, not because it is equivalent.
  */
-export function consensysBackupSegments(cardDirSegments: string[], importStamp: string): string[] {
+export function consensysBackupSegments(
+  cardDirSegments: string[],
+  importStamp: string,
+  macId?: string | null,
+): string[] {
+  const mac = consensysMacFolderName(macId);
+  if (mac) return [importStamp, mac, ...cardDirSegments];
+
   let shimmerName = CONSENSYS_UNKNOWN_DEVICE;
   const sessionDir = cardDirSegments[cardDirSegments.length - 1];
   if (sessionDir) {
@@ -124,6 +172,17 @@ export interface DownloadSdTreeOptions {
    * Defaults to the current local time via {@link formatSdImportStamp}.
    */
   importStamp?: string;
+  /**
+   * The connected device's MAC id, for the device level of the
+   * `consensysBackup` tree - see {@link consensysBackupSegments}. Any hex
+   * format is accepted (`E8EB1B9767A0`, `e8:eb:1b:97:67:a0`); it is normalised
+   * to the twelve lowercase digits Consensys uses.
+   *
+   * Pass it for `consensysBackup`: without it the download still completes,
+   * but under a Shimmer-name folder that Consensys cannot import. Ignored by
+   * the `card` layout.
+   */
+  macId?: string | null;
   signal?: AbortSignal;
   onProgress?: (p: SdTransferProgress) => void;
 }
@@ -191,6 +250,7 @@ export async function downloadSdTree(
   const maxRetriesPerFile = opts.maxRetriesPerFile ?? 3;
   const layout = opts.layout ?? 'card';
   const importStamp = opts.importStamp ?? formatSdImportStamp();
+  const macId = opts.macId ?? null;
 
   const summary: SdTransferSummary = {
     importStamp: layout === 'consensysBackup' ? importStamp : undefined,
@@ -232,7 +292,9 @@ export async function downloadSdTree(
 
     try {
       const destSegments =
-        layout === 'consensysBackup' ? consensysBackupSegments(segments, importStamp) : segments;
+        layout === 'consensysBackup'
+          ? consensysBackupSegments(segments, importStamp, macId)
+          : segments;
       const dir = await ensureDirectoryPath(destRoot, destSegments);
       const handle = await dir.getFileHandle(name, { create: true });
       const existingSize = (await handle.getFile()).size;

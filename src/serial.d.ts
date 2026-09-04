@@ -51,7 +51,7 @@ declare global {
      * Service class IDs the picker is permitted to surface Bluetooth serial
      * ports for. Chrome hides Bluetooth ports unless the origin names their
      * service class here, so this must be supplied (not just `filters`) to
-     * reach a paired classic-Bluetooth device.
+     * reach a paired Classic-Bluetooth device.
      */
     allowedBluetoothServiceClassIds?: BluetoothServiceClassId[];
   }

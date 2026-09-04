@@ -4,12 +4,118 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 ## Supported Devices
 
-| Device                  | Class                | Transport                                         |
-| ----------------------- | -------------------- | ------------------------------------------------- |
-| Shimmer3R               | `Shimmer3RClient`    | Web Bluetooth, Web Serial (USB or Bluetooth port) |
-| Shimmer3 (classic BT)   | `Shimmer3Client`     | RFCOMM/SPP — Web Serial over a paired COM port    |
-| Shimmer in dock/Base    | `WiredShimmerClient` | Dock FTDI UART (injected transport only)          |
-| Verisense (IMU, Pulse+) | `VerisenseBleDevice` | Web Bluetooth, Web Serial                         |
+| Device                             | Class                | Radio / port                 | Links this SDK can drive                                       |
+| ---------------------------------- | -------------------- | ---------------------------- | -------------------------------------------------------------- |
+| Shimmer3R                          | `Shimmer3RClient`    | nRF52 (BLE) + RN4678 + USB-C | BLE, Classic Bluetooth (SPP)                                   |
+| Shimmer3, RN4678 (SR31-6-0 onward) | `Shimmer3Client`     | RN4678 (dual-mode)           | Classic Bluetooth (SPP); BLE possible in principle — see below |
+| Shimmer3, RN42 (earlier boards)    | `Shimmer3Client`     | RN42 (classic only)          | Classic Bluetooth (SPP)                                        |
+| Shimmer3R over USB-C               | `WiredShimmerClient` | USB-C CDC                    | wired serial (dock protocol, not LiteProtocol)                 |
+| Shimmer3/3R in a BasicDock or Base | `WiredShimmerClient` | Dock FTDI UART               | wired serial (injected transport only)                         |
+| SmartDock multi-slot base          | `SmartDockClient`    | Dock FTDI UART               | wired serial                                                   |
+| Verisense (IMU, Pulse+)            | `VerisenseBleDevice` | nRF52 (BLE) + USB            | BLE, wired serial                                              |
+
+**Which radio a Shimmer3 has matters.** Boards up to expansion-board revision 5
+carry an **RN42**, which is Classic Bluetooth (BR/EDR) only — there is no BLE
+radio on them at all, so no browser can reach one except through a paired SPP
+port. Revision 6 and later carry an **RN4678**, which is dual-mode: the
+LogAndStream firmware picks the radio from two EEPROM bits at start-up
+(`ShimBt_startCommon`, log-and-stream-common `Comms/shimmer_bt_uart.c`), and a
+unit with no EEPROM at all is forced to Classic Bluetooth precisely because
+that is the RN42 fleet.
+
+BLE on an RN4678 is real but **slow** — the module carries the LiteProtocol
+over its transparent-UART service, and throughput is a small fraction of what
+SPP or a Shimmer3R's native nRF52 BLE gives, which is why Classic Bluetooth
+stayed the streaming link for the Shimmer3. This SDK has **no built-in BLE
+transport for a Shimmer3**: `Shimmer3Client` requires an injected transport
+whichever radio is in play, so an RN4678 BLE link is a matter of writing a
+transport over the module's transparent-UART characteristics and handing it in.
+HARDWARE-VERIFY: nothing here has been run against an RN4678 in BLE mode.
+
+## Link Types
+
+The same physical link looks different from a browser's point of view, and the
+device table above collapses that. Spelled out — this is the distinction the
+table used to blur:
+
+| Link                    | Browser API    | Transport                                            | Notes                                                                                                                                       |
+| ----------------------- | -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| BLE                     | Web Bluetooth  | `WebBluetoothTransport` (built by `connect()`)       | Shimmer3R and Verisense. Nordic UART service; notification boundaries preserved.                                                            |
+| Classic Bluetooth (SPP) | Web **Serial** | `WebSerialTransport` + `SHIMMER3_SPP_SERIAL_OPTIONS` | Shimmer3 **and** Shimmer3R, identically: pairing exposes the sensor as a virtual COM port and Web Serial opens it. Byte stream, no framing. |
+| wired USB / dock        | Web Serial     | `WebSerialTransport` (no Bluetooth options)          | A different protocol — `$`-header dock packets, not LiteProtocol. No streaming.                                                             |
+
+Two consequences worth stating, because both have caused confusion:
+
+- **Classic Bluetooth is Web Serial, on every device.** A Shimmer3R's classic
+  link is opened exactly the way a Shimmer3's is: same API, same transport,
+  same `SHIMMER3_SPP_SERIAL_OPTIONS`, same requirement that the host has
+  already paired the sensor. What differs between the two devices is only which
+  _other_ links they also have.
+- **"Web Serial" on a Shimmer3R means one of two unrelated things.** Over a
+  paired Bluetooth port it is the LiteProtocol and `Shimmer3RClient`; over the
+  USB-C cable it is the dock protocol and `WiredShimmerClient`. Same API, same
+  picker, different client and different command set.
+
+## Browser Support
+
+Everything here rests on two Chromium-only APIs, and both need a **secure
+context** — HTTPS, or `localhost` for development.
+
+| Browser                                 | Web Bluetooth (BLE)                               | Web Serial (Classic BT, dock) | Directory picker (SD download) |
+| --------------------------------------- | ------------------------------------------------- | ----------------------------- | ------------------------------ |
+| Chrome / Edge, desktop                  | yes                                               | yes (89+)                     | yes                            |
+| Chrome, Android                         | yes                                               | 138+, **RFCOMM only**         | no (`showSaveFilePicker` only) |
+| Opera / Brave / other Chromium, desktop | usually — Brave keeps Web Bluetooth behind a flag | usually                       | usually                        |
+| Firefox, any platform                   | no                                                | no                            | no                             |
+| Safari, macOS                           | no                                                | no                            | no                             |
+| Any browser on iOS / iPadOS             | no — all WebKit                                   | no                            | no                             |
+| Bluefy / WebBLE (iOS)                   | yes — bundles its own BLE stack                   | no                            | no                             |
+
+Do not re-derive this table in a page. `describePlatformSupport()` reports the
+two capabilities as booleans that are safe to gate a control on,
+`transportAvailability()` turns them into a three-state answer per link, and
+`transportAdvice()` returns the sentence to show the user. The Android row in
+particular is **not** detectable by feature test, which is the whole reason
+that module exists.
+
+## OS Support
+
+Per link, since that is where the differences actually fall:
+
+| Host                  | BLE                  | Classic Bluetooth (SPP)                                     | Wired USB / dock                             |
+| --------------------- | -------------------- | ----------------------------------------------------------- | -------------------------------------------- |
+| Windows 10 / 11       | yes                  | yes — pair, then the sensor is a `COMx` port                | yes                                          |
+| macOS                 | yes                  | yes — pair, then `/dev/cu.*-SPPDev`                         | yes                                          |
+| Linux                 | yes, with BlueZ      | yes — pair and bind an `rfcomm` node                        | yes                                          |
+| Android (Chrome 138+) | yes                  | yes, once paired — **see the LE-bond trap below**           | unlikely — wired serial is still rolling out |
+| ChromeOS              | yes                  | yes, once paired                                            | yes                                          |
+| iOS / iPadOS          | Bluefy / WebBLE only | **impossible** — no third-party classic access at any layer | no                                           |
+
+Three of those cells need more than a word:
+
+- **Android, Classic Bluetooth.** The picker lists paired devices by their
+  cached classic service records, so a sensor has to be paired in system
+  settings first. A dual-mode sensor advertising both radios invites Android to
+  create an **LE** bond instead, which satisfies the user while leaving no
+  BR/EDR link key and therefore no SPP record — the sensor is then simply
+  absent from the picker. Confirmed on hardware with
+  `dumpsys bluetooth_manager`. The fix: disable the sensor's BLE radio, unpair,
+  pair again, then re-enable BLE. The classic bond survives, so it is once per
+  phone, not once per session. `transportAdvice()` returns this as prose.
+- **Android, wired.** `navigator.serial` is present and callable, but Chrome
+  implements it there for Bluetooth RFCOMM port emulation only, so a dock will
+  not appear in the picker. No feature test separates the two cases, which is
+  why `transportAvailability()` answers `'unlikely'` rather than
+  `'unavailable'` — the control stays enabled so devices that do gain wired
+  support are not locked out.
+- **iOS, Classic Bluetooth.** Not "not yet": Core Bluetooth is BLE-only and
+  classic profiles such as SPP need MFi licensing, so no browser release can
+  change it. A classic-only Shimmer3 — the whole RN42 fleet — cannot be reached
+  from iOS by any route.
+
+SD-card download additionally needs `showDirectoryPicker`, which is
+Chromium-desktop only, so the SD browser is unavailable on Android even where
+the link itself works perfectly well.
 
 ## Quick Start
 
@@ -79,7 +185,7 @@ characteristic, deliver each inbound notification verbatim to the `onNotify`
 callback (never merge or re-split chunks), and fire `onDisconnect` on link loss.
 `LoopbackTransport` is an in-memory implementation used by the test suites.
 
-### Classic-Bluetooth Shimmer3 (`Shimmer3Client`)
+### Classic Bluetooth (`Shimmer3Client`, and `Shimmer3RClient` too)
 
 The classic (pre-3R) Shimmer3 speaks the same LiteProtocol but over an **RFCOMM/SPP
 byte stream** rather than BLE. Web Bluetooth cannot open an RFCOMM socket, so
@@ -87,7 +193,14 @@ byte stream** rather than BLE. Web Bluetooth cannot open an RFCOMM socket, so
 one — but a browser can still reach the device. Pairing a Shimmer over classic
 Bluetooth makes the OS expose it as a **virtual COM port** (Windows `COMx`,
 macOS `/dev/cu.*-SPPDev`), and Web Serial can open that port, so
-`WebSerialTransport` is a working SPP transport:
+`WebSerialTransport` is a working SPP transport.
+
+Everything in this section applies to a **Shimmer3R's classic link as well**:
+its RN4678 is reached the same way, with the same options, and the client is
+then `Shimmer3RClient` over the same `WebSerialTransport` rather than over Web
+Bluetooth. The one difference is that `Shimmer3RClient` can also build its own
+BLE transport, so unlike `Shimmer3Client` it does not _require_ one to be
+injected.
 
 ```ts
 import {
@@ -289,7 +402,7 @@ ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
 
 `runFactoryTest` asks the sensor to run the suite its firmware runs on the
 production line, and returns the report it prints. It is available on
-`Shimmer3RClient` (BLE and classic Bluetooth) and on `WiredShimmerClient`
+`Shimmer3RClient` (BLE and Classic Bluetooth) and on `WiredShimmerClient`
 (dock UART, and a Shimmer3R's USB-C port).
 
 ```js

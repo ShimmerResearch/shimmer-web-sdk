@@ -113,7 +113,7 @@ export interface Shimmer3ClientOptions extends ShimmerClientOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Client for the **classic-Bluetooth (RFCOMM/SPP) Shimmer3**.
+ * Client for the **Classic-Bluetooth (RFCOMM/SPP) Shimmer3**.
  *
  * Shimmer3 speaks the same LiteProtocol as the Shimmer3R (shared opcodes, sensor
  * bitmap, channel formats — all reused from `../shimmer3r/`), with two
@@ -237,7 +237,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    * A transport is REQUIRED (constructor option or this parameter): Web
    * Bluetooth cannot open an RFCOMM socket, so there is no default. In a browser
    * the working transport is a {@link WebSerialTransport} over the virtual COM
-   * port the OS creates for a Shimmer paired over classic Bluetooth. Calling
+   * port the OS creates for a Shimmer paired over Classic Bluetooth. Calling
    * without one throws.
    *
    * Handshake (ported from ShimmerBluetooth#initialize → readShimmerVersionNew →
@@ -253,7 +253,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (!t) {
       throw new Error(
         'Shimmer3Client requires an injected transport: Web Bluetooth cannot open an ' +
-          'RFCOMM/SPP socket. In a browser, pair the sensor over classic Bluetooth and ' +
+          'RFCOMM/SPP socket. In a browser, pair the sensor over Classic Bluetooth and ' +
           'pass a WebSerialTransport over the COM port the OS creates for it ' +
           '(allowedBluetoothServiceClassIds: [SHIMMER3_SPP_UUID]); elsewhere pass any ' +
           'ShimmerTransport via the constructor ({ transport }) or connect(transport).',
