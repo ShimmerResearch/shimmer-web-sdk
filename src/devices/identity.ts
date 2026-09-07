@@ -90,8 +90,10 @@ export interface ShimmerHardwareDescription {
   /**
    * Everything known, as one line: `'Shimmer3R GSR+ (SR48-3-0)'`. Degrades a
    * piece at a time — an unnamed SR code gives `'Shimmer3R (SR52-1-0)'`, no
-   * board at all gives `'Shimmer3R'`, and nothing known gives
-   * `'hardware id 7'`.
+   * board at all gives `'Shimmer3R'`, a hardware id outside
+   * {@link SHIMMER_PLATFORM_NAMES} gives `'hardware id 7 GSR+ (SR48-3-0)'`, a
+   * board with no platform gives `'GSR+ (SR48-3-0)'`, and nothing known at all
+   * gives `'unknown hardware'`.
    */
   label: string;
 }
