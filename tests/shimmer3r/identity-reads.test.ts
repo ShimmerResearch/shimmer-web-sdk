@@ -80,6 +80,13 @@ describe('Shimmer3RClient.readSrBoard', () => {
     await expect(client.readSrBoard()).resolves.toBeNull();
   });
 
+  it('returns null for an id page that was never written', async () => {
+    /* All zeroes is as much "no board here" as all 0xFF, and returning
+       {0,0,0} would surface as the board SR0-0-0. */
+    const { client } = await connectedSensor({ board: [0, 0, 0] });
+    await expect(client.readSrBoard()).resolves.toBeNull();
+  });
+
   it('works over an unframed serial link', async () => {
     /* The unframer has to know how long a DAUGHTER_CARD_ID_RESPONSE is, or it
        resyncs straight through it and the read times out. */

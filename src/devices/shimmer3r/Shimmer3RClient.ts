@@ -1142,9 +1142,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * This is the page the firmware caches at boot, not a live EEPROM read, so
    * it answers even on a board whose EEPROM has since gone away. Returns null
-   * when the page holds one of the two "nothing here" patterns — all zeroes,
-   * never written, or all 0xFF, erased — which is what
-   * {@link isShimmerSrBoardValid} tests for.
+   * when the page holds either "nothing here" pattern — all zeroes, never
+   * written, or all 0xFF, erased — which {@link parseExpansionBoard} decides
+   * through {@link isShimmerSrBoardValid}.
    *
    * Despite the name there is no separate expansion board on a Shimmer3R: the
    * page carries the SR code of the board itself, drawn from the same table

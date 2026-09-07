@@ -79,6 +79,22 @@ describe('SR board identity', () => {
   });
 });
 
+describe('parseExpansionBoard agrees with the validity test', () => {
+  it('reads a real page, and rejects both blank patterns', async () => {
+    const { parseExpansionBoard } = await import('../src/devices/dock/protocol.js');
+    expect(parseExpansionBoard(new Uint8Array([48, 3, 0]))).toEqual({
+      boardId: 48,
+      boardRev: 3,
+      specialRev: 0,
+    });
+    expect(parseExpansionBoard(new Uint8Array([0xff, 0xff, 0xff]))).toBeNull();
+    /* Never written. Only the 0xFF case was rejected before, so this came
+       back as {0,0,0} and could be shown as the board SR0-0-0. */
+    expect(parseExpansionBoard(new Uint8Array([0, 0, 0]))).toBeNull();
+    expect(parseExpansionBoard(new Uint8Array([0, 0]))).toBeNull();
+  });
+});
+
 describe('parseBluetoothModuleVersion', () => {
   it('names every module reply the Java table carries', () => {
     /* The full-reply column of BluetoothModuleVersionDetails.java:15-27, run

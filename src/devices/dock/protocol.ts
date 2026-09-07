@@ -18,6 +18,7 @@
 import { calibrateU12AdcValue } from '../shimmer3r/calibration.js';
 import type { AckVerdict } from '../factoryTest/capture.js';
 import { shimmerUartCrcCalc, shimmerUartCrcCheck } from './crc.js';
+import { isShimmerSrBoardValid } from '../identity.js';
 import {
   UART_PACKET_HEADER,
   UART_PACKET_CMD,
@@ -493,16 +494,24 @@ export interface ExpansionBoardInfo {
 
 /**
  * Parse the first 3 bytes of a daughter-card CARD_ID read as
- * `[boardId, boardRev, specialRev]` (ExpansionBoardDetails.java:58-60). Returns
- * null when the board is absent (an unwritten card memory reads back all 0xFF).
+ * `[boardId, boardRev, specialRev]` (ExpansionBoardDetails.java:58-60).
+ *
+ * Returns null when the board is absent, which is BOTH blank patterns: all
+ * 0xFF for an erased page, and all zeroes for one that was never written.
+ * Only the 0xFF case was rejected until now, so an all-zero page came back as
+ * `{0, 0, 0}` and could be rendered as the board `SR0-0-0`. The Java driver's
+ * own `isExpansionBoardValid()` (`ExpansionBoardDetails.java:104-111`) treats
+ * the two the same way, and {@link isShimmerSrBoardValid} is the one
+ * definition of it here.
  */
 export function parseExpansionBoard(payload: Uint8Array): ExpansionBoardInfo | null {
   if (payload.length < 3) return null;
-  const boardId = payload[0] & 0xff;
-  const boardRev = payload[1] & 0xff;
-  const specialRev = payload[2] & 0xff;
-  if (boardId === 0xff && boardRev === 0xff && specialRev === 0xff) return null;
-  return { boardId, boardRev, specialRev };
+  const board = {
+    boardId: payload[0] & 0xff,
+    boardRev: payload[1] & 0xff,
+    specialRev: payload[2] & 0xff,
+  };
+  return isShimmerSrBoardValid(board) ? board : null;
 }
 
 /** Re-export for consumers building addresses. */
