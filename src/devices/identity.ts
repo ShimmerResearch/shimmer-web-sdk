@@ -76,7 +76,9 @@ export function formatShimmerSrCode(board: ShimmerSrBoard): string {
  * (erased). Port of `isExpansionBoardValid()`
  * (`ExpansionBoardDetails.java:104-111`).
  */
-export function isShimmerSrBoardValid(board: ShimmerSrBoard | null | undefined): boolean {
+export function isShimmerSrBoardValid(
+  board: ShimmerSrBoard | null | undefined,
+): board is ShimmerSrBoard {
   if (!board) return false;
   const { boardId, boardRev, specialRev } = board;
   if (boardId === 0 && boardRev === 0 && specialRev === 0) return false;
@@ -116,7 +118,7 @@ export function describeShimmerHardware(
 ): ShimmerHardwareDescription {
   const platform =
     hardwareVersion == null ? null : (SHIMMER_PLATFORM_NAMES[hardwareVersion] ?? null);
-  const valid = isShimmerSrBoardValid(board) ? (board as ShimmerSrBoard) : null;
+  const valid = isShimmerSrBoardValid(board) ? board : null;
   const boardName = valid ? (SHIMMER_SR_BOARD_NAMES[valid.boardId] ?? null) : null;
   const srCode = valid ? formatShimmerSrCode(valid) : null;
 
