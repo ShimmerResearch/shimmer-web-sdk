@@ -339,7 +339,7 @@ describe('Shimmer3RClient control plane over a byte stream', () => {
     expect(res.kBps).toBeGreaterThan(0);
   });
 
-  // The throughput A/B between BLE and classic Bluetooth is the whole point of
+  // The throughput A/B between BLE and Classic Bluetooth is the whole point of
   // reaching the sensor over a COM port, so it matters that re-framing does not
   // bias the number. On a clean stream it does not: both transports report the
   // same count. Where they differ is interleaved noise - the framed path counts
@@ -401,7 +401,7 @@ describe('connect status text follows the transport', () => {
    * These messages used to be emitted unconditionally, so an RFCOMM session
    * announced "GATT connected", "RX/TX obtained" and "Notifications started" —
    * none of which exist on a serial link. While debugging a Shimmer3R missing
-   * from Android's classic-Bluetooth picker that log read as proof the button had
+   * from Android's Classic-Bluetooth picker that log read as proof the button had
    * fallen back to BLE, and it had not. A log that misreports the mechanism is
    * worse than a terser one, so the wording is pinned.
    */

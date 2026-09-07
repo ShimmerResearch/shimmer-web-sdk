@@ -1,5 +1,5 @@
 /**
- * Pure protocol helpers for the classic Bluetooth (RFCOMM/SPP) Shimmer3.
+ * Pure protocol helpers for the Classic Bluetooth (RFCOMM/SPP) Shimmer3.
  *
  * Classic Shimmer3 speaks the same LiteProtocol command set as the Shimmer3R
  * (see `../shimmer3r/constants.ts`), but over an **unframed RFCOMM byte stream**
@@ -130,7 +130,7 @@ export interface Shimmer3InquiryResult {
  * Build a stream schema from the channel-ID list reported by the inquiry.
  *
  * Mirrors ShimmerObject#interpretDataPacketFormat. The generation is fixed at
- * `'shimmer3'`: this file is the classic-Bluetooth Shimmer3 path, so unlike
+ * `'shimmer3'`: this file is the Classic-Bluetooth Shimmer3 path, so unlike
  * `Shimmer3RClient` — which the same firmware answers on both platforms — there
  * is nothing to determine and nothing to assume. That matters for the BMP
  * channels, which are 2-byte big-endian temperature + 3-byte big-endian

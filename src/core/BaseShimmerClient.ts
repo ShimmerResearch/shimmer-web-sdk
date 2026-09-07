@@ -34,7 +34,7 @@ export abstract class BaseShimmerClient implements IShimmerClient {
   /**
    * Invoked when the link to the device goes away **without the application
    * asking for it**: the sensor was switched off, walked out of BLE range, or
-   * its USB / classic-Bluetooth COM port was unplugged. `reason` carries the
+   * its USB / Classic-Bluetooth COM port was unplugged. `reason` carries the
    * transport's error when it supplied one.
    *
    * Deliberately NOT invoked by {@link disconnect}. A caller that closed the

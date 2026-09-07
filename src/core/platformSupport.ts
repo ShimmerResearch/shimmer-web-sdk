@@ -31,9 +31,9 @@
  *
  * iOS is the opposite shape — a harder "no" than an unimplemented API. Every iOS
  * browser is WebKit, which ships neither API, and iOS exposes no
- * classic-Bluetooth serial access to third-party apps at any layer: Core
+ * Classic-Bluetooth serial access to third-party apps at any layer: Core
  * Bluetooth is BLE-only, and classic profiles such as SPP require MFi licensing.
- * So classic Bluetooth there is impossible rather than merely absent, and no
+ * So Classic Bluetooth there is impossible rather than merely absent, and no
  * future browser release changes that. BLE via a browser that bundles its own
  * stack (Bluefy, WebBLE) is the ceiling.
  */
@@ -189,20 +189,20 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
        * what they are using.
        *
        * Deliberately conditional on the *sensor* too. BLE is not a substitute
-       * for classic Bluetooth in general - a classic-only Shimmer3 (the RN42
+       * for Classic Bluetooth in general - a classic-only Shimmer3 (the RN42
        * fleet has no BLE radio at all) cannot be reached from iOS by any route.
        * Promising "connect over BLE instead" would send exactly the user who
-       * needs classic Bluetooth off after something that cannot work for them.
+       * needs Classic Bluetooth off after something that cannot work for them.
        */
       const route = support.webBluetooth
         ? 'A sensor that also supports BLE can be reached that way instead.'
         : 'A sensor that also supports BLE can be reached with Bluefy or WebBLE (App Store), which bundle their own BLE stack.';
       return need === 'classicBluetooth'
-        ? `Classic Bluetooth cannot be reached from iOS at all: iOS gives apps no classic-Bluetooth serial access (Core Bluetooth is BLE-only, and SPP requires MFi licensing). ${route} A classic-Bluetooth-only sensor cannot be used from iOS.`
+        ? `Classic Bluetooth cannot be reached from iOS at all: iOS gives apps no Classic-Bluetooth serial access (Core Bluetooth is BLE-only, and SPP requires MFi licensing). ${route} A Classic-Bluetooth-only sensor cannot be used from iOS.`
         : `Web Serial is not available on iOS — WebKit does not implement it, so a wired dock cannot be opened. ${route}`;
     }
     return need === 'classicBluetooth'
-      ? 'Web Serial is not available in this browser, so classic Bluetooth cannot be used. Use Chrome or Edge on desktop, or Chrome 138+ on Android, over HTTPS or on localhost.'
+      ? 'Web Serial is not available in this browser, so Classic Bluetooth cannot be used. Use Chrome or Edge on desktop, or Chrome 138+ on Android, over HTTPS or on localhost.'
       : 'Web Serial is not available in this browser, so the USB/dock connection cannot be used. Use Chrome or Edge on desktop, over HTTPS or on localhost.';
   }
 
@@ -210,14 +210,14 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
     /*
      * Only reachable for a wired port on Android — see serialBluetoothOnly.
      *
-     * The classic-Bluetooth alternative is conditional, not prescribed. This
+     * The Classic-Bluetooth alternative is conditional, not prescribed. This
      * advice is device-agnostic (TransportNeed says nothing about the sensor),
      * and a Verisense reaches the host over wired USB serial or BLE and has no
      * RFCOMM at all — so telling every Android caller to "pair over classic
      * Bluetooth instead" sends wired-only users after a connection that cannot
      * exist. Same failure as promising BLE on iOS above.
      */
-    return 'Android Chrome exposes Web Serial for paired Bluetooth devices only, so a wired USB/dock connection will most likely find nothing (wired serial support is still rolling out). A sensor that supports classic Bluetooth can be paired and reached that way instead.';
+    return 'Android Chrome exposes Web Serial for paired Bluetooth devices only, so a wired USB/dock connection will most likely find nothing (wired serial support is still rolling out). A sensor that supports Classic Bluetooth can be paired and reached that way instead.';
   }
 
   /*
@@ -257,7 +257,7 @@ export function transportAdvice(support: PlatformSupport, need: TransportNeed): 
      * have taken an LE bond — for it, "paired but missing" has some other cause,
      * and the BLE-off dance is a dead end.
      */
-    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If a sensor that also has a BLE radio is already paired and still missing, Android has most likely bonded it over BLE rather than classic Bluetooth, which leaves no classic service record for the picker to find. To fix it: disable the sensor’s BLE radio, unpair it on the phone, pair again from Bluetooth settings, then re-enable BLE — the classic bond survives, so this is once per phone.';
+    return 'Pair the sensor in Android Settings → Bluetooth first — Android Chrome exposes Web Serial for paired Bluetooth devices only. If a sensor that also has a BLE radio is already paired and still missing, Android has most likely bonded it over BLE rather than Classic Bluetooth, which leaves no classic service record for the picker to find. To fix it: disable the sensor’s BLE radio, unpair it on the phone, pair again from Bluetooth settings, then re-enable BLE — the classic bond survives, so this is once per phone.';
   }
   return null;
 }

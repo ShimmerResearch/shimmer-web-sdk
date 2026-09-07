@@ -19,6 +19,7 @@ import {
   enumerateSdTree,
   formatSdImportStamp,
   consensysBackupSegments,
+  consensysMacFolderName,
   CONSENSYS_UNKNOWN_DEVICE,
 } from '../../src/devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 
@@ -277,7 +278,7 @@ interface SimOptions {
   dropSeqOnce?: number;
   /**
    * Report the transport as unframed (`capabilities.framed = false`), i.e. a
-   * byte stream — Web Serial over USB or over the COM port a classic-Bluetooth
+   * byte stream — Web Serial over USB or over the COM port a Classic-Bluetooth
    * pairing creates. Combine with a small `chunkSize` to split messages.
    */
   framed?: boolean;
@@ -615,7 +616,7 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
 // The same firmware simulator, but over a transport that reports itself as an
 // unframed byte stream and chops every reply into chunks far smaller than a
 // message. This is a Shimmer reached over Web Serial — either USB or the virtual
-// COM port a classic-Bluetooth pairing creates — where a read can split a
+// COM port a Classic-Bluetooth pairing creates — where a read can split a
 // response down the middle or carry several messages at once.
 //
 // Which of these the re-framing drain is actually load-bearing for: the two
@@ -811,7 +812,37 @@ describe('Consensys Backup layout', () => {
     expect(formatSdImportStamp(new Date(2025, 0, 2, 3, 4, 5))).toBe('2025-01-02_03.04.05');
   });
 
-  it('nests the card tree under <stamp>/<ShimmerName>, taking the name from the session folder', () => {
+  it('nests the card tree under <stamp>/<mac-id>, in lowercase hex', () => {
+    // The shape JC checked against Consensys on DEV-948:
+    // Backup/2022-11-29_10.36.45/e8eb1b9767a0/data/RN4678_v1_23_.../RN4678_v1_00-000
+    expect(
+      consensysBackupSegments(
+        ['data', 'RN4678_v1_23_1669669660', 'RN4678_v1_00-000'],
+        '2022-11-29_10.36.45',
+        'E8EB1B9767A0',
+      ),
+    ).toEqual([
+      '2022-11-29_10.36.45',
+      'e8eb1b9767a0',
+      'data',
+      'RN4678_v1_23_1669669660',
+      'RN4678_v1_00-000',
+    ]);
+  });
+
+  it('normalises whatever MAC format it is handed', () => {
+    expect(consensysMacFolderName('E8EB1B9767A0')).toBe('e8eb1b9767a0');
+    expect(consensysMacFolderName('e8:eb:1b:97:67:a0')).toBe('e8eb1b9767a0');
+    expect(consensysMacFolderName('e8-eb-1b-97-67-a0')).toBe('e8eb1b9767a0');
+    // Not six bytes of hex: null, so the caller falls back deliberately
+    // rather than naming a folder after a truncated address.
+    expect(consensysMacFolderName('e8eb1b9767')).toBeNull();
+    expect(consensysMacFolderName('(unavailable)')).toBeNull();
+    expect(consensysMacFolderName(null)).toBeNull();
+    expect(consensysMacFolderName(undefined)).toBeNull();
+  });
+
+  it('falls back to the session folder name when no usable MAC is given', () => {
     expect(
       consensysBackupSegments(
         ['data', 'sync_1750856068', 'Shimmer_5AA4-002'],
@@ -845,15 +876,16 @@ describe('Consensys Backup layout', () => {
     const summary = await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
       layout: 'consensysBackup',
       importStamp: '2025-06-25_15.30.36',
+      macId: 'E8EB1B9767A0',
       windowLen: 4096,
     });
 
     expect(summary.filesDownloaded).toBe(2);
     expect(summary.importStamp).toBe('2025-06-25_15.30.36');
 
-    // Backup/<stamp>/<ShimmerName>/data/<trial>/<session>/<file>
+    // Backup/<stamp>/<mac-id>/data/<trial>/<session>/<file>
     const sessionDir = dest.atPath(
-      '2025-06-25_15.30.36/Shimmer_5AA4/data/sync_1750856068/Shimmer_5AA4-002',
+      '2025-06-25_15.30.36/e8eb1b9767a0/data/sync_1750856068/Shimmer_5AA4-002',
     );
     expect(sessionDir).toBeDefined();
     expect(sessionDir?.files.get('000')?.data).toEqual(asciiBytes(700));
@@ -863,7 +895,31 @@ describe('Consensys Backup layout', () => {
     expect(dest.dirs.has('data')).toBe(false);
   });
 
-  it('files sessions from two devices on one card under their own name folders', async () => {
+  it('files every session under the reading device, MAC given', async () => {
+    /* Two devices' sessions on one card land in ONE folder now, because the
+       MAC names the device the card is being read out of. That is the whole
+       point of the identifier: the same device renamed mid-trial keeps one
+       folder. The card-was-moved case is the price, and it cannot arise over
+       a Bluetooth download. */
+    const card = new VirtualCard();
+    card.addFile('data/sync_1750856068/Shimmer_5AA4-000/000', asciiBytes(64));
+    card.addFile('data/sync_1750856068/Shimmer_BEEF-001/000', asciiBytes(64));
+    const { client } = await makeClient(card);
+    const dest = new MemDir();
+
+    await downloadSdTree(client, dest as unknown as FileSystemDirectoryHandle, {
+      layout: 'consensysBackup',
+      importStamp: 'STAMP',
+      macId: 'E8EB1B9767A0',
+    });
+
+    expect(Array.from(dest.atPath('STAMP')?.dirs.keys() ?? []).sort()).toEqual(['e8eb1b9767a0']);
+    expect(
+      dest.atPath('STAMP/e8eb1b9767a0/data/sync_1750856068/Shimmer_BEEF-001')?.files.get('000'),
+    ).toBeDefined();
+  });
+
+  it('separates two devices by name when no MAC is given', async () => {
     const card = new VirtualCard();
     card.addFile('data/sync_1750856068/Shimmer_5AA4-000/000', asciiBytes(64));
     card.addFile('data/sync_1750856068/Shimmer_BEEF-001/000', asciiBytes(64));

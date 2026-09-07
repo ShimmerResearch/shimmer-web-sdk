@@ -24,7 +24,7 @@ export interface WebSerialTransportOptions {
   /**
    * Service class IDs the port picker is *permitted* to surface Bluetooth
    * (RFCOMM/SPP) ports for — pass `[SHIMMER3_SPP_UUID]` to reach a Shimmer
-   * paired over classic Bluetooth. Chrome hides Bluetooth serial ports entirely
+   * paired over Classic Bluetooth. Chrome hides Bluetooth serial ports entirely
    * unless the origin names their service class, so `filters` alone is not
    * enough.
    *
@@ -46,7 +46,7 @@ export interface WebSerialTransportOptions {
   bufferSize?: number;
   /**
    * Reported {@link ShimmerTransport.kind}. Defaults to `'serial'`; pass
-   * `'rfcomm'` when the port is a classic-Bluetooth virtual COM port so logs
+   * `'rfcomm'` when the port is a Classic-Bluetooth virtual COM port so logs
    * and UI can tell the two apart (no client behaviour depends on it).
    */
   kind?: ShimmerTransportKind;
@@ -218,7 +218,7 @@ export class WebSerialTransport implements ShimmerTransport {
   /**
    * `port.open()`, bounded by {@link WebSerialTransportOptions.openTimeoutMs}.
    *
-   * Opening a classic-Bluetooth COM port is what brings the RFCOMM link up, so
+   * Opening a Classic-Bluetooth COM port is what brings the RFCOMM link up, so
    * an asleep or out-of-range sensor blocks here rather than failing fast. If
    * the timeout wins we still close the port should the open land later —
    * otherwise the OS keeps an orphaned handle and the next attempt fails with

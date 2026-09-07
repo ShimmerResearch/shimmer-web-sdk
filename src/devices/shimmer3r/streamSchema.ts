@@ -2,7 +2,7 @@
  * Building the streaming packet schema from an inquiry response's channel list.
  *
  * Shared by both families: `Shimmer3RClient` (framed BLE) and
- * `buildShimmer3Schema` (unframed classic Bluetooth) put the same channel-ID
+ * `buildShimmer3Schema` (unframed Classic Bluetooth) put the same channel-ID
  * bytes through the same table, and any difference in how they treat a channel
  * they do not recognise would be a difference in how quietly they corrupt data.
  * So the logic lives here once.

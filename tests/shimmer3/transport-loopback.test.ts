@@ -47,7 +47,7 @@ function dribble(tr: LoopbackTransport, bytes: number[]): void {
 }
 
 describe('Shimmer3Client connect handshake', () => {
-  it('throws without an injected transport (no browser classic BT)', async () => {
+  it('throws without an injected transport (no browser Classic BT)', async () => {
     const client = new Shimmer3Client({ debug: false });
     await expect(client.connect()).rejects.toThrow(/requires an injected transport/i);
   });
