@@ -42,7 +42,18 @@ import {
   parseShimmer3StatusBytes,
   type Shimmer3DeviceStatus,
 } from './protocol.js';
-import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
+import {
+  msToRtcBytesLE,
+  parseBatteryStatus,
+  parseExpansionBoard,
+  type WiredBatteryStatus,
+} from '../dock/protocol.js';
+import {
+  formatShimmerSrCode,
+  parseBluetoothModuleVersion,
+  type BluetoothModuleVersion,
+  type ShimmerSrBoard,
+} from '../identity.js';
 import {
   FactoryTestCapture,
   FactoryTestError,
@@ -62,7 +73,7 @@ import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
-import { shimmer3rControlMessageLength } from './streamFraming.js';
+import { shimmer3rControlMessageLength, DECLARED_LENGTH_RESPONSE_CAPS } from './streamFraming.js';
 import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
@@ -966,7 +977,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * MTU the CYW20820 negotiates — and the transport surfaces one notification
    * per chunk, so any response longer than that arrives split. Firmware writes
    * the logical response contiguously, so the fragments simply concatenate in
-   * order: accumulate until `expectedLen` data bytes have arrived instead of
+   * order: accumulate until `want` data bytes have arrived instead of
    * assuming the first chunk holds the whole response.
    *
    * Firmware always emits the length byte after the opcode, but its absence is
@@ -981,10 +992,45 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * length that was asked for, so a response with no header at all still
    * reaches the caller intact.
    */
+  /**
+   * Accumulate temp-plane chunks onto `acc` until it holds at least `n` bytes.
+   *
+   * Resolves synchronously when it already does, so the common case costs
+   * nothing. Registers no handler in that case either, which matters: the
+   * caller carries straight on into its own handler with no gap in between,
+   * and chunks arrive as transport tasks rather than microtasks, so nothing
+   * can slip through the join.
+   */
+  private _awaitAtLeastBytes(
+    acc: Uint8Array,
+    n: number,
+    timeoutMs: number,
+    timeoutMessage: string,
+  ): Promise<Uint8Array> {
+    if (acc.length >= n) return Promise.resolve(acc);
+    return new Promise<Uint8Array>((resolve, reject) => {
+      let buf = acc;
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || chunk.length === 0) return;
+        buf = concatU8(buf, chunk);
+        if (buf.length >= n) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          resolve(buf);
+        }
+      };
+      this._onTemp(handler);
+    });
+  }
+
   private async _readLengthPrefixedResponse(
     cmd: Uint8Array,
     respOpcode: number,
-    expectedLen: number,
+    expectedLen: number | 'declared',
     label: string,
     headerBytes = 1,
     ackTimeoutMs = 1500,
@@ -1000,6 +1046,47 @@ export class Shimmer3RClient extends BaseShimmerClient {
     /* Bytes after the response opcode. */
     let acc = first[0] === respOpcode ? first.subarray(1) : first;
 
+    /* `'declared'` is for the responses whose length the host cannot know in
+     * advance because the firmware measures it — the Bluetooth module version
+     * string is `strlen()` of whatever the module replied
+     * (`Comms/shimmer_bt_uart.c:2092-2099`). The length byte is consumed here
+     * and the header machinery below is then switched off, since the only
+     * header there was has already been read. */
+    let want: number;
+    if (expectedLen === 'declared') {
+      /* The length byte does not have to arrive with the opcode.
+       * `_waitForResponse` resolves as soon as it sees the expected opcode,
+       * and a BLE notification can be exactly `[opcode]` with everything else
+       * following — a fragmentation case the continuation logic below handles
+       * perfectly well once the length is known. Throwing here instead made
+       * that case fail outright, so wait for the byte and only give up if it
+       * never comes. */
+      acc = await this._awaitAtLeastBytes(
+        acc,
+        1,
+        responseTimeoutMs,
+        `${label} response carried no length byte.`,
+      );
+      want = acc[0];
+      /* Checked against the same cap the byte-stream framer uses, and for the
+       * same reason: a length beyond what the firmware can produce means the
+       * byte was not a length. Without this the two transports fail
+       * differently — the framer refuses it outright, while a framed link
+       * would sit waiting for bytes that cannot arrive and only give up on
+       * the timeout. */
+      const cap = DECLARED_LENGTH_RESPONSE_CAPS[respOpcode];
+      if (cap !== undefined && want > cap) {
+        throw new Error(
+          `${label} declared ${want} bytes, more than the ${cap} this response can carry.`,
+        );
+      }
+      acc = acc.subarray(1);
+      headerBytes = 0;
+      expectedOffset = undefined;
+    } else {
+      want = expectedLen;
+    }
+
     /* Whether a header is present is decided by reading it, because a response
      * without one is a case this client supports (see the loopback test for an
      * InfoMem reply with no length byte). That check is unavoidably a guess for
@@ -1012,7 +1099,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * one byte into a coincidence on three. Previously only `buf[0]` was
      * examined and the offset bytes were ignored entirely. */
     const hasHeader = (buf: Uint8Array): boolean => {
-      if (buf.length < headerBytes || buf[0] !== expectedLen) return false;
+      if (buf.length < headerBytes || buf[0] !== want) return false;
       if (headerBytes >= 3 && expectedOffset !== undefined) {
         return (buf[1] | (buf[2] << 8)) === expectedOffset;
       }
@@ -1021,8 +1108,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const dataOf = (buf: Uint8Array): Uint8Array =>
       hasHeader(buf) ? buf.subarray(headerBytes) : buf;
 
-    if (dataOf(acc).length >= expectedLen) {
-      return dataOf(acc).slice(0, expectedLen);
+    if (dataOf(acc).length >= want) {
+      return dataOf(acc).slice(0, want);
     }
 
     /* Response is fragmented — collect the continuation chunks, which carry
@@ -1032,7 +1119,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._offTemp(handler);
         reject(
           new Error(
-            `${label} returned ${dataOf(acc).length} of ${expectedLen} bytes (response truncated).`,
+            `${label} returned ${dataOf(acc).length} of ${want} bytes (response truncated).`,
           ),
         );
       }, responseTimeoutMs);
@@ -1047,10 +1134,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * mid-response. */
         acc = concatU8(acc, chunk);
         const data = dataOf(acc);
-        if (data.length >= expectedLen) {
+        if (data.length >= want) {
           clearTimeout(t);
           this._offTemp(handler);
-          resolve(data.slice(0, expectedLen));
+          resolve(data.slice(0, want));
         }
       };
       this._onTemp(handler);
@@ -1106,6 +1193,76 @@ export class Shimmer3RClient extends BaseShimmerClient {
       1500,
     );
     this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
+  }
+
+  /**
+   * Read the board's SR identity — `{boardId, boardRev, specialRev}`, the
+   * first three bytes of the daughter-card id page
+   * (GET_DAUGHTER_CARD_ID_COMMAND 0x66 → `[0x65][length][bytes…]`,
+   * `Comms/shimmer_bt_uart.c:1308-1317, 2268-2277`).
+   *
+   * This is the page the firmware caches at boot, not a live EEPROM read, so
+   * it answers even on a board whose EEPROM has since gone away. Returns null
+   * when the page holds either "nothing here" pattern — all zeroes, never
+   * written, or all 0xFF, erased — which {@link parseExpansionBoard} decides
+   * through {@link isShimmerSrBoardValid}.
+   *
+   * Despite the name there is no separate expansion board on a Shimmer3R: the
+   * page carries the SR code of the board itself, drawn from the same table
+   * the Shimmer3 uses. Pair it with {@link describeShimmerHardware} to get a
+   * line like `Shimmer3R GSR+ (SR48-3-0)`.
+   */
+  async readSrBoard(): Promise<ShimmerSrBoard | null> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus('GET_DAUGHTER_CARD_ID → waiting for ACK then RSP…');
+    const payload = await this._readLengthPrefixedResponse(
+      new Uint8Array([OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, 3, 0]),
+      OPCODES.DAUGHTER_CARD_ID_RESPONSE,
+      3,
+      'Daughter-card id read',
+    );
+    const board = parseExpansionBoard(payload);
+    this._emitStatus(
+      board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank',
+    );
+    return board;
+  }
+
+  /**
+   * Read what the Bluetooth module says its own version is
+   * (GET_BT_VERSION_STR_COMMAND 0xA1 → `[0xA2][length][ASCII…]`,
+   * `Comms/shimmer_bt_uart.c:2092-2099`).
+   *
+   * The length is the firmware's `strlen()` of the module's reply, so the host
+   * cannot know it in advance — and the Shimmer3R's reply is around seventy
+   * characters, more than one BLE notification carries, so the reassembly in
+   * the read helper is load-bearing here.
+   *
+   * What comes back differs by platform, which is why the result is parsed
+   * rather than returned as a string: a Shimmer3 forwards the RN module's own
+   * banner (minus the `CMD>` prompt the firmware strips), while a Shimmer3R
+   * returns a line the Shimmer firmware composes from the CYW20820's binary
+   * version record. {@link parseBluetoothModuleVersion} covers both and keeps
+   * the raw text either way.
+   *
+   * An empty reply is not an error: `btVerStrResponse` starts zeroed and is
+   * only filled once the module has answered the firmware's own query, so a
+   * sensor asked early enough — or one whose module never replied — reports a
+   * zero length. That arrives as `family: 'unknown'` with the label
+   * `'not reported'`.
+   */
+  async readBtModuleVersion(): Promise<BluetoothModuleVersion> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus('GET_BT_VERSION_STR → waiting for ACK then RSP…');
+    const payload = await this._readLengthPrefixedResponse(
+      new Uint8Array([OPCODES.GET_BT_VERSION_STR_COMMAND]),
+      OPCODES.BT_VERSION_STR_RESPONSE,
+      'declared',
+      'Bluetooth module version read',
+    );
+    const parsed = parseBluetoothModuleVersion(payload);
+    this._emitStatus(`Bluetooth module: ${parsed.label}`);
+    return parsed;
   }
 
   /**
