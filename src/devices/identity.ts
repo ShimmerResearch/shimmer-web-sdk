@@ -233,14 +233,21 @@ const CYW20820_PATTERN =
  * banner, and a Shimmer3R answers with a line the Shimmer firmware composes
  * itself from the CYW20820's binary version record.
  *
- * Never throws. An unrecognised reply is returned with `family: 'unknown'` and
+ * Never throws, and the signature says so: `null` and `undefined` are accepted
+ * because this parses a payload read off a device, and the SDK is consumed from
+ * plain JavaScript as well as TypeScript. A caller should not need a cast to
+ * hand it whatever a read actually produced.
+ *
+ * An unrecognised reply is returned with `family: 'unknown'` and
  * the raw text as its label — the Java equivalent has a bug here that returns
  * an empty name instead (its `NOT_READ` row carries an empty comparison
  * string, which `String.contains` matches against every input, so an
  * unrecognised module is reported as "not read"). What the module actually
  * said is the most useful thing a host can show.
  */
-export function parseBluetoothModuleVersion(raw: string | Uint8Array): BluetoothModuleVersion {
+export function parseBluetoothModuleVersion(
+  raw: string | Uint8Array | null | undefined,
+): BluetoothModuleVersion {
   let text = '';
   if (typeof raw === 'string') {
     text = raw;

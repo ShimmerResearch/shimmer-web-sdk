@@ -175,8 +175,10 @@ describe('parseBluetoothModuleVersion', () => {
   it('never throws, whatever arrives', () => {
     const rubbish = new Uint8Array([0x00, 0xff, 0x80, 0x0a, 0x0d, 0x1b, 0x7f]);
     expect(() => parseBluetoothModuleVersion(rubbish)).not.toThrow();
-    expect(() => parseBluetoothModuleVersion(undefined as unknown as string)).not.toThrow();
-    expect(parseBluetoothModuleVersion(undefined as unknown as string).label).toBe('not reported');
+    /* No cast: the signature accepts these, which is the point — needing
+       `as unknown as string` here was the sign that it did not. */
+    expect(parseBluetoothModuleVersion(undefined).label).toBe('not reported');
+    expect(parseBluetoothModuleVersion(null).label).toBe('not reported');
   });
 
   it('has no duplicate substrings in the table', () => {
