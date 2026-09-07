@@ -104,7 +104,7 @@ export interface Shimmer3RFramingOptions {
  * notification is already one whole message, and shows up only over classic
  * Bluetooth or the USB serial link.
  */
-const DECLARED_LENGTH_RESPONSE_CAPS: Readonly<Record<number, number>> = Object.freeze({
+export const DECLARED_LENGTH_RESPONSE_CAPS: Readonly<Record<number, number>> = Object.freeze({
   [OPCODES.DAUGHTER_CARD_MEM_RESPONSE]: 128,
   [OPCODES.INFOMEM_RESPONSE]: 128,
   [OPCODES.DAUGHTER_CARD_ID_RESPONSE]: 16,

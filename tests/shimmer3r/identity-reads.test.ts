@@ -139,6 +139,25 @@ describe('Shimmer3RClient.readBtModuleVersion', () => {
     expect(v.family).toBe('unknown');
   });
 
+  it('refuses a declared length beyond the cap on a FRAMED link too', async () => {
+    /* On an unframed link the byte-stream framer refuses it before the reader
+       sees it. Over BLE there is no framer, so without the reader's own check
+       the client sat waiting for bytes that cannot arrive and failed only on
+       the timeout — the same input, two different failures. */
+    const { client } = await connectedSensor({ btVersion: '', framed: true });
+    const t = (client as unknown as { _transport: LoopbackTransport })._transport;
+    t.setOnWrite((raw) => {
+      const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      if (cmd[0] === OPCODES.GET_BT_VERSION_STR_COMMAND) {
+        setTimeout(
+          () => t.notify(new Uint8Array([ACK, OPCODES.BT_VERSION_STR_RESPONSE, 200, 0x41])),
+          0,
+        );
+      }
+    });
+    await expect(client.readBtModuleVersion()).rejects.toThrow(/more than the 99/);
+  });
+
   it('refuses a declared length beyond what the firmware can report', async () => {
     /* The cap is 99: the firmware sends strlen() of a char[100], so the
        hundredth byte is the terminator. A larger length means the byte was

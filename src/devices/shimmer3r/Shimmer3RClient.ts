@@ -73,7 +73,7 @@ import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
-import { shimmer3rControlMessageLength } from './streamFraming.js';
+import { shimmer3rControlMessageLength, DECLARED_LENGTH_RESPONSE_CAPS } from './streamFraming.js';
 import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
@@ -1023,6 +1023,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
         throw new Error(`${label} response carried no length byte.`);
       }
       want = acc[0];
+      /* Checked against the same cap the byte-stream framer uses, and for the
+       * same reason: a length beyond what the firmware can produce means the
+       * byte was not a length. Without this the two transports fail
+       * differently — the framer refuses it outright, while a framed link
+       * would sit waiting for bytes that cannot arrive and only give up on
+       * the timeout. */
+      const cap = DECLARED_LENGTH_RESPONSE_CAPS[respOpcode];
+      if (cap !== undefined && want > cap) {
+        throw new Error(
+          `${label} declared ${want} bytes, more than the ${cap} this response can carry.`,
+        );
+      }
       acc = acc.subarray(1);
       headerBytes = 0;
       expectedOffset = undefined;
