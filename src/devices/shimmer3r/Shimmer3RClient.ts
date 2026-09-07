@@ -42,8 +42,12 @@ import {
   parseShimmer3StatusBytes,
   type Shimmer3DeviceStatus,
 } from './protocol.js';
-import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
-import { parseExpansionBoard } from '../dock/protocol.js';
+import {
+  msToRtcBytesLE,
+  parseBatteryStatus,
+  parseExpansionBoard,
+  type WiredBatteryStatus,
+} from '../dock/protocol.js';
 import {
   formatShimmerSrCode,
   parseBluetoothModuleVersion,

@@ -139,6 +139,26 @@ describe('Shimmer3RClient.readBtModuleVersion', () => {
     expect(v.family).toBe('unknown');
   });
 
+  it('refuses a declared length beyond what the firmware can report', async () => {
+    /* The cap is 99: the firmware sends strlen() of a char[100], so the
+       hundredth byte is the terminator. A larger length means the byte was
+       not a length at all, and on a serial link accepting it would swallow
+       real traffic while waiting for bytes that never come. */
+    const t = new LoopbackTransport({ capabilities: { framed: false } });
+    t.setOnWrite((raw) => {
+      const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      if (cmd[0] === OPCODES.GET_BT_VERSION_STR_COMMAND) {
+        setTimeout(
+          () => t.notify(new Uint8Array([ACK, OPCODES.BT_VERSION_STR_RESPONSE, 100, 0x41])),
+          0,
+        );
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await expect(client.readBtModuleVersion()).rejects.toThrow();
+  }, 10000);
+
   it('refuses when the response carries no length byte at all', async () => {
     const t = new LoopbackTransport({ capabilities: { framed: true } });
     t.setOnWrite((raw) => {
