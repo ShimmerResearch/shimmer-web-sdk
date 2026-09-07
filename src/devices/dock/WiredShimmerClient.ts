@@ -43,6 +43,7 @@ import {
   type WiredBatteryStatus,
   type ExpansionBoardInfo,
 } from './protocol.js';
+import { parseBluetoothModuleVersion, type BluetoothModuleVersion } from '../identity.js';
 import {
   resolveInfoMemLayout,
   parseInfoMem,
@@ -522,6 +523,29 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _readExpansionBoardImpl(): Promise<ExpansionBoardInfo | null> {
     const payload = await this._readMem(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, 16);
     return parseExpansionBoard(payload);
+  }
+
+  /**
+   * Read what the Bluetooth module says its own version is
+   * (`BLUETOOTH.VER`, the dock protocol's equivalent of the Bluetooth
+   * link's GET_BT_VERSION_STR_COMMAND).
+   *
+   * Same reply, same parser, same caveat: a Shimmer3 forwards the RN module's
+   * banner and a Shimmer3R returns the line the Shimmer firmware composes from
+   * the CYW20820's version record, so the result is parsed rather than handed
+   * back as a string. See {@link parseBluetoothModuleVersion}.
+   *
+   * Worth knowing over this link in particular: the module has to have been
+   * powered and asked for the firmware to have anything cached, and a sensor
+   * sitting in a dock may have had its radio off since boot. An empty reply is
+   * reported as `family: 'unknown'` with the label `'not reported'` rather
+   * than as an error.
+   */
+  async readBtModuleVersion(): Promise<BluetoothModuleVersion> {
+    const payload = await this.getConfig(UART_PROP.BLUETOOTH.VER);
+    const parsed = parseBluetoothModuleVersion(payload);
+    this._emitStatus(`Bluetooth module: ${parsed.label}`);
+    return parsed;
   }
 
   /**

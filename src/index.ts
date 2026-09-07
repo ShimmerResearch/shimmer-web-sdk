@@ -979,6 +979,28 @@ export type {
   VerisenseFactoryTestReportParsed,
 } from './devices/verisense/factoryTestReport.js';
 
+// --- Device identity: which board, and which Bluetooth module ---
+// Shared by the Shimmer3 and Shimmer3R Bluetooth clients and the dock client:
+// the same SR codes and the same module version strings arrive over all three
+// links, so the tables and the display formatting live in one place.
+export {
+  SHIMMER_PLATFORM_NAMES,
+  SHIMMER_SR_BOARD_NAMES,
+  formatShimmerSrCode,
+  isShimmerSrBoardValid,
+  describeShimmerHardware,
+  BLUETOOTH_MODULE_VERSIONS,
+  parseBluetoothModuleVersion,
+} from './devices/identity.js';
+export type {
+  ShimmerSrBoard,
+  ShimmerHardwareDescription,
+  BluetoothModuleFamily,
+  BluetoothModuleVersionEntry,
+  BluetoothModuleVersion,
+  Cyw20820VersionDetails,
+} from './devices/identity.js';
+
 // --- Factory test report parsing (all families) ---
 // The Verisense exports above are one grammar over this shared core; these are
 // the core itself plus the Shimmer3/Shimmer3R grammar.

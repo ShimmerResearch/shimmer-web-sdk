@@ -84,6 +84,31 @@ export interface Shimmer3RFramingOptions {
 }
 
 /**
+ * Responses shaped `[opcode][length][data…]`, and the largest payload length
+ * the firmware will report for each — the value that separates a real response
+ * from a stray byte that happens to equal the opcode.
+ *
+ * - daughter-card memory and InfoMem: the handlers refuse a read above 128
+ *   bytes (`Comms/shimmer_bt_uart.c`, the SET/GET_INFOMEM and
+ *   GET_DAUGHTER_CARD_MEM arg checks)
+ * - the daughter-card id page: 16 bytes, one EEPROM page
+ * - the Bluetooth module version: whatever the module replied, held in the
+ *   firmware's `char btVerStrResponse[100]`
+ *
+ * A response missing from this table cannot be reassembled on a byte stream —
+ * the drain has no way to know where it ends, so it resyncs through it one
+ * byte at a time and the read times out. That is invisible over BLE, where a
+ * notification is already one whole message, and shows up only over classic
+ * Bluetooth or the USB serial link.
+ */
+const DECLARED_LENGTH_RESPONSE_CAPS: Readonly<Record<number, number>> = Object.freeze({
+  [OPCODES.DAUGHTER_CARD_MEM_RESPONSE]: 128,
+  [OPCODES.INFOMEM_RESPONSE]: 128,
+  [OPCODES.DAUGHTER_CARD_ID_RESPONSE]: 16,
+  [OPCODES.BT_VERSION_STR_RESPONSE]: 100,
+});
+
+/**
  * Total length (INCLUDING the leading opcode) of the control message at the
  * head of `buf`, or {@link NEED_MORE} when more bytes are required to tell, or
  * {@link RESYNC} when the leading byte starts nothing we recognise.
@@ -153,10 +178,11 @@ export function shimmer3rControlMessageLength(
     return buf.length < total ? NEED_MORE : total;
   }
 
-  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
-    // [opcode][length][data…]; the firmware caps both a daughter-card and an
-    // InfoMem read at 128 bytes, so a larger "length" is garbage rather than a
-    // giant response.
+  const declaredCap = DECLARED_LENGTH_RESPONSE_CAPS[opcode];
+  if (declaredCap !== undefined) {
+    // [opcode][length][data…]; each response's cap is the largest payload the
+    // firmware will produce for it, so a larger "length" is a stray byte
+    // rather than a giant response.
     //
     // Framing these means the whole response arrives as ONE message, so
     // `_readLengthPrefixedResponse`'s continuation path — which treats later
@@ -164,9 +190,9 @@ export function shimmer3rControlMessageLength(
     // matters: those continuation bytes have no opcode, so the drain could not
     // frame them and would resync straight past the tail of the record.
     if (buf.length < 2) return NEED_MORE;
-    const memLen = buf[1];
-    if (memLen > 128) return RESYNC;
-    const total = 2 + memLen;
+    const declaredLen = buf[1];
+    if (declaredLen > declaredCap) return RESYNC;
+    const total = 2 + declaredLen;
     return buf.length < total ? NEED_MORE : total;
   }
 
