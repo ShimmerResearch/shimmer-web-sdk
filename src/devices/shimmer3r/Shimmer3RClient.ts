@@ -414,6 +414,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // matching the previous `rx.writeValue(...)` behaviour.
       writeCharUUID: this.rxUUID,
       notifyCharUUID: this.txUUID,
+      // CYSPP's Unacknowledged Data characteristic (the default `txUUID`) is
+      // notify-capable, so device→host payloads do not pay a confirmation
+      // round trip. Fall back to the Acknowledged Data characteristic, which
+      // is indicate-only, for anything that does not expose the former.
+      notifyCharUUIDFallback: SHIMMER3R_DEFAULTS.CHAR_TX_ACKED_UUID,
+      // Observational only - the values are surfaced and logged, not used to
+      // gate writes. See WebBluetoothTransportOptions.rxFlowCharUUID.
+      rxFlowCharUUID: SHIMMER3R_DEFAULTS.CHAR_RX_FLOW_UUID,
       requestDeviceOptions: {
         filters: [{ services: [this.serviceUUID] }],
         optionalServices: [this.serviceUUID],
