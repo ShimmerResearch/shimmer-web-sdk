@@ -63,6 +63,17 @@ describe('SR board identity', () => {
     expect(describeShimmerHardware(null).label).toBe('unknown hardware');
   });
 
+  it('leads with the board when the sensor will not say what platform it is', () => {
+    /* An older firmware that does not answer the hardware-version command
+       still has a board, and "unknown hardware GSR+" reads like a fault. */
+    expect(describeShimmerHardware(null, { boardId: 48, boardRev: 3, specialRev: 0 }).label).toBe(
+      'GSR+ (SR48-3-0)',
+    );
+    expect(describeShimmerHardware(null, { boardId: 52, boardRev: 1, specialRev: 0 }).label).toBe(
+      'unknown hardware (SR52-1-0)',
+    );
+  });
+
   it('knows only the two Shimmer3-family platforms', () => {
     expect(Object.keys(SHIMMER_PLATFORM_NAMES).sort()).toEqual(['10', '3']);
   });

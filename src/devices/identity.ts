@@ -113,11 +113,18 @@ export function describeShimmerHardware(
   const boardName = valid ? (SHIMMER_SR_BOARD_NAMES[valid.boardId] ?? null) : null;
   const srCode = valid ? formatShimmerSrCode(valid) : null;
 
-  let head: string;
-  if (platform) head = platform;
-  else if (hardwareVersion != null) head = `hardware id ${hardwareVersion}`;
-  else head = 'unknown hardware';
-  const named = boardName ? `${head} ${boardName}` : head;
+  /* A sensor that will not say which platform it is still has a board, and
+   * "unknown hardware GSR+ (SR48-3-0)" reads like a fault rather than a
+   * description. When there is no platform to lead with, the board name leads
+   * instead; a known-but-unnamed hardware id is kept, because the number is
+   * real information. */
+  let head: string | null = platform;
+  if (!head && hardwareVersion != null) head = `hardware id ${hardwareVersion}`;
+
+  let named: string;
+  if (head) named = boardName ? `${head} ${boardName}` : head;
+  else named = boardName ?? 'unknown hardware';
+
   const label = srCode ? `${named} (${srCode})` : named;
 
   return { platform, boardName, srCode, label };
