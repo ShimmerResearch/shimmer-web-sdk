@@ -178,7 +178,33 @@ describe('Shimmer3RClient.readBtModuleVersion', () => {
     await expect(client.readBtModuleVersion()).rejects.toThrow();
   }, 10000);
 
-  it('refuses when the response carries no length byte at all', async () => {
+  it('reassembles when the length byte arrives after the opcode', async () => {
+    /* `_waitForResponse` resolves on the opcode alone, so a BLE notification
+       of exactly `[opcode]` is a real case. The reader used to throw on it
+       rather than wait, which failed a fragmentation the continuation logic
+       could have handled. */
+    const raw = 'CYW20820 app=v01.04.18.18, stack=0x00000000, protocol=0x0000, hardware=0x00';
+    const bytes = [...raw].map((c) => c.charCodeAt(0));
+    const t = new LoopbackTransport({ capabilities: { framed: true } });
+    t.setOnWrite((rawCmd) => {
+      const cmd = rawCmd instanceof Uint8Array ? rawCmd : new Uint8Array(rawCmd);
+      if (cmd[0] !== OPCODES.GET_BT_VERSION_STR_COMMAND) return;
+      /* Three notifications: ACK, then the opcode ALONE, then the length and
+         the text split again. */
+      setTimeout(() => t.notify(new Uint8Array([ACK])), 0);
+      setTimeout(() => t.notify(new Uint8Array([OPCODES.BT_VERSION_STR_RESPONSE])), 1);
+      setTimeout(() => t.notify(new Uint8Array([bytes.length])), 2);
+      setTimeout(() => t.notify(new Uint8Array(bytes.slice(0, 20))), 3);
+      setTimeout(() => t.notify(new Uint8Array(bytes.slice(20))), 4);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    const v = await client.readBtModuleVersion();
+    expect(v.raw).toBe(raw);
+    expect(v.label).toBe('CYW20820 v1.4.18.18');
+  });
+
+  it('gives up if the length byte never arrives at all', async () => {
     const t = new LoopbackTransport({ capabilities: { framed: true } });
     t.setOnWrite((raw) => {
       const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
