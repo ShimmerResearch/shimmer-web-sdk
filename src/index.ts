@@ -981,9 +981,10 @@ export type {
 } from './devices/verisense/factoryTestReport.js';
 
 // --- Device identity: which board, and which Bluetooth module ---
-// Shared by the Shimmer3 and Shimmer3R Bluetooth clients and the dock client:
-// the same SR codes and the same module version strings arrive over all three
-// links, so the tables and the display formatting live in one place.
+// One set of SR codes and module version strings, whichever transport a host
+// reaches the sensor over, so the tables and the display formatting live in one
+// place. Read today by `Shimmer3RClient` and `WiredShimmerClient`; the
+// classic-only `Shimmer3Client` has no identity reads yet.
 export {
   SHIMMER_PLATFORM_NAMES,
   SHIMMER_SR_BOARD_NAMES,

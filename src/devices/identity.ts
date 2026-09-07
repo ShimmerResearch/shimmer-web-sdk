@@ -2,10 +2,15 @@
  * What a Shimmer says about itself when asked: which Bluetooth module it
  * carries, and which board it is.
  *
- * Both answers are shared across the Shimmer3 Bluetooth client, the Shimmer3R
- * one and the dock — the same SR codes and the same module strings reach the
- * host over all three links — so the tables and the formatting live here
- * rather than in any one client.
+ * The VALUES are the same whichever way a host reaches the sensor: one set of
+ * SR codes, one set of module version strings, arriving over BLE, classic
+ * Bluetooth and the dock alike. That is why the tables and the formatting live
+ * here rather than inside a client.
+ *
+ * Two clients read them today — `Shimmer3RClient` and `WiredShimmerClient`.
+ * `Shimmer3Client`, the classic-Bluetooth-only client, does not: it has no
+ * identity reads of its own yet. Nothing here is Shimmer3R-specific, so it is
+ * a matter of adding the two reads rather than of extending this module.
  */
 
 /** Shimmer platform, from the hardware id the sensor reports. */
