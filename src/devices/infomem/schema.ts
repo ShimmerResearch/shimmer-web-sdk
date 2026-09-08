@@ -119,6 +119,17 @@ export interface InfoMemFieldDefinition {
   readonly options?: readonly InfoMemFieldOption[];
   /** Key into {@link SHIMMER3_INFOMEM_FIELD_GROUPS}. */
   readonly group: string;
+  /**
+   * Render the field, but do not let it be edited.
+   *
+   * The value still round-trips: it is parsed, displayed and written back to
+   * the device unchanged. This is for settings a host should show but must not
+   * offer to change - a deprecated option whose meaning is no longer honoured,
+   * or one belonging to a licensed feature (see {@link InfoMemFieldGroup}).
+   */
+  readonly readOnly?: boolean;
+  /** Why the field is read-only, shown to the user in place of an editor. */
+  readonly readOnlyReason?: string;
   readonly appliesTo: readonly Shimmer3Generation[];
   /** Dotted path into {@link InfoMemDeviceConfig}, e.g. `imu.gyroRange`. */
   readonly configKey: string;
@@ -134,6 +145,18 @@ export interface InfoMemFieldGroup {
   readonly title: string;
   readonly openByDefault?: boolean;
   readonly subgroups?: readonly InfoMemFieldSubgroup[];
+  /**
+   * Show the group and let it be expanded, but do not let any of its fields be
+   * edited. Applies to every field in the group, so individual fields need no
+   * flag of their own.
+   *
+   * Values still round-trip untouched, so a device configured elsewhere keeps
+   * its settings. Reading matters even when writing must not be offered:
+   * without it a host cannot show what a device is actually set to.
+   */
+  readonly readOnly?: boolean;
+  /** Why the group is read-only, shown once at the top of the group. */
+  readonly readOnlyReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +215,18 @@ export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Objec
     ],
   },
   { id: 'trial', title: 'Trial / Experiment' },
-  { id: 'sync', title: 'Multi-Shimmer Sync' },
+  {
+    id: 'sync',
+    title: 'Multi-Shimmer Sync',
+    // Readable but not editable: multi-Shimmer sync is a licensed feature of
+    // Consensys, and offering the underlying InfoMem bytes here would be a way
+    // around that licence. The group stays expandable because seeing how a
+    // device is configured is legitimate and often necessary for support.
+    readOnly: true,
+    readOnlyReason:
+      'Multi-Shimmer Sync is configured with Consensys. These values are shown ' +
+      'as the device has them and are written back unchanged.',
+  },
   { id: 'calibration', title: 'Calibration' },
 ] as const);
 
@@ -606,6 +640,8 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     options: ON_OFF,
     group: 'sdLogging',
     appliesTo: ALL,
+    readOnly: true,
+    readOnlyReason: 'Deprecated - no longer acted on by current firmware.',
     configKey: 'trial.singleTouch',
   },
   {
@@ -619,6 +655,8 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     options: ON_OFF,
     group: 'sdLogging',
     appliesTo: ALL,
+    readOnly: true,
+    readOnlyReason: 'Deprecated - the TCXO is not fitted on current hardware.',
     configKey: 'trial.tcxo',
   },
   {

@@ -65,3 +65,10 @@ export type {
   InfoMemFieldGroup,
   InfoMemFieldSubgroup,
 } from './schema.js';
+
+export {
+  DEFAULT_TRIAL_NAME,
+  macShortId,
+  defaultDeviceName,
+  defaultTrialIdentity,
+} from './defaults.js';

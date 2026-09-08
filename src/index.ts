@@ -88,11 +88,12 @@ export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.j
 export {
   OPCODES,
   BT_FEATURE,
+  CRC_MODE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
-export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
+export type { TimestampFmt, Opcode, CrcMode } from './devices/shimmer3r/constants.js';
 // Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
 // the COM port a Classic-Bluetooth pairing creates) — needed only when writing
 // a custom transport; the clients apply it themselves.
@@ -484,6 +485,15 @@ export type {
   InfoMemImuConfig,
   InfoMemSdConfig,
   InfoMemCalibrationBlocks,
+} from './devices/infomem/index.js';
+// Identity defaults a host applies when it has to invent a configuration
+// (blank/erased InfoMem, or a reset to defaults) — kept in one place so every
+// such path names a device the same way.
+export {
+  DEFAULT_TRIAL_NAME,
+  macShortId,
+  defaultDeviceName,
+  defaultTrialIdentity,
 } from './devices/infomem/index.js';
 export {
   SHIMMER3_INFOMEM_FIELD_SCHEMA,

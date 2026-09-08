@@ -5,9 +5,11 @@ import type { ShimmerClientOptions } from '../../core/types.js';
 import {
   OPCODES,
   BT_FEATURE,
+  CRC_MODE,
   SHIMMER3R_DEFAULTS,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
+  type CrcMode,
   type TimestampFmt,
 } from './constants.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
@@ -42,6 +44,7 @@ import {
   parseShimmer3StatusBytes,
   type Shimmer3DeviceStatus,
 } from './protocol.js';
+import { shimmerUartCrcCalc } from '../dock/crc.js';
 import {
   msToRtcBytesLE,
   parseBatteryStatus,
@@ -335,6 +338,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * re-acquisition is held to the same evidence as the first one.
    */
   private _streamAligned = false;
+
+  /**
+   * CRC bytes the firmware is appending to every message, 0 when off.
+   *
+   * Host-side mirror of the firmware's `btCrcMode`. There is no command to read
+   * it back, so this tracks what {@link setStreamingCrc} last set and is reset
+   * on connect — the firmware's own default is off after every power cycle.
+   */
+  private _crcMode: CrcMode = CRC_MODE.OFF;
+
+  /** Frames whose CRC failed since streaming last started. */
+  private _crcFailures = 0;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
   /** Re-framing accumulator, used only when {@link _unframed}. */
@@ -569,6 +584,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._unframed = false;
       this.schema = null;
       this._streaming = false;
+      this._streamAligned = false;
+      // Firmware's CRC mode is per power cycle, not per connection, but a
+      // reconnect cannot assume the device was not power-cycled in between —
+      // and off is the only assumption that fails safe, since a CRC width the
+      // device is not actually appending misplaces every frame boundary.
+      this._crcMode = CRC_MODE.OFF;
+      this._crcFailures = 0;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
       this._sdKnownSession = null;
@@ -2274,6 +2296,63 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Streaming
   // ---------------------------------------------------------------------------
 
+  /**
+   * Turn the Bluetooth link's CRC on or off (SET_CRC_COMMAND 0x8B).
+   *
+   * With it on, firmware appends 1 or 2 CRC bytes to every message it sends —
+   * `calculateCrcAndInsert` over the whole packet including its header, seeded
+   * `0xB0CA` with an odd-length zero pad, LSB first
+   * (log-and-stream-common `CRC/shimmer_swCrc.c`). The stream parser then
+   * verifies each frame and reports the result on
+   * {@link ObjectCluster.crcOk}, which is what separates "the link corrupted
+   * these bytes" from "the host decoded them wrongly" — indistinguishable
+   * otherwise, since a wrong value looks exactly like a wrong parse.
+   *
+   * **Set it before streaming starts.** The frame grows by the CRC width, so
+   * changing it mid-stream moves every frame boundary; this refuses to do that
+   * rather than corrupt an in-flight session.
+   *
+   * Two bytes is the useful setting. One byte still catches gross corruption
+   * but lets roughly 1 in 256 bad frames through, and the saving is a single
+   * byte per frame.
+   *
+   * Note this is a property of the link, not of streaming alone: command
+   * responses carry the CRC too. Trailing bytes are ignored by the response
+   * readers here, which parse by opcode and declared length rather than by
+   * total length, so it is safe to leave on — but it is off by default, and
+   * firmware resets it on every power cycle.
+   */
+  async setStreamingCrc(mode: CrcMode): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (mode !== CRC_MODE.OFF && mode !== CRC_MODE.ONE_BYTE && mode !== CRC_MODE.TWO_BYTES) {
+      throw new Error(`CRC mode must be 0 (off), 1 or 2 bytes; got ${mode}`);
+    }
+    if (this._streaming) {
+      throw new Error(
+        'Cannot change the CRC mode while streaming: it would move every frame boundary.',
+      );
+    }
+    const label = mode === CRC_MODE.OFF ? 'off' : `${mode} byte${mode === 1 ? '' : 's'}`;
+    this._emitStatus(`SET_CRC ${label} → waiting for ACK…`);
+    await this._writeExpectingAck(new Uint8Array([OPCODES.SET_CRC_COMMAND, mode]), 1500);
+    this._crcMode = mode;
+    this._emitStatus(`Link CRC ${label}`);
+  }
+
+  /** The CRC width currently in force, as last set by {@link setStreamingCrc}. */
+  get crcMode(): CrcMode {
+    return this._crcMode;
+  }
+
+  /**
+   * Frames whose CRC failed since streaming last started, and 0 when the CRC
+   * is off — with no CRC there is nothing to fail, which is not the same as
+   * nothing having gone wrong.
+   */
+  get crcFailures(): number {
+    return this._crcFailures;
+  }
+
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -2324,6 +2403,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._rxBuf = new Uint8Array(0);
     this._lastTs = 0;
     this._streamAligned = false;
+    this._crcFailures = 0;
     /* Framed transports only. A byte stream carries the ACK in the same read as
      * the data and its framer already separates the two, so opening the stream
      * plane early there would route the ACK itself into the stream buffer and
@@ -2622,6 +2702,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return false;
   }
 
+  /**
+   * Verify the CRC the firmware appended after a frame's payload.
+   *
+   * `calculateCrcAndInsert` writes the low byte first and the high byte second,
+   * so a 1-byte CRC is the low half of the same 16-bit value — which is why
+   * both widths compare against the same computation rather than needing two.
+   */
+  private _frameCrcOk(buf: Uint8Array, payloadBytes: number, crcBytes: number): boolean {
+    const [lsb, msb] = shimmerUartCrcCalc(buf, payloadBytes);
+    if (buf[payloadBytes] !== lsb) return false;
+    return crcBytes < 2 || buf[payloadBytes + 1] === msb;
+  }
+
   private _parseBySchema(): void {
     const sch = this.schema!;
     const preamble = sch.dataPreambleByte;
@@ -2629,18 +2722,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const tsBytes = sch.timestampFmt === 'u16' ? 2 : 3;
     const TS_MOD = tsBytes === 3 ? 16777216 : 65536;
     const expectedTicks = this._expectedFrameTicks();
+    /* The firmware appends the CRC to the packet it just built, so the frame ON
+     * THE WIRE is this much wider than the schema's payload. Everything that
+     * steps between frames - the resync stride, the second preamble, the second
+     * timestamp - has to use the wire width, while decoding uses the payload
+     * width. Conflating the two moves every boundary as soon as a CRC is on. */
+    const crcBytes = this._crcMode;
+    const wireBytes = frameBytes + crcBytes;
 
     let buf = this._rxBuf;
     let frames = 0;
     let drops = 0;
     let anomalies = 0;
 
-    while (buf.length >= frameBytes * 2) {
-      if (buf[0] === preamble && buf[frameBytes] === preamble) {
+    while (buf.length >= wireBytes * 2) {
+      if (buf[0] === preamble && buf[wireBytes] === preamble) {
         let ts1: number, ts2: number;
         try {
           ts1 = tsBytes === 2 ? u16le(buf, 1) : u24le(buf, 1);
-          ts2 = tsBytes === 2 ? u16le(buf, frameBytes + 1) : u24le(buf, frameBytes + 1);
+          ts2 = tsBytes === 2 ? u16le(buf, wireBytes + 1) : u24le(buf, wireBytes + 1);
         } catch {
           buf = buf.subarray(1);
           drops++;
@@ -2672,9 +2772,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
         }
 
         const frame = buf.subarray(0, frameBytes);
+        /* Checked before decoding so a corrupt frame is reported as corrupt
+         * rather than as whatever its bytes happen to decode to. It is still
+         * emitted, with crcOk false: dropping it silently would hide the very
+         * corruption the CRC was turned on to find. */
+        const crcOk = crcBytes > 0 ? this._frameCrcOk(buf, frameBytes, crcBytes) : null;
+        if (crcOk === false) this._crcFailures++;
         try {
           let cursor = 1;
           const oc = new ObjectCluster(this._deviceLabel());
+          oc.crcOk = crcOk;
 
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
@@ -2727,7 +2834,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
           frames++;
-          buf = buf.subarray(frameBytes);
+          buf = buf.subarray(wireBytes);
         } catch (e: unknown) {
           this._log('⚠️ frame decode error → sliding 1 byte', (e as Error).message);
           buf = buf.subarray(1);

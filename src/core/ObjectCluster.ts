@@ -30,10 +30,20 @@ export class ObjectCluster {
    */
   raw: Uint8Array | null;
 
+  /**
+   * Whether this frame's appended CRC verified.
+   *
+   * `null` when the link carries no CRC — the firmware appends one only after
+   * SET_CRC_COMMAND, and `null` rather than `true` because "not checked" and
+   * "checked and good" must not look alike to anything counting failures.
+   */
+  crcOk: boolean | null;
+
   constructor(deviceId: string) {
     this.deviceId = deviceId;
     this.fields = [];
     this.raw = null;
+    this.crcOk = null;
   }
 
   /**
