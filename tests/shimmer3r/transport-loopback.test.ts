@@ -265,6 +265,20 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     expect(client.samplingRateHz).toBe(0);
   });
 
+  it('reports the right minimum length for a chunk that is only the opcode', async () => {
+    // The opcode's presence is decided on the byte alone. Deciding it on the
+    // buffer length too made a lone [0x02] look headerless, so the error named
+    // the headerless minimum (11) for a buffer that needed 12.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) scheduleChunks(tr, [[ACK], [INQ_RSP]]);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.inquiry()).rejects.toThrow(/at least 12/);
+  });
+
   it('setSensors ACKs then auto-inquires to rebuild the schema', async () => {
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {

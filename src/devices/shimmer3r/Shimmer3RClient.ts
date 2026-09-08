@@ -2422,8 +2422,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   private _interpretInquiryResponseShimmer3R(u8: Uint8Array) {
-    let base = 0;
-    if (u8[0] === OPCODES.INQUIRY_RESPONSE && u8.length >= 2) base = 1;
+    /* Whether the opcode byte is present, decided on the byte alone. It used
+       to also require `u8.length >= 2`, which made a lone `[0x02]` chunk look
+       headerless: the offsets below then described a different layout than the
+       buffer actually had, and the minimum-length error under-reported by one.
+       The length checks that follow are what make the extra condition
+       unnecessary — nothing is read before they pass. */
+    const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
 
     /* Refuse a short buffer instead of degrading into a plausible-looking
      * configuration. The channel count and the channel ids below used to fall
