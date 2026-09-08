@@ -152,6 +152,30 @@ const SHIMMER3R_INFOMEM_BLE_CHUNK_BYTES = 64;
 const CALIB_DUMP_CHUNK_BYTES = 128;
 
 // ---------------------------------------------------------------------------
+// Inquiry response layout
+// ---------------------------------------------------------------------------
+
+/**
+ * Header bytes of an inquiry response, opcode included:
+ * `[opcode][samplingRateTicks:2][configSetupByte0..6][numChannels][bufferSize]`,
+ * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
+ * (`log-and-stream-common/Comms/shimmer_bt_uart.c`).
+ *
+ * The full response is `INQUIRY_RSP_HEADER_BYTES + numChannels` bytes — 18 for
+ * a typical six-channel configuration. Unlike every other multi-byte response
+ * it carries **no length byte**, so its size is only knowable after the header
+ * has arrived, which is why it needs a reader of its own rather than
+ * {@link Shimmer3RClient._readLengthPrefixedResponse}.
+ */
+const INQUIRY_RSP_HEADER_BYTES = 12;
+
+/**
+ * Offset of the channel count within that header (opcode included), i.e. the
+ * one byte that has to be in hand before the total length can be computed.
+ */
+const INQUIRY_RSP_NUM_CHANNELS_OFFSET = 10;
+
+// ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
 
@@ -945,18 +969,77 @@ export class Shimmer3RClient extends BaseShimmerClient {
       new Uint8Array([OPCODES.INQUIRY_COMMAND]),
       1500,
     );
-
-    if (remainder && remainder[0] === OPCODES.INQUIRY_RESPONSE) {
-      this._log('Using post-ACK remainder as response');
-      const info = this._interpretInquiryResponseShimmer3R(remainder);
-      this.onInquiry?.(info);
-      return info;
-    }
-    const rsp = await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, 2000);
+    const rsp = await this._readInquiryResponse(remainder, 2000);
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
     const info = this._interpretInquiryResponseShimmer3R(rsp);
     this.onInquiry?.(info);
     return info;
+  }
+
+  /**
+   * Read an inquiry response, reassembling it across notifications.
+   *
+   * A framed transport surfaces one notification per chunk, and the module
+   * decides those boundaries, so a response can arrive split at any point —
+   * including after its first byte. Every other multi-byte response is
+   * accumulated against its length byte by
+   * {@link Shimmer3RClient._readLengthPrefixedResponse}; this one has no length
+   * byte (see {@link INQUIRY_RSP_HEADER_BYTES}), so completeness is judged in
+   * two steps: collect the header, then collect the channel list it sizes.
+   *
+   * Firmware writes the logical response contiguously, so fragments simply
+   * concatenate in order.
+   *
+   * @param seed the post-ACK remainder, when the module packed the start of the
+   *   response in behind its own ACK; otherwise the response is awaited
+   */
+  private async _readInquiryResponse(
+    seed: Uint8Array | null,
+    timeoutMs: number,
+  ): Promise<Uint8Array> {
+    let acc =
+      seed && seed[0] === OPCODES.INQUIRY_RESPONSE
+        ? seed
+        : await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, timeoutMs);
+
+    const isComplete = (buf: Uint8Array): boolean =>
+      buf.length >= INQUIRY_RSP_HEADER_BYTES &&
+      buf.length >= INQUIRY_RSP_HEADER_BYTES + buf[INQUIRY_RSP_NUM_CHANNELS_OFFSET];
+
+    if (isComplete(acc)) return acc;
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        /* Reject rather than parse what did arrive: a truncated inquiry
+         * response is indistinguishable from a valid one describing fewer
+         * channels, and guessing wrong costs the whole streaming session. */
+        reject(
+          new Error(
+            `Inquiry response truncated: ${acc.length} bytes received` +
+              (acc.length >= INQUIRY_RSP_HEADER_BYTES
+                ? `, ${INQUIRY_RSP_HEADER_BYTES + acc[INQUIRY_RSP_NUM_CHANNELS_OFFSET]} expected.`
+                : `, at least ${INQUIRY_RSP_HEADER_BYTES} expected.`),
+          ),
+        );
+      }, timeoutMs);
+
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || chunk.length === 0) return;
+        /* Every chunk from here is continuation payload — deliberately NOT
+         * filtering a lone 0xFF as a stray ACK, because a channel id can be
+         * 0xFF and dropping it would misalign every later channel. This
+         * command's ACK was consumed by the caller before this handler was
+         * registered, and commands are issued one at a time. */
+        acc = concatU8(acc, chunk);
+        if (isComplete(acc)) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          resolve(acc);
+        }
+      };
+      this._onTemp(handler);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2257,6 +2340,32 @@ export class Shimmer3RClient extends BaseShimmerClient {
     let base = 0;
     if (u8[0] === OPCODES.INQUIRY_RESPONSE && u8.length >= 2) base = 1;
 
+    /* Refuse a short buffer instead of degrading into a plausible-looking
+     * configuration. The channel count and the channel ids below used to fall
+     * back to zero/empty on a truncated response, and an empty channel list
+     * parses all the way through to enabledSensors = 0x000000 and a
+     * timestamp-only 4-byte frame — which the device then contradicts with
+     * every real 16/24-byte frame it sends. The only visible symptom was 100%
+     * packet loss at a believable data rate, with nothing pointing at the
+     * inquiry.
+     *
+     * Both lengths are checked here, before any of the parsing below assigns to
+     * `this`, so a rejected response leaves the previous configuration intact
+     * rather than half-replacing it. */
+    const headerEnd = base + 11;
+    if (u8.length < headerEnd) {
+      throw new Error(
+        `Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`,
+      );
+    }
+    const numCh = u8[base + 9];
+    if (u8.length < headerEnd + numCh) {
+      throw new Error(
+        `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + numCh} ` +
+          `for the ${numCh} channels it declares.`,
+      );
+    }
+
     const adcRaw = u16le(u8, base + 0);
     const samplingRateHz = 32768 / adcRaw;
     this.samplingRateHz = samplingRateHz;
@@ -2292,10 +2401,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       altMag: 0,
     };
 
-    const numCh = u8[base + 9] ?? 0;
-    const bufSize = u8[base + 10] ?? 0;
-    const chStart = base + 11;
-    const channelIds = [...u8.slice(chStart, chStart + numCh)];
+    const bufSize = u8[base + 10];
+    const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
 
     const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24');
     this.schema = schema;

@@ -152,6 +152,119 @@ describe('Shimmer3RClient over LoopbackTransport', () => {
     expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
   });
 
+  // The inquiry response is the one multi-byte response with no length byte, so
+  // it cannot be accumulated against a declared length the way every other one
+  // is. Before it was reassembled, a response split across notifications was
+  // parsed from whichever chunk arrived first: the channel count read as 0, the
+  // channel list came back empty, and that parsed all the way through to
+  // enabledSensors = 0x000000 and a timestamp-only 4-byte frame. The device then
+  // sent its real 16/24-byte frames, so the only symptom was 100% packet loss at
+  // a believable data rate — nothing pointed at the inquiry. Hence a case per
+  // split position rather than one representative split.
+
+  it('reassembles an inquiry response split inside the channel list (regression)', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Header through the first channel id, then the remaining two.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 13), INQUIRY_BODY.slice(13)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response split before the channel count (regression)', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Splits inside the header, so even the total length is unknown at first.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 4), INQUIRY_BODY.slice(4)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response whose first chunk is the opcode alone (regression)', async () => {
+    // The worst case: a lone chunk that matches the expected opcode is exactly
+    // what the response waiter used to resolve on.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK], [INQ_RSP], INQUIRY_BODY.slice(1)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response piggybacked on the ACK and then split', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK, ...INQUIRY_BODY.slice(0, 11)], INQUIRY_BODY.slice(11)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('preserves a channel id of 0xFF across a split rather than reading it as a stray ACK', async () => {
+    // Continuation chunks are accumulated verbatim: a lone 0xFF here is a
+    // channel id, and dropping it would misalign every channel after it.
+    const body = [INQ_RSP, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0x0a, 0xff, 0x0c];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK], body.slice(0, 13), [0xff], body.slice(14)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.channelIds).toEqual([0x0a, 0xff, 0x0c]);
+  });
+
+  it('rejects a genuinely truncated inquiry response instead of reporting no sensors', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Declares 3 channels but only ever sends one of them.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 13)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.inquiry()).rejects.toThrow(/truncated/i);
+    // The silent-degradation symptom must not appear, and the rejection must
+    // leave nothing half-applied: no sensor bitmap, no sampling rate.
+    expect(client.enabledSensors).toBe(0);
+    expect(client.samplingRateHz).toBe(0);
+  });
+
   it('setSensors ACKs then auto-inquires to rebuild the schema', async () => {
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
