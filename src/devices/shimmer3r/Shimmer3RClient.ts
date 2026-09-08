@@ -202,6 +202,18 @@ const STREAM_ALIGN_MAX_SKIP = 4;
 /** Fractional tolerance on that comparison, for jitter in the device clock. */
 const STREAM_ALIGN_TICK_TOLERANCE = 0.1;
 
+/**
+ * Candidates the timestamp check may reject before it stands down.
+ *
+ * The check compares against the rate the inquiry reported, so it is only as
+ * good as that agreeing with what the device is actually sending. If it does
+ * not, every candidate is rejected and the stream yields NOTHING - which is a
+ * worse failure than the misalignment the check exists to prevent, because at
+ * least misaligned data is visibly wrong. After this many rejections the
+ * lenient double-preamble lock is accepted instead, and the reason is logged.
+ */
+const STREAM_ALIGN_MAX_REJECTS = 256;
+
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
@@ -345,6 +357,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * on connect — the firmware's own default is off after every power cycle.
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
+
+  /** Candidate alignments the timestamp check has rejected since the last lock. */
+  private _streamAlignRejects = 0;
 
   /** Frames whose CRC failed since streaming last started. */
   private _crcFailures = 0;
@@ -2564,6 +2579,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._rxBuf = new Uint8Array(0);
     this._lastTs = 0;
     this._streamAligned = false;
+    this._streamAlignRejects = 0;
     this._crcFailures = 0;
     /* Framed transports only. A byte stream carries the ACK in the same read as
      * the data and its framer already separates the two, so opening the stream
@@ -2907,9 +2923,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
          * keep sliding. Only the acquisition is gated: once aligned, a real gap
          * in the link must not be mistaken for a bad lock. */
-        if (!this._streamAligned && !this._plausibleFrameDelta(dt, expectedTicks)) {
+        if (
+          !this._streamAligned &&
+          this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS &&
+          !this._plausibleFrameDelta(dt, expectedTicks)
+        ) {
           buf = buf.subarray(1);
           drops++;
+          this._streamAlignRejects++;
+          if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
+            /* Said once, at full volume: from here the stream is framed on the
+             * preamble pair alone, so it may lock to a wrong offset. The rate
+             * the inquiry reported does not match what is arriving, and that
+             * is the thing to fix. */
+            this._emitStatus(
+              `Frame timing does not match the reported ${this._expectedFrameTicks()}-tick ` +
+                `interval; falling back to preamble-only alignment.`,
+            );
+          }
           if (this.debug && drops % 64 === 1) {
             this._log(
               `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
@@ -2979,6 +3010,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           }
           this._lastTs = ts;
           this._streamAligned = true;
+          this._streamAlignRejects = 0;
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
           frames++;

@@ -191,6 +191,27 @@ describe('Shimmer3R BLE streaming (accel + gyro at rest)', () => {
     }
   });
 
+  it('still delivers frames when the device rate disagrees with the inquiry', async () => {
+    /* The timestamp check is only as good as the reported rate agreeing with
+       what the device sends. If it does not, rejecting every candidate would
+       yield NOTHING - a worse failure than the misalignment the check prevents,
+       because misaligned data is at least visibly wrong. After a bounded number
+       of rejections it stands down and frames on the preamble pair alone. */
+    const { client, t, frames } = await connectStreaming();
+    const status: string[] = [];
+    client.onStatus = (m) => status.push(m);
+
+    // Inquiry said 102.4 Hz (320 ticks); the device streams at 160.
+    const n = 400;
+    for (let i = 0; i < n; i++) t.notify(buildFrame(1000 + i * 160));
+
+    /* Frames arrive rather than the stream going silent. They may be aligned
+       to the wrong offset - that is the trade the fallback makes, and why it
+       says so - so this pins delivery and the warning, not the values. */
+    expect(frames.length).toBeGreaterThan(0);
+    expect(status.some((m) => /Frame timing does not match/i.test(m))).toBe(true);
+  });
+
   it('recovers alignment when the stream starts mid-frame', async () => {
     const { t, frames } = await connectStreaming();
 
