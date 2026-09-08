@@ -4,6 +4,7 @@ import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { CRC_MODE } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
+import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
 
 // SET_CRC_COMMAND makes the firmware append 1 or 2 CRC bytes to every packet,
 // so the frame ON THE WIRE grows while the schema's payload does not. These
@@ -160,6 +161,39 @@ describe('Shimmer3R link CRC', () => {
     expect(frames.length).toBeGreaterThan(0);
     for (const f of frames) expect(f.crcOk).toBeNull();
     expect(client.crcFailures).toBe(0);
+  });
+
+  it('frames [ACK][response][CRC] as one packet over a byte stream', async () => {
+    /* The firmware stages the ACK into the front of the same resPacket as the
+       response and appends ONE CRC over both (shimmer_bt_uart.c:1844, :2422).
+       A trailer added per message rather than per packet would consume the
+       first bytes of the response as if they were the ACK's CRC - so this is
+       the case that decides whether a CRC is safe to leave on over Classic
+       Bluetooth. Dribbled a byte at a time, as an RFCOMM read arrives. */
+    const t = new LoopbackTransport({ capabilities: { framed: false } });
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.SET_CRC_COMMAND) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), 0)), 0);
+      } else if (op === OPCODES.INQUIRY_COMMAND) {
+        /* One read carrying the whole packet, as an RFCOMM read does. Split
+           across several notifies in the SAME task it would fail for a reason
+           that has nothing to do with the CRC: the drain would emit the ACK,
+           then emit the response before the awaiting continuation's microtask
+           had registered a handler for it. Real reads each resolve in their
+           own task, so that ordering does not arise. */
+        const packet = appendCrc(new Uint8Array([ACK, ...INQUIRY_BODY]), CRC_MODE.TWO_BYTE);
+        setTimeout(() => tr.notify(packet), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(6);
+    expect(info.channelIds).toEqual(CHANNELS);
+    expect(info.schema.enabledSensors).toBe(0xc0);
   });
 
   it('clears the CRC width on disconnect, so a reconnect cannot assume it', async () => {

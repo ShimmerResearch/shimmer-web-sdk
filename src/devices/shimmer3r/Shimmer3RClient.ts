@@ -814,14 +814,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const base = shimmer3rControlMessageLength(buf, {
       statusPayloadBytes: this._statusPayloadBytes,
     });
-    /* A CRC rides after every message the firmware composes, so the message on
-     * the wire is that much longer. Without this the framer would hand the
-     * message up correctly but leave the CRC bytes at the front of the buffer,
-     * where the next pass reads one as an opcode - usually resynced away as
-     * unframeable, but a trailer byte that happens to look like a short
-     * response would swallow the reply behind it. */
+    /* A CRC rides after the PACKET the firmware transmits, not after each
+     * message in it - and a packet can hold two. `ShimBt_processCmd` stages the
+     * ACK byte into the front of the same `resPacket` as the response
+     * (`Comms/shimmer_bt_uart.c:1844`) and appends one CRC over the whole thing
+     * (`:2422`), so `[ACK][response][CRC]` is one packet with ONE CRC.
+     *
+     * So the trailer is deliberately NOT added for an ACK or NACK. Adding it
+     * there would consume the first bytes of the response behind it as if they
+     * were a CRC, which is worse than not framing the CRC at all. The response
+     * that follows gets its own trailer through this same function when
+     * `_coalesceAckWithResponse` measures it, so the coalesced pair comes out
+     * as 1 + base + trailer - exactly the packet.
+     *
+     * An ACK transmitted alone is `[ACK][CRC]`, and its CRC bytes are left for
+     * the resync to drop: telling that case apart from `[ACK][response]…` needs
+     * the CRC itself to decide the framing, which is the control-plane
+     * verification still to be ported. */
     const trailer = crcTrailerBytes(this._crcMode);
-    if (trailer === 0 || base === NEED_MORE || base === RESYNC) return base;
+    const isAck =
+      buf[0] === OPCODES.ACK_COMMAND_PROCESSED || buf[0] === OPCODES.NACK_COMMAND_PROCESSED;
+    if (trailer === 0 || isAck || base === NEED_MORE || base === RESYNC) return base;
     const total = base + trailer;
     return buf.length < total ? NEED_MORE : total;
   };
