@@ -633,7 +633,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (
       chunk.length >= 1 &&
       chunk[0] === OPCODES.ACK_COMMAND_PROCESSED &&
-      (this._expectingAck ?? 0) > 0
+      (this._expectingAck ?? 0) > 0 &&
+      this._chunkIsCredibleAck(chunk)
     ) {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
@@ -677,6 +678,44 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
   };
+
+  /**
+   * Whether a chunk beginning with 0xFF is really the ACK being waited for,
+   * rather than a sample byte that happens to be 0xFF.
+   *
+   * The ambiguity is confined to the stream plane. `startStreaming` opens it
+   * BEFORE writing the command - it has to, because the firmware streams as
+   * soon as it processes one and a notification does not respect frame
+   * boundaries - so for up to the ACK timeout there are stream bytes arriving
+   * while an ACK is expected. 0xFF is common in at-rest inertial data (a small
+   * negative reading is `…0xFF`), and a notification can begin on any byte, so
+   * "first byte is 0xFF" is not on its own evidence of an ACK. Taken wrongly it
+   * spends the ACK the start command is waiting on and diverts that
+   * notification's samples to the control handlers.
+   *
+   * On the control plane, where nothing else is in flight, the old rule is kept
+   * exactly: an expected ACK is an expected ACK.
+   *
+   * @param chunk a whole message, already CRC-stripped, starting with 0xFF
+   * @returns false only when the chunk is better explained as stream data
+   */
+  private _chunkIsCredibleAck(chunk: Uint8Array): boolean {
+    if (!this._streaming) return true;
+    /* A lone ACK notification. With a CRC on this is also the only shape that
+       can get here, since the whole packet had to verify first - which is why
+       this hazard is specific to an un-CRC'd link. */
+    if (chunk.length === 1) return true;
+    // `[ACK][frames…]`, which the branch below already handles.
+    if (chunk[1] === OPCODES.DATA_PACKET) return true;
+    /* Otherwise the remainder has to start like something this framer knows -
+       an in-stream status push, say. Arbitrary sample bytes do not, and RESYNC
+       is exactly the framer saying so. */
+    return (
+      shimmer3rControlMessageLength(chunk.subarray(1), {
+        statusPayloadBytes: this._statusPayloadBytes,
+      }) !== RESYNC
+    );
+  }
 
   /**
    * Surface a STATUS_RESPONSE nobody asked for on {@link onDeviceStatus}.

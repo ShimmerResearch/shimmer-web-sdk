@@ -283,3 +283,97 @@ describe('stopping the stream gives up the alignment claim', () => {
     }
   });
 });
+
+describe('a stream byte of 0xFF must not be taken for the START_STREAM ACK', () => {
+  /* Review finding. `startStreaming` opens the stream plane BEFORE writing the
+     command — it has to, because the firmware streams as soon as it processes
+     one — so for up to the 1500 ms ACK timeout there are stream bytes arriving
+     while an ACK is expected. The ACK branch fired on "first byte is 0xFF"
+     alone, and 0xFF is common in at-rest inertial data: SAMPLE.ay of -50 is
+     `0xce 0xff` and gy of -2 is `0xfe 0xff`. A notification beginning on one of
+     those spent the ACK the start command was waiting on and diverted that
+     notification's samples to the control handlers. */
+
+  const ACK_BYTE = OPCODES.ACK_COMMAND_PROCESSED;
+
+  it('keeps the pre-ACK frames instead of diverting them to the control path', async () => {
+    /* The observable consequence, and it took a second attempt to pin. Spending
+       the ACK on a stream byte costs more than the byte: the WHOLE remainder of
+       that notification is handed to the control handlers, because its first
+       byte is not DATA_PACKET. Any complete frames it carried are simply gone.
+       Asserting that `startStreaming` resolves does not separate the two cases
+       — it resolves either way, just earlier and for the wrong reason. */
+    const PRE_TS = 50_000;
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
+      } else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) {
+        /* One notification, beginning on the 0xFF that follows ay — exactly
+           what an arbitrary notification boundary produces — carrying the tail
+           of one frame and then five whole ones. Only afterwards, the real ACK. */
+        const first = buildFrame(PRE_TS);
+        const ffIndex = first.indexOf(0xff);
+        expect(ffIndex).toBeGreaterThan(0);
+        const burst = [...first.slice(ffIndex)];
+        for (let i = 1; i <= 5; i++) burst.push(...buildFrame(PRE_TS + i * TICKS_PER_FRAME));
+        setTimeout(() => tr.notify(burst), 0);
+        setTimeout(() => tr.notify([ACK_BYTE]), 5);
+      }
+    });
+
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.inquiry();
+    const frames: number[] = [];
+    client.onStreamFrame = (oc) => {
+      const f = oc.fields.find((x) => x.name === 'TIMESTAMP' && x.kind === 'raw');
+      if (f) frames.push(f.value);
+    };
+
+    await client.startStreaming();
+    await new Promise((r) => setTimeout(r, 20));
+
+    /* Frames from the pre-ACK burst must have been delivered. Without the gate
+       the burst goes to the control handlers wholesale and none of them are. */
+    const fromBurst = frames.filter((ts) => ts >= PRE_TS && ts <= PRE_TS + 5 * TICKS_PER_FRAME);
+    expect(fromBurst.length).toBeGreaterThanOrEqual(3);
+    for (const ts of fromBurst) {
+      expect((ts - PRE_TS) % TICKS_PER_FRAME).toBe(0);
+    }
+  });
+
+  it('still consumes a lone ACK, and an ACK glued to frames, while streaming', async () => {
+    // The two shapes that ARE credible must keep working, or the gate has just
+    // broken the handshake it was meant to protect.
+    for (const glued of [false, true]) {
+      const t = new LoopbackTransport();
+      t.setOnWrite((bytes, tr) => {
+        if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+          setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
+        } else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) {
+          setTimeout(() => tr.notify(glued ? [ACK_BYTE, ...buildFrame(1000)] : [ACK_BYTE]), 0);
+        }
+      });
+      const client = new Shimmer3RClient({ debug: false });
+      await client.connect(t);
+      await client.inquiry();
+      await expect(client.startStreaming(), `glued=${glued}`).resolves.toBeUndefined();
+    }
+  });
+
+  it('leaves the control plane rule untouched', async () => {
+    // Nothing else is in flight there, so an expected ACK is an expected ACK —
+    // including one glued to a response, which every command relies on.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(6);
+  });
+});
