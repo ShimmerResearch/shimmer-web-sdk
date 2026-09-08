@@ -791,13 +791,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * One place, because every whole control message arrives here - from the
      * framer on a reframed link, or straight from a framed transport.
      *
-     * An ACK is exempt, but not because its trailer is missing here - the
-     * framer has already verified and sized a lone ACK as `[ACK][CRC]`, so the
-     * bytes may well be in this chunk. It is exempt because that check has
-     * already happened, and because an ACK sharing a packet with the response
-     * behind it is verified as part of that whole packet instead. Re-checking
-     * here would either duplicate the work or fail on a fragment whose CRC was
-     * never over these bytes alone. */
+     * An ACK is NOT exempt, and must not be: `messageCarriesLinkCrc` returns
+     * true for it, because `[ACK][response][CRC]` carries ONE CRC over the
+     * whole packet and that packet arrives here starting with the ACK byte.
+     * Skipping it would leave the response behind it unverified.
+     *
+     * What the `chunk.length > 1` test skips is a BARE one-byte ACK, which has
+     * no trailer in the chunk to check - either the link has no CRC, or the
+     * framer already verified `[ACK][CRC]` and handed the ACK on alone. So a
+     * lone ACK is checked exactly once, and never here. The exempt set is for
+     * message types the firmware genuinely does not CRC at all: the data-rate
+     * test, SD sync and the SD-transfer frames. */
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer > 0 && chunk.length > 1 && messageCarriesLinkCrc(chunk)) {
       if (!verifyCrc(chunk, this._crcMode)) {
@@ -2647,14 +2651,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Frames whose CRC failed since streaming last started.
+   * Inbound packets whose CRC did not check out, **stream frames and control
+   * replies alike**.
    *
-   * NOT gated on {@link crcMode}: turning the CRC off does not zero it, and
-   * deliberately so. The count is about the stream that ran, and a caller
-   * inspecting it after a session has ended is asking what happened during
-   * that session — answering 0 because verification has since been switched
-   * off would destroy the only record of it. Zeroed by the next
-   * {@link startStreaming}, not by {@link setCrcMode}.
+   * Not only frames: `_handleFramedChunk` discards any un-exempt message whose
+   * CRC fails and counts it here, so a corrupt inquiry reply moves this as
+   * surely as a corrupt data packet does. That is deliberate — both mean the
+   * link is delivering bytes the firmware did not compose, which is the one
+   * thing worth knowing — but it does mean the number is not per-plane and
+   * cannot be read as a frame loss rate.
+   *
+   * Zeroed wherever a stream starts ({@link startStreaming}) and wherever a
+   * link begins or ends, NOT by {@link setCrcMode}. Turning the CRC off leaves
+   * the count standing on purpose: a caller inspecting it afterwards is asking
+   * what happened while checking was on, and answering 0 would destroy the only
+   * record of it.
    *
    * A zero therefore means "nothing failed", which on a link with no CRC means
    * "nothing was checked" rather than "nothing went wrong". Read it beside
