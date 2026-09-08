@@ -495,6 +495,17 @@ export type {
   InfoMemSdConfig,
   InfoMemCalibrationBlocks,
 } from './devices/infomem/index.js';
+// Is the configured sensor output rate fast enough for the configured packet
+// rate? Two independent InfoMem fields that nothing in the firmware relates, so
+// a packet rate above the IMU's ODR makes the device repeat each reading with a
+// fresh timestamp - a perfect-looking stream carrying a staircase.
+export {
+  lsm6dsvAccelGyroRateHz,
+  samplingRateHzFromDivider,
+  checkImuRateCoversPacketRate,
+} from './devices/infomem/index.js';
+export type { ImuRateCoverage } from './devices/infomem/index.js';
+
 // Identity defaults a host applies when it has to invent a configuration
 // (blank/erased InfoMem, or a reset to defaults) — kept in one place so every
 // such path names a device the same way.

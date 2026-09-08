@@ -72,3 +72,10 @@ export {
   defaultDeviceName,
   defaultTrialIdentity,
 } from './defaults.js';
+
+export {
+  lsm6dsvAccelGyroRateHz,
+  samplingRateHzFromDivider,
+  checkImuRateCoversPacketRate,
+} from './rateCoverage.js';
+export type { ImuRateCoverage } from './rateCoverage.js';
