@@ -65,11 +65,20 @@ async function session(crcBytes: 0 | 1 | 2): Promise<{
   frames: Array<{ crcOk: boolean | null; row: Record<string, number> }>;
 }> {
   const t = new LoopbackTransport();
+  /* Mirrors the firmware's own ordering: SET_CRC_COMMAND sets the mode while
+     its arguments are processed (`shimmer_bt_uart.c:944`) and the ACK is
+     composed afterwards from the NEW mode (`:2422`), so that ACK already
+     carries a CRC. Everything after it does too. */
+  let mode: 0 | 1 | 2 = 0;
   t.setOnWrite((bytes, tr) => {
     const op = bytes[0];
-    if (op === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
-    else if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
-    else if (op === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    const send = (msg: number[]) =>
+      setTimeout(() => tr.notify(appendCrc(new Uint8Array(msg), mode as never)), 0);
+    if (op === OPCODES.INQUIRY_COMMAND) send([ACK, ...INQUIRY_BODY]);
+    else if (op === OPCODES.SET_CRC_COMMAND) {
+      mode = bytes[1] as 0 | 1 | 2;
+      send([ACK]);
+    } else if (op === OPCODES.START_STREAMING_COMMAND) send([ACK]);
   });
   const client = new Shimmer3RClient({ debug: false });
   await client.connect(t);
@@ -194,6 +203,102 @@ describe('Shimmer3R link CRC', () => {
     expect(info.numChannels).toBe(6);
     expect(info.channelIds).toEqual(CHANNELS);
     expect(info.schema.enabledSensors).toBe(0xc0);
+  });
+
+  it('discards a control reply whose CRC does not check out', async () => {
+    // Acting on bytes that are not what the firmware composed is worse than
+    // losing them: the waiter times out and the caller retries, where a corrupt
+    // reply could set a range or a name to something nobody asked for.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      else if (op === OPCODES.INQUIRY_COMMAND) {
+        const pkt = appendCrc(new Uint8Array([ACK, ...INQUIRY_BODY]), CRC_MODE.TWO_BYTE);
+        pkt[5] = (pkt[5] ^ 0xff) & 0xff; // corrupted after the CRC was computed
+        setTimeout(() => tr.notify(pkt), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    await expect(client.inquiry()).rejects.toThrow();
+    expect(client.crcFailures).toBeGreaterThan(0);
+    // Nothing was adopted from the corrupt reply.
+    expect(client.enabledSensors).toBe(0);
+  });
+
+  it('verifies a reply that spans several notifications', async () => {
+    /* The reason a CRC routes a framed transport through the length-aware
+       framer: a notification is not reliably one packet, and checking per
+       notification would fail every response longer than one. A 6-byte InfoMem
+       read plus its CRC, delivered in three notifications, has to reassemble
+       and verify as one packet. */
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      else if (op === OPCODES.GET_INFOMEM_COMMAND) {
+        const pkt = appendCrc(
+          new Uint8Array([ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]),
+          CRC_MODE.TWO_BYTE,
+        );
+        // Split at awkward offsets, each in its own task as a real read is.
+        let at = 0;
+        for (const n of [3, 4, 99]) {
+          const part = pkt.slice(at, at + n);
+          at += n;
+          if (part.length) setTimeout(() => tr.notify(part), 0);
+        }
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    const got = await client.readInfoMem(276, payload.length);
+    expect(Array.from(got)).toEqual(payload);
+    expect(client.crcFailures).toBe(0);
+  });
+
+  it('re-establishes the CRC on a reconnect, since the device does not keep it', async () => {
+    const make = (): LoopbackTransport => {
+      const t = new LoopbackTransport();
+      t.setOnWrite((bytes, tr) => {
+        if (bytes[0] === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      });
+      return t;
+    };
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(make());
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
+
+    await client.disconnect();
+    expect(client.crcMode).toBe(CRC_MODE.OFF);
+
+    // A host that asked once means it for the next link too.
+    const second = make();
+    await client.connect(second);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
+    expect(second.writes.some((w) => w.bytes[0] === OPCODES.SET_CRC_COMMAND)).toBe(true);
+  });
+
+  it('does not re-attempt a mode the device refused', async () => {
+    // The wish is recorded only once the device agrees, so a firmware that
+    // NACKs SET_CRC is not asked again on every reconnect.
+    const t = new LoopbackTransport(); // never answers SET_CRC
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow();
+    await client.disconnect();
+
+    const second = new LoopbackTransport();
+    await client.connect(second);
+    expect(second.writes.some((w) => w.bytes[0] === OPCODES.SET_CRC_COMMAND)).toBe(false);
+    expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 
   it('clears the CRC width on disconnect, so a reconnect cannot assume it', async () => {
