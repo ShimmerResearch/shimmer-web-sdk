@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { CRC_MODE, appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 
@@ -42,5 +43,53 @@ describe('Shimmer3RClient.runDataRateTest', () => {
     expect(res.kBps).toBeGreaterThan(0);
     expect(res.durationMs).toBeGreaterThanOrEqual(300);
     expect(progress.length).toBeGreaterThan(0);
+  });
+
+  it('still measures the rate with a link CRC on (regression)', async () => {
+    /* The data-rate test builds its own [0xA5][counter] batch and calls
+       BtTransmit() directly, so the firmware appends NO link CRC to it
+       (shimmer_bt_uart.c:2987). A host that verifies it anyway rejects every
+       packet - which is exactly what broke the link-speed test when the CRC
+       was first added: thousands of "CRC did not check out" discards and a
+       measured rate of zero. */
+    const t = new LoopbackTransport();
+    let mode: 0 | 1 | 2 = 0;
+    let blast: ReturnType<typeof setInterval> | null = null;
+    t.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      // ACKs are CRC'd; the test packets deliberately are not.
+      const ack = () => setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
+      if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
+        mode = cmd[1] as 0 | 1 | 2;
+        ack();
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
+        ack();
+        let counterVal = 0;
+        blast = setInterval(() => {
+          const chunk = new Uint8Array(100);
+          for (let i = 0; i < 20; i++) {
+            chunk[i * 5] = OPCODES.DATA_RATE_TEST_RESPONSE;
+            new DataView(chunk.buffer).setUint32(i * 5 + 1, counterVal++, true);
+          }
+          tr.notify(chunk);
+        }, 5);
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 0) {
+        if (blast) clearInterval(blast);
+        blast = null;
+        ack();
+      } else {
+        ack();
+      }
+    });
+
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    const res = await client.runDataRateTest(300);
+    expect(res.bytesReceived).toBeGreaterThan(1000);
+    expect(res.kBps).toBeGreaterThan(0);
+    // Nothing was discarded: these packets are exempt, not broken.
+    expect(client.crcFailures).toBe(0);
   });
 });

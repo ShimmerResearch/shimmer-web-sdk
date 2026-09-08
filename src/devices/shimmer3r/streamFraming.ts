@@ -66,6 +66,56 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
 ]);
 
 /**
+ * Message types the firmware sends WITHOUT the link CRC, even when a host has
+ * turned one on with SET_CRC_COMMAND.
+ *
+ * `btCrcMode` is honoured in exactly three places — the command response path
+ * (`ShimBt_sendRspOrAck`, `Comms/shimmer_bt_uart.c:2422`), the instream status
+ * push (`:2545`) and the stream data packet (`Sensing/shimmer_sensing.c:680`).
+ * Everything else that reaches the host reaches it another way:
+ *
+ *  - **The data-rate test** builds its own batch of `[0xA5][counter]` packets
+ *    and calls `BtTransmit()` directly, bypassing the ring and the CRC both
+ *    (`:2987`). It is a raw throughput flood by design.
+ *  - **SD file transfer** writes its status frames and data blocks straight to
+ *    the TX buffer (`Comms/shimmer_sd_file_transfer.c:342,636`). Those blocks
+ *    carry their own CRC-16 per block instead (`:160`).
+ *  - **SD sync** appends a CRC of its own at a FIXED width
+ *    (`SDSync/shimmer_sd_sync.c:441`, `BT_SD_SYNC_CRC_MODE`) that has nothing
+ *    to do with the mode the host selected.
+ *
+ * A host that verifies these anyway rejects every one of them — which is how
+ * enabling a CRC broke the link-speed test, and would have broken SD downloads
+ * next.
+ */
+export const CRC_EXEMPT_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
+  OPCODES.DATA_RATE_TEST_RESPONSE,
+  OPCODES.SD_SYNC_RESPONSE,
+  ...SD_RESPONSE_OPCODES,
+]);
+
+/**
+ * Whether a whole message carries the link CRC.
+ *
+ * `INSTREAM_CMD_RESPONSE` (0x8A) is the awkward one: it prefixes both the
+ * status push, which IS CRC'd, and the SD-transfer frames, which are not — so
+ * the second byte decides, and a one-byte buffer cannot be judged yet.
+ *
+ * @param msg a complete message, opcode first
+ * @returns true when the firmware would have appended the CRC to it
+ */
+export function messageCarriesLinkCrc(msg: Uint8Array): boolean {
+  if (msg.length === 0) return false;
+  const opcode = msg[0];
+  if (CRC_EXEMPT_RESPONSE_OPCODES.has(opcode)) return false;
+  if (opcode === SD_INSTREAM_BYTE) {
+    // Only the status push under this prefix is CRC'd; the SD frames are not.
+    return msg.length >= 2 && msg[1] === OPCODES.STATUS_RESPONSE;
+  }
+  return true;
+}
+
+/**
  * How many status bytes a STATUS_RESPONSE carries — the one length in this
  * protocol that depends on which platform answered rather than on the bytes
  * themselves.

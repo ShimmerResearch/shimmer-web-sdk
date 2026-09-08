@@ -74,7 +74,11 @@ import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
-import { shimmer3rControlMessageLength, DECLARED_LENGTH_RESPONSE_CAPS } from './streamFraming.js';
+import {
+  shimmer3rControlMessageLength,
+  messageCarriesLinkCrc,
+  DECLARED_LENGTH_RESPONSE_CAPS,
+} from './streamFraming.js';
 import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
@@ -727,7 +731,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * one with the response behind it), so the CRC bytes are not in this chunk
      * to check. They are left for the resync to drop. */
     const trailer = crcTrailerBytes(this._crcMode);
-    if (trailer > 0 && chunk.length > 1) {
+    if (trailer > 0 && chunk.length > 1 && messageCarriesLinkCrc(chunk)) {
       if (!verifyCrc(chunk, this._crcMode)) {
         /* Discarded, not passed on. A failed CRC means these bytes are not
          * what the firmware composed, and acting on them is worse than losing
@@ -737,9 +741,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._log(
           `CRC check failed on a 0x${chunk[0].toString(16)} message (${this._crcFailures} so far); discarding`,
         );
-        this._emitStatus(
-          `Discarded a reply whose CRC did not check out (${this._crcFailures} so far).`,
-        );
+        /* Throttled hard. An un-exempt message type that the firmware does not
+         * actually CRC produces one of these per packet, which buried a whole
+         * log at 2300 lines - and a fault that floods its own evidence out of
+         * view is worse than one that reports itself once. */
+        if (this._crcFailures <= 3 || this._crcFailures === 10 || this._crcFailures % 100 === 0) {
+          this._emitStatus(
+            `Discarded a reply whose CRC did not check out (${this._crcFailures} so far).`,
+          );
+        }
         return;
       }
       chunk = chunk.subarray(0, chunk.length - trailer);
@@ -929,6 +939,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * verification still to be ported. */
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer === 0 || base === NEED_MORE || base === RESYNC) return base;
+
+    /* An exempt type is sized as the firmware sent it: no trailer to add, and
+     * adding one would swallow the bytes of whatever follows. This is the same
+     * fact as the verification exemption and has to agree with it - a message
+     * measured with a trailer it does not have cannot then verify. */
+    if (!messageCarriesLinkCrc(buf.subarray(0, Math.min(buf.length, 2)))) {
+      return base;
+    }
 
     const isAck =
       buf[0] === OPCODES.ACK_COMMAND_PROCESSED || buf[0] === OPCODES.NACK_COMMAND_PROCESSED;

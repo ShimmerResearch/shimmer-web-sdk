@@ -5,6 +5,7 @@ import { CRC_MODE } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
 import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
+import { SD_TRANSFER_OPCODES } from '../../src/devices/shimmer3r/sdTransfer/protocol.js';
 
 // SET_CRC_COMMAND makes the firmware append 1 or 2 CRC bytes to every packet,
 // so the frame ON THE WIRE grows while the schema's payload does not. These
@@ -299,6 +300,37 @@ describe('Shimmer3R link CRC', () => {
     await client.connect(second);
     expect(second.writes.some((w) => w.bytes[0] === OPCODES.SET_CRC_COMMAND)).toBe(false);
     expect(client.crcMode).toBe(CRC_MODE.OFF);
+  });
+
+  it('does not verify a CRC on message types the firmware never CRCs', async () => {
+    /* `btCrcMode` is honoured in three places only: the command response path,
+       the instream status push and the stream data packet. SD file transfer
+       writes its frames straight to the TX buffer (they carry their own block
+       CRCs), the data-rate test bypasses the ring entirely, and SD sync uses a
+       CRC of its own at a fixed width. Verifying any of them rejects every
+       packet - which is how enabling a CRC broke the link-speed test. */
+    const t = new LoopbackTransport();
+    let mode: 0 | 1 | 2 = 0;
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+        mode = bytes[1] as 0 | 1 | 2;
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    // Each delivered with NO trailer, exactly as the firmware sends them.
+    const exempt: Array<[string, number[]]> = [
+      ['data-rate test', [OPCODES.DATA_RATE_TEST_RESPONSE, 1, 0, 0, 0]],
+      ['SD free space', [SD_TRANSFER_OPCODES.FREE_SPACE_RESPONSE, 0, 0, 0, 0, 0, 0, 0, 0]],
+      ['SD sync', [OPCODES.SD_SYNC_RESPONSE, 0, 0]],
+    ];
+    for (const [, msg] of exempt) t.notify(msg);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(client.crcFailures).toBe(0);
   });
 
   it('clears the CRC width on disconnect, so a reconnect cannot assume it', async () => {
