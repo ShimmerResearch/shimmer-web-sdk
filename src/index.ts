@@ -495,6 +495,16 @@ export type {
   InfoMemSdConfig,
   InfoMemCalibrationBlocks,
 } from './devices/infomem/index.js';
+// Derive a sensor's output rate from the packet rate, as the Java driver does:
+// a host that edits the InfoMem fields independently has to reproduce the
+// fan-out Consensys gets from setShimmerAndSensorsSamplingRate /
+// setSensorEnabledState, or it writes pairs the driver never would.
+export {
+  LSM6DSV_ODR,
+  deriveLsm6dsvAccelGyroRate,
+  deriveLsm6dsvRateOnEnableChange,
+} from './devices/infomem/index.js';
+
 // Is the configured sensor output rate fast enough for the configured packet
 // rate? Two independent InfoMem fields that nothing in the firmware relates, so
 // a packet rate above the IMU's ODR makes the device repeat each reading with a

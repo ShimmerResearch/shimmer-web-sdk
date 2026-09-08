@@ -79,3 +79,9 @@ export {
   checkImuRateCoversPacketRate,
 } from './rateCoverage.js';
 export type { ImuRateCoverage } from './rateCoverage.js';
+
+export {
+  LSM6DSV_ODR,
+  deriveLsm6dsvAccelGyroRate,
+  deriveLsm6dsvRateOnEnableChange,
+} from './deriveRates.js';
