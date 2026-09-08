@@ -16,15 +16,25 @@ export interface WebBluetoothTransportOptions {
   /** Characteristic the host receives notifications from (device → host). */
   notifyCharUUID: string;
   /**
-   * Optional second choice for the device → host subscription, used when
-   * {@link notifyCharUUID} is absent from the service or supports neither
-   * notify nor indicate.
+   * Optional second choice for the device → host subscription.
    *
-   * This exists because the preferred and fallback characteristics can differ
-   * in *kind*: CYSPP's Unacknowledged Data characteristic is notify-capable
-   * (no confirmation per payload) while its Acknowledged Data characteristic is
-   * indicate-only. Preferring the former is a large throughput win, and this
-   * option means a device that only offers the latter still connects.
+   * The rule is **notify beats candidate order**, not "only when the first is
+   * missing". Both UUIDs are tried in order and the first NOTIFY-capable one
+   * wins; an indicate-only characteristic is held back and used only if
+   * neither candidate can notify. So this fallback is chosen when
+   * {@link notifyCharUUID} is absent, unsubscribable, *or* indicate-only while
+   * this one can notify.
+   *
+   * That ordering exists because the two can differ in *kind*: CYSPP's
+   * Unacknowledged Data characteristic is notify-capable (no confirmation per
+   * payload) while its Acknowledged Data characteristic is indicate-only.
+   * Preferring notify is a large throughput win — indicate costs a
+   * confirmation round trip per payload, roughly halving it — and keeping
+   * indicate as a last resort means a device offering only that still
+   * connects. {@link notifyIsAcknowledged} reports which kind was taken.
+   *
+   * A characteristic with no `properties` at all (some polyfills, and test
+   * doubles) counts as notify-capable rather than being rejected.
    */
   notifyCharUUIDFallback?: string;
   /**

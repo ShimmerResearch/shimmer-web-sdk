@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { WebBluetoothTransport } from '../../src/core/transport/WebBluetoothTransport.js';
 import { SHIMMER3R_DEFAULTS } from '../../src/devices/shimmer3r/constants.js';
@@ -70,6 +70,14 @@ function installFakeBluetooth(chars: ReturnType<typeof makeChar>[]) {
   });
   return { service, device };
 }
+
+/* `navigator` is stubbed per test by the helper above. Restoring it here rather
+   than nowhere: a stub left in place leaks into every file that runs after this
+   one in the same worker, which turns an unrelated suite into an
+   order-dependent failure that reproduces only in full-suite runs. */
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function makeTransport(extra: Record<string, unknown> = {}) {
   return new WebBluetoothTransport({
