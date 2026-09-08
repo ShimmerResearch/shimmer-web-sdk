@@ -21,28 +21,6 @@ export const BT_FEATURE = Object.freeze({
   REBOOT_ON_DISCONNECT: 2,
 } as const);
 
-/**
- * CRC modes for the Bluetooth link, mirroring `COMMS_CRC_MODE` in
- * log-and-stream-common `CRC/shimmer_crc.h`.
- *
- * The numeric value is also the number of CRC bytes the firmware appends, which
- * is why the enum is used directly as a byte count in the stream parser.
- *
- * Applies to the WHOLE link once set, not just stream data: firmware appends
- * the CRC to command responses too (`ShimBt_processCmd`, and
- * `ShimBt_instreamStatusRespSend`). Selected with SET_CRC_COMMAND (0x8B),
- * and the firmware falls back to `OFF` for any value it does not recognise
- * (`ShimBt_setCrcMode`).
- */
-export const CRC_MODE = Object.freeze({
-  OFF: 0,
-  ONE_BYTE: 1,
-  TWO_BYTES: 2,
-} as const);
-
-/** A value of {@link CRC_MODE}. */
-export type CrcMode = (typeof CRC_MODE)[keyof typeof CRC_MODE];
-
 export const OPCODES = Object.freeze({
   DATA_PACKET: 0x00,
   INQUIRY_COMMAND: 0x01,

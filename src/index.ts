@@ -88,12 +88,21 @@ export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.j
 export {
   OPCODES,
   BT_FEATURE,
-  CRC_MODE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
-export type { TimestampFmt, Opcode, CrcMode } from './devices/shimmer3r/constants.js';
+export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
+// Bluetooth link CRC (SET_CRC_COMMAND). Device-to-host only: the firmware never
+// checks a CRC on a command, so a host only has to verify what it receives.
+export {
+  CRC_MODE,
+  isCrcMode,
+  crcTrailerBytes,
+  appendCrc,
+  verifyCrc,
+} from './devices/shimmer3r/crcMode.js';
+export type { CrcMode } from './devices/shimmer3r/crcMode.js';
 // Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
 // the COM port a Classic-Bluetooth pairing creates) — needed only when writing
 // a custom transport; the clients apply it themselves.

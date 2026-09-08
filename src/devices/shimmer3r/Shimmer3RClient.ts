@@ -5,13 +5,12 @@ import type { ShimmerClientOptions } from '../../core/types.js';
 import {
   OPCODES,
   BT_FEATURE,
-  CRC_MODE,
   SHIMMER3R_DEFAULTS,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
-  type CrcMode,
   type TimestampFmt,
 } from './constants.js';
+import { CRC_MODE, crcTrailerBytes, isCrcMode, verifyCrc, type CrcMode } from './crcMode.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
 import {
   EXG_BANK_LENGTH,
@@ -44,7 +43,6 @@ import {
   parseShimmer3StatusBytes,
   type Shimmer3DeviceStatus,
 } from './protocol.js';
-import { shimmerUartCrcCalc } from '../dock/crc.js';
 import {
   msToRtcBytesLE,
   parseBatteryStatus,
@@ -343,7 +341,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * CRC bytes the firmware is appending to every message, 0 when off.
    *
    * Host-side mirror of the firmware's `btCrcMode`. There is no command to read
-   * it back, so this tracks what {@link setStreamingCrc} last set and is reset
+   * it back, so this tracks what {@link setCrcMode} last set and is reset
    * on connect — the firmware's own default is off after every power cycle.
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
@@ -812,8 +810,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * look perpetually one byte short, so the ACK and its response were never
    * coalesced and the waiter timed out.
    */
-  private _controlMessageLength = (buf: Uint8Array): number =>
-    shimmer3rControlMessageLength(buf, { statusPayloadBytes: this._statusPayloadBytes });
+  private _controlMessageLength = (buf: Uint8Array): number => {
+    const base = shimmer3rControlMessageLength(buf, {
+      statusPayloadBytes: this._statusPayloadBytes,
+    });
+    /* A CRC rides after every message the firmware composes, so the message on
+     * the wire is that much longer. Without this the framer would hand the
+     * message up correctly but leave the CRC bytes at the front of the buffer,
+     * where the next pass reads one as an opcode - usually resynced away as
+     * unframeable, but a trailer byte that happens to look like a short
+     * response would swallow the reply behind it. */
+    const trailer = crcTrailerBytes(this._crcMode);
+    if (trailer === 0 || base === NEED_MORE || base === RESYNC) return base;
+    const total = base + trailer;
+    return buf.length < total ? NEED_MORE : total;
+  };
 
   private _coalesceAckWithResponse = (msg: Uint8Array, rest: Uint8Array): number => {
     if (msg.length !== 1 || msg[0] !== OPCODES.ACK_COMMAND_PROCESSED) return 0;
@@ -2322,10 +2333,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * total length, so it is safe to leave on — but it is off by default, and
    * firmware resets it on every power cycle.
    */
-  async setStreamingCrc(mode: CrcMode): Promise<void> {
+  async setCrcMode(mode: CrcMode): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
-    if (mode !== CRC_MODE.OFF && mode !== CRC_MODE.ONE_BYTE && mode !== CRC_MODE.TWO_BYTES) {
-      throw new Error(`CRC mode must be 0 (off), 1 or 2 bytes; got ${mode}`);
+    if (!isCrcMode(mode)) {
+      throw new Error(`Invalid CRC mode ${String(mode)} (expected 0, 1 or 2)`);
     }
     if (this._streaming) {
       throw new Error(
@@ -2339,7 +2350,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(`Link CRC ${label}`);
   }
 
-  /** The CRC width currently in force, as last set by {@link setStreamingCrc}. */
+  /** The CRC width currently in force, as last set by {@link setCrcMode}. */
   get crcMode(): CrcMode {
     return this._crcMode;
   }
@@ -2702,19 +2713,6 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return false;
   }
 
-  /**
-   * Verify the CRC the firmware appended after a frame's payload.
-   *
-   * `calculateCrcAndInsert` writes the low byte first and the high byte second,
-   * so a 1-byte CRC is the low half of the same 16-bit value — which is why
-   * both widths compare against the same computation rather than needing two.
-   */
-  private _frameCrcOk(buf: Uint8Array, payloadBytes: number, crcBytes: number): boolean {
-    const [lsb, msb] = shimmerUartCrcCalc(buf, payloadBytes);
-    if (buf[payloadBytes] !== lsb) return false;
-    return crcBytes < 2 || buf[payloadBytes + 1] === msb;
-  }
-
   private _parseBySchema(): void {
     const sch = this.schema!;
     const preamble = sch.dataPreambleByte;
@@ -2727,7 +2725,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * steps between frames - the resync stride, the second preamble, the second
      * timestamp - has to use the wire width, while decoding uses the payload
      * width. Conflating the two moves every boundary as soon as a CRC is on. */
-    const crcBytes = this._crcMode;
+    const crcBytes = crcTrailerBytes(this._crcMode);
     const wireBytes = frameBytes + crcBytes;
 
     let buf = this._rxBuf;
@@ -2776,7 +2774,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * rather than as whatever its bytes happen to decode to. It is still
          * emitted, with crcOk false: dropping it silently would hide the very
          * corruption the CRC was turned on to find. */
-        const crcOk = crcBytes > 0 ? this._frameCrcOk(buf, frameBytes, crcBytes) : null;
+        const crcOk = crcBytes > 0 ? verifyCrc(buf.subarray(0, wireBytes), this._crcMode) : null;
         if (crcOk === false) this._crcFailures++;
         try {
           let cursor = 1;

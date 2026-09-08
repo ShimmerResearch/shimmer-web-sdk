@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
-import { OPCODES, CRC_MODE } from '../../src/devices/shimmer3r/constants.js';
+import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { CRC_MODE } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
 
@@ -80,7 +81,7 @@ async function session(crcBytes: 0 | 1 | 2): Promise<{
     frames.push({ crcOk: oc.crcOk, row });
   };
 
-  if (crcBytes !== 0) await client.setStreamingCrc(crcBytes);
+  if (crcBytes !== 0) await client.setCrcMode(crcBytes);
   await client.startStreaming();
   return { client, t, frames };
 }
@@ -89,24 +90,24 @@ describe('Shimmer3R link CRC', () => {
   it('sends SET_CRC_COMMAND with the mode byte and records the width', async () => {
     const { client, t } = await session(0);
     await client.stopStreaming();
-    await client.setStreamingCrc(CRC_MODE.TWO_BYTES);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
 
     const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_CRC_COMMAND);
     expect(cmd).toBeTruthy();
     expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_CRC_COMMAND, 2]);
-    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTES);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
   });
 
   it('rejects a mode the firmware would silently fall back to OFF for', async () => {
     const { client } = await session(0);
     // 3 is COMMS_CRC_MODE's sentinel (CRC_MAX_SUPPORTED_BYTES), not a mode.
-    await expect(client.setStreamingCrc(3 as never)).rejects.toThrow(/CRC mode/);
+    await expect(client.setCrcMode(3 as never)).rejects.toThrow(/CRC mode/);
     expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 
   it('refuses to change the CRC width mid-stream, which would move every boundary', async () => {
     const { client } = await session(0);
-    await expect(client.setStreamingCrc(CRC_MODE.TWO_BYTES)).rejects.toThrow(/while streaming/);
+    await expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow(/while streaming/);
     expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 
@@ -164,8 +165,8 @@ describe('Shimmer3R link CRC', () => {
   it('clears the CRC width on disconnect, so a reconnect cannot assume it', async () => {
     const { client } = await session(0);
     await client.stopStreaming();
-    await client.setStreamingCrc(CRC_MODE.TWO_BYTES);
-    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTES);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
 
     await client.disconnect();
     expect(client.crcMode).toBe(CRC_MODE.OFF);
