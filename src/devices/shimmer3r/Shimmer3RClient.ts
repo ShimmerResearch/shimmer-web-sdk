@@ -176,6 +176,32 @@ const INQUIRY_RSP_HEADER_BYTES = 12;
 const INQUIRY_RSP_NUM_CHANNELS_OFFSET = 10;
 
 // ---------------------------------------------------------------------------
+// Stream alignment acquisition
+// ---------------------------------------------------------------------------
+
+/**
+ * How many frame intervals a timestamp step may span and still be accepted as
+ * evidence of correct alignment.
+ *
+ * The stream parser locks on by finding a preamble one frame apart, but a frame
+ * layout is periodic: a channel resting at zero puts a `0x00` at a fixed offset
+ * in every frame, so a *wrong* offset can satisfy that check on every frame of
+ * the session. The timestamp step is what separates the two — at the true
+ * alignment it is one sampling interval, while a shifted view reads data bytes
+ * as a timestamp and steps by something else.
+ *
+ * Deliberately small. A misalignment by a whole byte multiplies the apparent
+ * step by 256, which is an exact multiple of the interval, so accepting any
+ * multiple would accept the very alignment this exists to reject. A few
+ * intervals is enough to tolerate frames genuinely dropped by the link while
+ * the parser is acquiring.
+ */
+const STREAM_ALIGN_MAX_SKIP = 4;
+
+/** Fractional tolerance on that comparison, for jitter in the device clock. */
+const STREAM_ALIGN_TICK_TOLERANCE = 0.1;
+
+// ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
 
@@ -301,6 +327,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _expectingAck = 0;
   private _streaming = false;
   private _lastTs = 0;
+
+  /**
+   * Whether the stream parser has confirmed its frame alignment against the
+   * device clock. False until a candidate passes the timestamp-step check, and
+   * cleared again whenever the buffer stops looking frame-aligned, so a
+   * re-acquisition is held to the same evidence as the first one.
+   */
+  private _streamAligned = false;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
   /** Re-framing accumulator, used only when {@link _unframed}. */
@@ -2243,20 +2277,65 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
-      1500,
-    );
-    this._streaming = true;
-
-    if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA_PACKET) {
-        this._rxBuf = concatU8(this._rxBuf, remainder);
-      } else {
-        this._emitTemp(remainder);
+    this._beginStreamPlane();
+    try {
+      const remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
+        1500,
+      );
+      this._streaming = true;
+      if (remainder?.length) {
+        if (remainder[0] === OPCODES.DATA_PACKET) {
+          this._rxBuf = concatU8(this._rxBuf, remainder);
+        } else {
+          this._emitTemp(remainder);
+        }
       }
+    } catch (e) {
+      this._endStreamPlane();
+      throw e;
     }
     this._emitStatus('START_STREAM ACK received; frames should follow');
+  }
+
+  /**
+   * Open the stream plane *before* the start command goes out, so that frames
+   * arriving before its ACK are accumulated whole.
+   *
+   * The firmware starts streaming the moment it processes the command, so data
+   * can arrive before the ACK's `await` continuation has run. With `_streaming`
+   * still false, {@link _handleFramedChunk} routes those notifications through
+   * its control branch, which appends one to the stream buffer only when the
+   * notification *starts* with a preamble — so the tail of a frame split across
+   * two notifications was dropped while its head was kept, leaving a truncated
+   * frame at the front of the buffer and every byte after it one frame boundary
+   * out.
+   *
+   * That mattered far more than a few lost bytes: the frame layout is periodic,
+   * so a wrong alignment that satisfies the resync check once satisfies it
+   * forever (a channel resting at zero puts a `0x00` at a fixed offset in every
+   * frame), and the parser stayed locked to it for the whole session, emitting
+   * plausible numbers decoded from the wrong bytes.
+   *
+   * A byte-stream transport never had the problem: its framer stops at the
+   * first preamble and hands the whole remainder over, continuity intact.
+   */
+  private _beginStreamPlane(): void {
+    this._rxBuf = new Uint8Array(0);
+    this._lastTs = 0;
+    this._streamAligned = false;
+    /* Framed transports only. A byte stream carries the ACK in the same read as
+     * the data and its framer already separates the two, so opening the stream
+     * plane early there would route the ACK itself into the stream buffer and
+     * the start command would wait for an ACK that had already been eaten. */
+    if (!this._unframed) this._streaming = true;
+  }
+
+  /** Undo {@link _beginStreamPlane} when the start command never took. */
+  private _endStreamPlane(): void {
+    this._streaming = false;
+    this._rxBuf = new Uint8Array(0);
+    this._streamAligned = false;
   }
 
   /**
@@ -2300,17 +2379,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async startStreamingAndLogging(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.START_SDBT_COMMAND]),
-      1500,
-    );
-    this._streaming = true;
-    if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA_PACKET) {
-        this._rxBuf = concatU8(this._rxBuf, remainder);
-      } else {
-        this._emitTemp(remainder);
+    this._beginStreamPlane();
+    try {
+      const remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_SDBT_COMMAND]),
+        1500,
+      );
+      this._streaming = true;
+      if (remainder?.length) {
+        if (remainder[0] === OPCODES.DATA_PACKET) {
+          this._rxBuf = concatU8(this._rxBuf, remainder);
+        } else {
+          this._emitTemp(remainder);
+        }
       }
+    } catch (e) {
+      this._endStreamPlane();
+      throw e;
     }
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
   }
@@ -2508,12 +2593,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Stream frame parser
   // ---------------------------------------------------------------------------
 
+  /**
+   * Ticks the device clock should advance between consecutive frames, or 0 when
+   * the rate is not known (streaming started without an inquiry), in which case
+   * the alignment check below has nothing to compare against and stands down.
+   */
+  private _expectedFrameTicks(): number {
+    const hz = this.samplingRateHz;
+    if (!Number.isFinite(hz) || hz <= 0) return 0;
+    return Math.round(32768 / hz);
+  }
+
+  /**
+   * Whether a timestamp step is consistent with correct frame alignment: one
+   * sampling interval, or a few of them if the link dropped frames.
+   */
+  private _plausibleFrameDelta(dt: number, expectedTicks: number): boolean {
+    if (expectedTicks <= 0) return true;
+    for (let k = 1; k <= STREAM_ALIGN_MAX_SKIP; k++) {
+      const want = k * expectedTicks;
+      if (Math.abs(dt - want) <= Math.max(2, want * STREAM_ALIGN_TICK_TOLERANCE)) return true;
+    }
+    return false;
+  }
+
   private _parseBySchema(): void {
     const sch = this.schema!;
     const preamble = sch.dataPreambleByte;
     const frameBytes = sch.frameBytes >>> 0;
     const tsBytes = sch.timestampFmt === 'u16' ? 2 : 3;
     const TS_MOD = tsBytes === 3 ? 16777216 : 65536;
+    const expectedTicks = this._expectedFrameTicks();
 
     let buf = this._rxBuf;
     let frames = 0;
@@ -2536,6 +2646,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
         if (dt === 0) {
           buf = buf.subarray(1);
           drops++;
+          this._streamAligned = false;
+          continue;
+        }
+
+        /* Two preambles a frame apart are not proof of alignment on a periodic
+         * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
+         * keep sliding. Only the acquisition is gated: once aligned, a real gap
+         * in the link must not be mistaken for a bad lock. */
+        if (!this._streamAligned && !this._plausibleFrameDelta(dt, expectedTicks)) {
+          buf = buf.subarray(1);
+          drops++;
+          if (this.debug && drops % 64 === 1) {
+            this._log(
+              `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
+                `the ${expectedTicks}-tick frame interval`,
+            );
+          }
           continue;
         }
 
@@ -2591,6 +2718,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
             }
           }
           this._lastTs = ts;
+          this._streamAligned = true;
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
           frames++;
@@ -2599,11 +2727,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
           this._log('⚠️ frame decode error → sliding 1 byte', (e as Error).message);
           buf = buf.subarray(1);
           drops++;
+          this._streamAligned = false;
         }
         continue;
       }
       buf = buf.subarray(1);
       drops++;
+      this._streamAligned = false;
       if (this.debug && drops % 64 === 1) {
         this._log(`resync: dropped ${drops} byte(s) so far; bufLen=${buf.length}`);
       }
