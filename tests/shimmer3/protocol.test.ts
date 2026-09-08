@@ -92,6 +92,22 @@ describe('interpretShimmer3InquiryResponse (Shimmer3 4-byte-config layout)', () 
     expect(info.channelIds).toEqual([]);
   });
 
+  it('reports the same opcode-inclusive shape for headed and headerless input', () => {
+    /* Review finding. `opcode` was u8[0] and `bytes` was the input as given, so
+       a headerless body reported the sampling divisor's low byte (0x80) as the
+       opcode and a `bytes` the interface documents as opcode-inclusive but
+       which was not. Both forms must now come out identical. */
+    const headed = interpretShimmer3InquiryResponse(new Uint8Array(INQUIRY_MSG), 'u24');
+    const headless = interpretShimmer3InquiryResponse(new Uint8Array(INQUIRY_MSG.slice(1)), 'u24');
+    for (const info of [headed, headless]) {
+      expect(info.opcode).toBe(INQ_RSP);
+      expect(info.bytes[0]).toBe(INQ_RSP);
+      expect([...info.bytes]).toEqual(INQUIRY_MSG);
+    }
+    // And the input itself is not mutated or aliased.
+    expect(headless.bytes.length).toBe(INQUIRY_MSG.length);
+  });
+
   it('does NOT match the Shimmer3R layout (config width differs)', () => {
     // If the same bytes were parsed as Shimmer3R (7-byte config, numCh at [10]),
     // the channel list would be wrong — this pins the layout difference.

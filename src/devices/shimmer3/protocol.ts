@@ -225,8 +225,17 @@ export function interpretShimmer3InquiryResponse(
 
   const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
 
+  /* Normalised to the opcode-inclusive form whichever way the bytes arrived.
+   * `opcode` is by definition INQUIRY_RESPONSE here - `base` is 1 only when
+   * u8[0] already is - and `bytes` is documented as the opcode-inclusive
+   * slice, so a headerless input has it prepended rather than reporting the
+   * sampling divisor's low byte as an opcode and a `bytes` the interface says
+   * it is not. Callers comparing the two forms, or re-parsing `bytes`, see one
+   * shape. */
+  const bytes = base === 1 ? u8.slice(0) : Uint8Array.of(OPCODES.INQUIRY_RESPONSE, ...u8);
+
   return {
-    opcode: u8[0],
+    opcode: OPCODES.INQUIRY_RESPONSE,
     adcRaw,
     samplingRateHz,
     configByte0,
@@ -239,7 +248,7 @@ export function interpretShimmer3InquiryResponse(
     bufferSize,
     channelIds,
     schema,
-    bytes: u8.slice(0),
+    bytes,
   };
 }
 
