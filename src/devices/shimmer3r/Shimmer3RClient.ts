@@ -218,6 +218,23 @@ const STREAM_ALIGN_TICK_TOLERANCE = 0.1;
  */
 const STREAM_ALIGN_MAX_REJECTS = 256;
 
+/**
+ * Longest a frame interval can be: one second of device ticks.
+ *
+ * Not a guess. The driver clamps the sampling rate to at least 1 Hz
+ * (`ShimmerDevice.correctSamplingRate`) and the firmware stores it as a divider
+ * of the same 32768 Hz clock, so no valid configuration steps further than this
+ * between frames.
+ *
+ * Its value is that it needs no rate from anywhere. A stream locked to the
+ * wrong byte offset reads its "timestamp" out of neighbouring payload bytes,
+ * and those produce steps in the millions - a bench capture of exactly that
+ * gave a rock-steady 4194304 - so a bound this loose still rejects them
+ * outright. That matters most where the reported rate is unusable, because
+ * that is where nothing else is checking.
+ */
+const STREAM_MAX_FRAME_TICKS = 32768;
+
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
@@ -2890,7 +2907,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Ticks the device clock should advance between consecutive frames, or 0 when
    * the rate is not known (streaming started without an inquiry), in which case
-   * the alignment check below has nothing to compare against and stands down.
+   * only the rate-free band below applies.
    */
   private _expectedFrameTicks(): number {
     const hz = this.samplingRateHz;
@@ -2899,11 +2916,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * Whether a timestamp step could belong to ANY valid configuration.
+   *
+   * The weak test, and the only one available when no interval is known or the
+   * known one has already been contradicted by everything on the wire. It
+   * cannot tell 320 ticks from 640, but it does reject the millions-of-ticks
+   * steps a wrong byte offset produces, which is what the fallback used to
+   * accept without looking.
+   */
+  private _frameDeltaInPlausibleBand(dt: number): boolean {
+    return dt >= 1 && dt <= STREAM_MAX_FRAME_TICKS * STREAM_ALIGN_MAX_SKIP;
+  }
+
+  /**
    * Whether a timestamp step is consistent with correct frame alignment: one
    * sampling interval, or a few of them if the link dropped frames.
+   *
+   * The strong test. Falls back to {@link _frameDeltaInPlausibleBand} when no
+   * interval is known, rather than accepting anything.
    */
   private _plausibleFrameDelta(dt: number, expectedTicks: number): boolean {
-    if (expectedTicks <= 0) return true;
+    if (expectedTicks <= 0) return this._frameDeltaInPlausibleBand(dt);
     for (let k = 1; k <= STREAM_ALIGN_MAX_SKIP; k++) {
       const want = k * expectedTicks;
       if (Math.abs(dt - want) <= Math.max(2, want * STREAM_ALIGN_TICK_TOLERANCE)) return true;
@@ -2955,28 +2988,39 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
          * keep sliding. Only the acquisition is gated: once aligned, a real gap
          * in the link must not be mistaken for a bad lock. */
+        /* Two tiers. While the expected interval is still credible a candidate
+         * must match it; once every candidate has been rejected that many
+         * times it is the expectation that is wrong, so the test drops to the
+         * rate-free band rather than off altogether. Dropping it off
+         * altogether is what used to let a wrong byte offset lock - its
+         * "timestamp" stepping by millions of ticks - and then look for all the
+         * world like a working stream. */
+        const strictTier = this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS;
         if (
           !this._streamAligned &&
-          this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS &&
-          !this._plausibleFrameDelta(dt, expectedTicks)
+          !(strictTier
+            ? this._plausibleFrameDelta(dt, expectedTicks)
+            : this._frameDeltaInPlausibleBand(dt))
         ) {
           buf = buf.subarray(1);
           drops++;
-          this._streamAlignRejects++;
-          if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
-            /* Said once, at full volume: from here the stream is framed on the
-             * preamble pair alone, so it may lock to a wrong offset. The rate
-             * the inquiry reported does not match what is arriving, and that
-             * is the thing to fix. */
-            this._emitStatus(
-              `Frame timing does not match the reported ${this._expectedFrameTicks()}-tick ` +
-                `interval; falling back to preamble-only alignment.`,
-            );
+          if (strictTier) {
+            this._streamAlignRejects++;
+            if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
+              /* Said once, at full volume: the reported rate does not describe
+               * what is arriving, and that is the thing to fix. */
+              this._emitStatus(
+                `Frame timing does not match the reported ${expectedTicks}-tick ` +
+                  `interval; accepting any interval a valid configuration could produce.`,
+              );
+            }
           }
           if (this.debug && drops % 64 === 1) {
             this._log(
-              `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
-                `the ${expectedTicks}-tick frame interval`,
+              strictTier
+                ? `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
+                    `the ${expectedTicks}-tick frame interval`
+                : `align: rejecting candidate, Δt=${dt} ticks is outside any valid frame interval`,
             );
           }
           continue;
@@ -3064,6 +3108,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
 
     this._rxBuf = buf;
+
     if (drops && drops % 512 === 0) this._lastTs = 0;
     if (this.debug && (frames || drops)) {
       this._log(`parse: frames=${frames}, drops=${drops}, leftover=${this._rxBuf.length}`);

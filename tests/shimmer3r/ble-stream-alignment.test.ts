@@ -101,6 +101,111 @@ async function connectStreaming(): Promise<{
   return { client, t, frames };
 }
 
+describe('alignment fallback still rejects impossible frame intervals', () => {
+  /* When every candidate has been rejected against the reported interval, the
+     gate used to stop checking timestamps altogether and lock on the preamble
+     pair alone. That accepted byte offsets whose "timestamp" was really
+     payload bytes, stepping by millions of ticks - measured at a rock-steady
+     4194304 on one capture. The sampling rate is clamped to at least 1 Hz, so
+     no valid configuration steps more than 32768 ticks between frames (times a
+     few for frames the link dropped), and that bound needs no rate from
+     anywhere. It is a floor under the fallback, NOT a replacement for the
+     reported interval: see the note below on what it cannot catch. */
+
+  function connectWrongRate() {
+    const t = new LoopbackTransport();
+    const status: string[] = [];
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
+      } else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) {
+        setTimeout(() => tr.notify([ACK]), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    const seen: number[] = [];
+    client.onStreamFrame = (oc) => {
+      const f = oc.fields.find((x) => x.name === 'TIMESTAMP' && x.kind === 'raw');
+      if (f) seen.push(f.value);
+    };
+    return { t, client, status, seen };
+  }
+
+  it('never delivers a frame whose step no configuration could produce', async () => {
+    // The inquiry says 640 ticks; the device sends every 320, as it would if
+    // another host raised the rate without this one re-inquiring. Every
+    // candidate fails the strict test, so the fallback tier takes over.
+    const { t, client, status, seen } = connectWrongRate();
+    await client.connect(t);
+    await client.inquiry();
+    client.onStatus = (m) => status.push(m);
+    await client.startStreaming();
+
+    for (let i = 0; i < 260; i++) t.notify(buildFrame(1000 + i * 320));
+
+    expect(status.some((m) => /accepting any interval/.test(m))).toBe(true);
+
+    /* Whatever it locked to, no delivered step may exceed what a valid
+       configuration could produce. Before the bound this same stream delivered
+       173 frames stepping by a rock-steady 4194304 - 128 times the ceiling.
+       Mod 2^24 like the parser does, since a u24 timestamp wraps. */
+    const MOD = 16777216;
+    const steps = seen.slice(1).map((v, i) => (((v - seen[i]) % MOD) + MOD) % MOD);
+    expect(steps.length).toBeGreaterThan(64);
+    for (const step of steps) {
+      expect(step).toBeLessThanOrEqual(32768 * 4);
+    }
+  });
+
+  it('accepts a stream with no reported rate at all, within the bound', async () => {
+    // startStreaming without an inquiry: expectedTicks is 0, so the band is
+    // the only test there is. It must still let a real stream through.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY]), 0);
+      } else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) {
+        setTimeout(() => tr.notify([ACK]), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    // Schema without caching a rate: inquiry() sets samplingRateHz, so read the
+    // schema from it and then clear the rate to model a host that never asked.
+    await client.inquiry();
+    client.samplingRateHz = 0;
+    const seen: number[] = [];
+    client.onStreamFrame = (oc) => {
+      const f = oc.fields.find((x) => x.name === 'TIMESTAMP' && x.kind === 'raw');
+      if (f) seen.push(f.value);
+    };
+    await client.startStreaming();
+
+    const n = 40;
+    for (let i = 0; i < n; i++) t.notify(buildFrame(1000 + i * TICKS_PER_FRAME));
+
+    expect(seen.length).toBe(n - 1);
+    expect(seen[0]).toBe(1000);
+    expect(seen[1] - seen[0]).toBe(TICKS_PER_FRAME);
+  });
+
+  /* WHAT THE BOUND CANNOT CATCH, recorded so nobody mistakes it for a
+     replacement for the reported interval. A timestamp read one byte high has
+     its step multiplied by 256, and 256 x interval still fits the band for any
+     interval up to 512 ticks - i.e. any packet rate at or above 64 Hz, which is
+     most of them. Only knowing the real rate separates a one-byte shift from a
+     genuinely slow stream, which is why the strict tier comes first and why
+     measuring the interval from the stream cannot replace it: the measurement
+     needs a lock, and an unvalidated lock over constant at-rest data yields a
+     perfectly steady wrong step that would then confirm itself. */
+  it('documents that a one-byte shift stays inside the band', () => {
+    const band = 32768 * 4;
+    const oneByteShift = (interval: number) => interval * 256;
+    expect(oneByteShift(TICKS_PER_FRAME)).toBeGreaterThan(band); // 51.2 Hz: caught
+    expect(oneByteShift(320)).toBeLessThanOrEqual(band); // 102.4 Hz: NOT caught
+  });
+});
+
 describe('Shimmer3R BLE streaming (accel + gyro at rest)', () => {
   it('decodes every frame when each notification carries exactly one frame', async () => {
     const { t, frames } = await connectStreaming();
