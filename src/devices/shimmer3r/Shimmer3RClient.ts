@@ -10,6 +10,7 @@ import {
   GSR_UNCAL_LIMIT_RANGE3,
   type TimestampFmt,
 } from './constants.js';
+import { CRC_MODE, crcTrailerBytes, isCrcMode, verifyCrc, type CrcMode } from './crcMode.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
 import {
   EXG_BANK_LENGTH,
@@ -73,7 +74,11 @@ import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
-import { shimmer3rControlMessageLength, DECLARED_LENGTH_RESPONSE_CAPS } from './streamFraming.js';
+import {
+  shimmer3rControlMessageLength,
+  messageCarriesLinkCrc,
+  DECLARED_LENGTH_RESPONSE_CAPS,
+} from './streamFraming.js';
 import {
   applyStreamingCalibration,
   parseKinematicCalibBlock,
@@ -200,6 +205,35 @@ const STREAM_ALIGN_MAX_SKIP = 4;
 
 /** Fractional tolerance on that comparison, for jitter in the device clock. */
 const STREAM_ALIGN_TICK_TOLERANCE = 0.1;
+
+/**
+ * Candidates the timestamp check may reject before it stands down.
+ *
+ * The check compares against the rate the inquiry reported, so it is only as
+ * good as that agreeing with what the device is actually sending. If it does
+ * not, every candidate is rejected and the stream yields NOTHING - which is a
+ * worse failure than the misalignment the check exists to prevent, because at
+ * least misaligned data is visibly wrong. After this many rejections the
+ * lenient double-preamble lock is accepted instead, and the reason is logged.
+ */
+const STREAM_ALIGN_MAX_REJECTS = 256;
+
+/**
+ * Longest a frame interval can be: one second of device ticks.
+ *
+ * Not a guess. The driver clamps the sampling rate to at least 1 Hz
+ * (`ShimmerDevice.correctSamplingRate`) and the firmware stores it as a divider
+ * of the same 32768 Hz clock, so no valid configuration steps further than this
+ * between frames.
+ *
+ * Its value is that it needs no rate from anywhere. A stream locked to the
+ * wrong byte offset reads its "timestamp" out of neighbouring payload bytes,
+ * and those produce steps in the millions - a bench capture of exactly that
+ * gave a rock-steady 4194304 - so a bound this loose still rejects them
+ * outright. That matters most where the reported rate is unusable, because
+ * that is where nothing else is checking.
+ */
+const STREAM_MAX_FRAME_TICKS = 32768;
 
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
@@ -335,6 +369,36 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * re-acquisition is held to the same evidence as the first one.
    */
   private _streamAligned = false;
+
+  /**
+   * CRC bytes the firmware is appending to every message, 0 when off.
+   *
+   * Host-side mirror of the firmware's `btCrcMode`. There is no command to read
+   * it back, so this tracks what {@link setCrcMode} last set.
+   *
+   * Reset to off wherever a link begins or ends, by
+   * {@link _resetLinkProtocolState}. The firmware's mode is per POWER CYCLE
+   * rather than per connection, so a reconnect cannot actually know — off is
+   * assumed because it is the direction that fails safe. The host's standing
+   * request lives in {@link _desiredCrcMode} and is re-established on connect.
+   */
+  private _crcMode: CrcMode = CRC_MODE.OFF;
+
+  /** Candidate alignments the timestamp check has rejected since the last lock. */
+  private _streamAlignRejects = 0;
+
+  /** Frames whose CRC failed since streaming last started. */
+  private _crcFailures = 0;
+
+  /**
+   * CRC mode to (re-)establish on connect.
+   *
+   * Kept across a disconnect precisely because the device does not keep it: a
+   * host that asked for a CRC once means it for the next link too, and the
+   * firmware clears its own mode on every power cycle. {@link _crcMode} tracks
+   * what the device is actually doing; this tracks what was asked for.
+   */
+  private _desiredCrcMode: CrcMode = CRC_MODE.OFF;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
   /** Re-framing accumulator, used only when {@link _unframed}. */
@@ -499,14 +563,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async connect(transport?: ShimmerTransport): Promise<void> {
     const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
     this._transport = t;
+    /* Before anything is read over the new link. This clears the CRC mode among
+     * the rest, which matters here rather than only on teardown: a link that
+     * dropped under us never cleared it, and _reestablishCrcMode's own
+     * readDeviceVersion below would then be framed expecting a trailer the
+     * device is not appending. Also clears the SD session counter, which
+     * restarts with the connection, and the stream buffer, so bytes stranded by
+     * a dropped link cannot be parsed as part of the new session's stream. */
+    this._resetLinkProtocolState();
     // A byte-stream transport needs its message boundaries rebuilt; BLE gets
     // them from the notification boundaries and takes the untouched path.
     this._unframed = t.capabilities.framed === false;
-    this._ctrlBuf = new Uint8Array(0);
-    // The firmware's SD session counter restarts with the connection
-    this._sdKnownSession = null;
-    // Both version caches describe the device at the far end of the link, so a
-    // reconnect — possibly to a different sensor — must not inherit them.
+    /* Both version caches describe the device at the far end, and the schema
+     * describes its channel layout, so a reconnect - possibly to a DIFFERENT
+     * sensor - must not inherit any of them. */
+    this.schema = null;
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
     this._statusPayloadBytes = 2;
@@ -544,6 +615,46 @@ export class Shimmer3RClient extends BaseShimmerClient {
         `Connected over ${t.kind} (${this._unframed ? 'byte stream, re-framing' : 'framed'})`,
       );
     }
+    await this._reestablishCrcMode();
+  }
+
+  /**
+   * Re-apply a CRC the caller asked for on an earlier link.
+   *
+   * Done here so a reconnect does not silently come back unchecked — the
+   * firmware clears its mode on every power cycle, and a host that asked once
+   * means it for the next link too.
+   *
+   * A failure is reported and left off, never thrown: the link itself is fine
+   * without a CRC, and turning a working connection into a failed one over a
+   * diagnostic would be the wrong trade. `_crcMode` only advances on success,
+   * so the parser cannot end up expecting bytes the device is not sending.
+   */
+  private async _reestablishCrcMode(): Promise<void> {
+    if (this._desiredCrcMode === CRC_MODE.OFF) return;
+    const want = this._desiredCrcMode;
+    /* The device version first, which the protocol document requires of any
+     * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
+     * §8.2, constraint 3) - and which matters more here than it does for a
+     * host that asks in its own sequence: a CRC turns on the length-aware
+     * framer, and that framer's STATUS_RESPONSE span is 1 byte on a Shimmer3
+     * against 2 on a Shimmer3R. `_deviceVersionCache` is cleared on
+     * disconnect, so on a reconnect this would otherwise frame a Shimmer3's
+     * status one byte too wide. Cached, so it costs a round trip once. */
+    try {
+      await this.readDeviceVersion();
+    } catch {
+      /* Old firmware may not answer. The framer keeps its Shimmer3R default,
+       * which is this client's documented assumption anyway. */
+    }
+    try {
+      await this.setCrcMode(want);
+    } catch (e) {
+      this._emitStatus(
+        `Could not re-enable the ${want}-byte CRC on this link (${(e as Error).message}); ` +
+          `continuing without it.`,
+      );
+    }
   }
 
   override async disconnect(): Promise<void> {
@@ -564,22 +675,53 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._notifyUnsub = this._disconnectUnsub = null;
       this._transport = null;
       this.device = null;
-      this._rxBuf = new Uint8Array(0);
-      this._ctrlBuf = new Uint8Array(0);
+      this._resetLinkProtocolState();
       this._unframed = false;
       this.schema = null;
-      this._streaming = false;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
-      this._sdKnownSession = null;
       this._emitStatus('Disconnected');
     }
   }
 
+  /**
+   * Protocol state that belongs to ONE link, cleared wherever a link ends or
+   * a new one begins.
+   *
+   * Exists because there are three such places — {@link connect},
+   * {@link disconnect} and {@link _handleTransportDisconnect} — and they had
+   * drifted. Only the explicit disconnect cleared the CRC mode, so a link that
+   * dropped under us left it set; `connect` did not clear it either, despite
+   * {@link _crcMode}'s docblock saying it did. The reconnect's very first
+   * exchange is `readDeviceVersion` inside {@link _reestablishCrcMode}, framed
+   * expecting a trailer the freshly power-cycled device is not appending.
+   *
+   * `_desiredCrcMode` deliberately does NOT reset: that is the host's standing
+   * request, and re-establishing it is the whole point of surviving a
+   * reconnect.
+   */
+  private _resetLinkProtocolState(): void {
+    this._rxBuf = new Uint8Array(0);
+    this._ctrlBuf = new Uint8Array(0);
+    this._streaming = false;
+    this._streamAligned = false;
+    this._streamAlignRejects = 0;
+    this._lastTs = 0;
+    /* Off is the only assumption that fails safe. The firmware's CRC mode is
+     * per power cycle rather than per connection, so a reconnect genuinely
+     * cannot know — but a width the device is not appending misplaces every
+     * frame boundary, while expecting none when there is one costs a resync. */
+    this._crcMode = CRC_MODE.OFF;
+    this._crcFailures = 0;
+    this._sdKnownSession = null;
+  }
+
   /** Handle an unexpected transport disconnect (the link dropped under us). */
   private _handleTransportDisconnect = (reason?: Error): void => {
-    this._streaming = false;
-    this._sdKnownSession = null;
+    /* The transport itself is deliberately left in place: this is a
+     * notification, and a caller may still call disconnect() to tear down. Only
+     * the protocol state goes. */
+    this._resetLinkProtocolState();
     this._failFactoryTest('The link dropped during the factory self-test.');
     this._emitStatus('Device disconnected');
     this._emitDisconnect(reason);
@@ -612,6 +754,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * push glued after `TEST END`, a late ACK), and that continues down the normal
    * path.
    */
+  /**
+   * Whether inbound bytes go through the length-aware byte-stream framer.
+   *
+   * True for a byte-stream transport, and **also true whenever a CRC is on** —
+   * even on BLE. Verifying a CRC means knowing where the packet ends, and a
+   * notification is not reliably one packet: the module's packetization does
+   * not respect message boundaries, so a 132-byte InfoMem reply spans several
+   * notifications and a short reply can share one. Checking per notification
+   * would fail every long response. The framer already sizes each message from
+   * its opcode and length, and already accumulates across reads, so a CRC just
+   * turns on a path that splits correctly.
+   */
+  private get _reframing(): boolean {
+    return this._unframed || this._crcMode !== CRC_MODE.OFF;
+  }
+
   private _handleNotify = (chunk: Uint8Array): void => {
     let bytes = chunk;
     if (this._factoryTest) {
@@ -619,7 +777,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (!rest || rest.length === 0) return;
       bytes = rest;
     }
-    if (this._unframed) {
+    if (this._reframing) {
       this._handleUnframedChunk(bytes);
       return;
     }
@@ -628,6 +786,46 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _handleFramedChunk = (chunk: Uint8Array): void => {
     this._log('Notify len=', chunk.length, 'data=', chunk);
+
+    /* Check and strip the packet's CRC before anything above sees the message.
+     * One place, because every whole control message arrives here - from the
+     * framer on a reframed link, or straight from a framed transport.
+     *
+     * An ACK is NOT exempt, and must not be: `messageCarriesLinkCrc` returns
+     * true for it, because `[ACK][response][CRC]` carries ONE CRC over the
+     * whole packet and that packet arrives here starting with the ACK byte.
+     * Skipping it would leave the response behind it unverified.
+     *
+     * What the `chunk.length > 1` test skips is a BARE one-byte ACK, which has
+     * no trailer in the chunk to check - either the link has no CRC, or the
+     * framer already verified `[ACK][CRC]` and handed the ACK on alone. So a
+     * lone ACK is checked exactly once, and never here. The exempt set is for
+     * message types the firmware genuinely does not CRC at all: the data-rate
+     * test, SD sync and the SD-transfer frames. */
+    const trailer = crcTrailerBytes(this._crcMode);
+    if (trailer > 0 && chunk.length > 1 && messageCarriesLinkCrc(chunk)) {
+      if (!verifyCrc(chunk, this._crcMode)) {
+        /* Discarded, not passed on. A failed CRC means these bytes are not
+         * what the firmware composed, and acting on them is worse than losing
+         * them: the waiter times out and the caller retries, where a corrupt
+         * reply could set a range or a name to something nobody asked for. */
+        this._crcFailures++;
+        this._log(
+          `CRC check failed on a 0x${chunk[0].toString(16)} message (${this._crcFailures} so far); discarding`,
+        );
+        /* Throttled hard. An un-exempt message type that the firmware does not
+         * actually CRC produces one of these per packet, which buried a whole
+         * log at 2300 lines - and a fault that floods its own evidence out of
+         * view is worse than one that reports itself once. */
+        if (this._crcFailures <= 3 || this._crcFailures === 10 || this._crcFailures % 100 === 0) {
+          this._emitStatus(
+            `Discarded a reply whose CRC did not check out (${this._crcFailures} so far).`,
+          );
+        }
+        return;
+      }
+      chunk = chunk.subarray(0, chunk.length - trailer);
+    }
 
     // 1) Consume an expected ACK
     if (
@@ -829,8 +1027,82 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * look perpetually one byte short, so the ACK and its response were never
    * coalesced and the waiter timed out.
    */
-  private _controlMessageLength = (buf: Uint8Array): number =>
-    shimmer3rControlMessageLength(buf, { statusPayloadBytes: this._statusPayloadBytes });
+  private _controlMessageLength = (buf: Uint8Array): number => {
+    const base = shimmer3rControlMessageLength(buf, {
+      statusPayloadBytes: this._statusPayloadBytes,
+    });
+    /* A CRC rides after the PACKET the firmware transmits, not after each
+     * message in it - and a packet can hold two. `ShimBt_processCmd` stages the
+     * ACK byte into the front of the same `resPacket` as the response
+     * (`Comms/shimmer_bt_uart.c:1844`) and appends one CRC over the whole thing
+     * (`:2422`), so `[ACK][response][CRC]` is one packet with ONE CRC.
+     *
+     * So the trailer is deliberately NOT added for an ACK or NACK. Adding it
+     * there would consume the first bytes of the response behind it as if they
+     * were a CRC, which is worse than not framing the CRC at all. The response
+     * that follows gets its own trailer through this same function when
+     * `_coalesceAckWithResponse` measures it, so the coalesced pair comes out
+     * as 1 + base + trailer - exactly the packet.
+     *
+     * An ACK transmitted alone is `[ACK][CRC]`, and telling that case apart
+     * from `[ACK][response]…` needs the CRC itself to decide the framing. That
+     * is what the ACK branch at the end of this function does: it verifies a
+     * CRC taken over the ACK byte alone and, when that checks out, consumes the
+     * trailer with it. Nothing is left for the resync to drop. */
+    const trailer = crcTrailerBytes(this._crcMode);
+    if (trailer === 0 || base === NEED_MORE || base === RESYNC) return base;
+
+    /* An exempt type is sized as the firmware sent it: no trailer to add, and
+     * adding one would swallow the bytes of whatever follows. This is the same
+     * fact as the verification exemption and has to agree with it - a message
+     * measured with a trailer it does not have cannot then verify. */
+    if (!messageCarriesLinkCrc(buf.subarray(0, Math.min(buf.length, 2)))) {
+      return base;
+    }
+
+    const isAck =
+      buf[0] === OPCODES.ACK_COMMAND_PROCESSED || buf[0] === OPCODES.NACK_COMMAND_PROCESSED;
+    if (!isAck) {
+      const total = base + trailer;
+      return buf.length < total ? NEED_MORE : total;
+    }
+
+    /* An ACK is the one case where the CRC has to decide the framing, because
+     * the firmware may or may not have put a response in the same packet
+     * (`shimmer_bt_uart.c:1844` stages the ACK into the front of the response's
+     * own buffer, and `:2422` appends ONE CRC over whatever ended up there).
+     *
+     * So `[ACK][CRC]` and `[ACK][response][CRC]` are both possible and cannot
+     * be told apart by length alone. Emitting the ACK eagerly loses the packet:
+     * its CRC covers the response too, and once the ACK has been handed up
+     * there is nothing left to verify the rest against. */
+    if (
+      buf.length >= 1 + trailer &&
+      buf[1] !== OPCODES.ACK_COMMAND_PROCESSED &&
+      verifyCrc(buf.subarray(0, 1 + trailer), this._crcMode)
+    ) {
+      // A lone ACK: the CRC over just this byte checks out, so nothing follows
+      // it inside the packet. Consume its trailer with it.
+      return 1 + trailer;
+    }
+
+    /* Otherwise the ACK shares its packet with the message behind it. Measure
+     * that message and return the WHOLE packet, so it is verified and stripped
+     * as one and the ACK branch above sees the response as its remainder -
+     * exactly as it does on a link with no CRC. */
+    const after = shimmer3rControlMessageLength(buf.subarray(1), {
+      statusPayloadBytes: this._statusPayloadBytes,
+    });
+    if (after === NEED_MORE) return NEED_MORE;
+    if (after === RESYNC) {
+      // Not a message this framer knows. Waiting for a lone-ACK CRC that has
+      // already failed would stall, so fall back to the bare ACK and let the
+      // resync deal with whatever follows.
+      return 1;
+    }
+    const total = 1 + after + trailer;
+    return buf.length < total ? NEED_MORE : total;
+  };
 
   private _coalesceAckWithResponse = (msg: Uint8Array, rest: Uint8Array): number => {
     if (msg.length !== 1 || msg[0] !== OPCODES.ACK_COMMAND_PROCESSED) return 0;
@@ -2313,6 +2585,96 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Streaming
   // ---------------------------------------------------------------------------
 
+  /**
+   * Turn the Bluetooth link's CRC on or off (SET_CRC_COMMAND 0x8B).
+   *
+   * With it on, firmware appends 1 or 2 CRC bytes to every message it sends —
+   * `calculateCrcAndInsert` over the whole packet including its header, seeded
+   * `0xB0CA` with an odd-length zero pad, LSB first
+   * (log-and-stream-common `CRC/shimmer_swCrc.c`). The stream parser then
+   * verifies each frame and reports the result on
+   * {@link ObjectCluster.crcOk}, which is what separates "the link corrupted
+   * these bytes" from "the host decoded them wrongly" — indistinguishable
+   * otherwise, since a wrong value looks exactly like a wrong parse.
+   *
+   * **Set it before streaming starts.** The frame grows by the CRC width, so
+   * changing it mid-stream moves every frame boundary; this refuses to do that
+   * rather than corrupt an in-flight session.
+   *
+   * Two bytes is the useful setting. One byte still catches gross corruption
+   * but lets roughly 1 in 256 bad frames through, and the saving is a single
+   * byte per frame.
+   *
+   * Note this is a property of the link, not of streaming alone: command
+   * responses carry the CRC too. Trailing bytes are ignored by the response
+   * readers here, which parse by opcode and declared length rather than by
+   * total length, so it is safe to leave on — but it is off by default, and
+   * firmware resets it on every power cycle.
+   */
+  async setCrcMode(mode: CrcMode): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!isCrcMode(mode)) {
+      throw new Error(`Invalid CRC mode ${String(mode)} (expected 0, 1 or 2)`);
+    }
+    if (this._streaming) {
+      throw new Error(
+        'Cannot change the CRC mode while streaming: it would move every frame boundary.',
+      );
+    }
+    const label = mode === CRC_MODE.OFF ? 'off' : `${mode} byte${mode === 1 ? '' : 's'}`;
+    this._emitStatus(`SET_CRC ${label} → waiting for ACK…`);
+    /* Written before the mode is recorded, deliberately - and this ACK is the
+     * one message that arrives framed differently from what the host expects.
+     * The firmware sets its mode while processing these arguments
+     * (`shimmer_bt_uart.c:944`) and composes the ACK afterwards from the NEW
+     * mode (`:2422`), so the ACK already carries a CRC that this client is not
+     * yet looking for. Its trailer therefore arrives as a couple of trailing
+     * bytes behind the ACK, which the control handlers ignore: no waiter
+     * matches them, and a byte-stream link resyncs past them.
+     *
+     * Recording the mode first instead would parse that ACK correctly but
+     * stall for the whole ACK timeout on firmware that does not implement the
+     * command at all, because its bare NACK would be missing the trailer this
+     * client had just started expecting. Two ignorable bytes on the supported
+     * path beats a timeout on the unsupported one. */
+    await this._writeExpectingAck(new Uint8Array([OPCODES.SET_CRC_COMMAND, mode]), 1500);
+    /* Both, and in this order: the wish is recorded only once the device has
+     * agreed, so a mode it refused is not re-attempted on every reconnect. */
+    this._crcMode = mode;
+    this._desiredCrcMode = mode;
+    this._emitStatus(`Link CRC ${label}`);
+  }
+
+  /** The CRC width currently in force, as last set by {@link setCrcMode}. */
+  get crcMode(): CrcMode {
+    return this._crcMode;
+  }
+
+  /**
+   * Inbound packets whose CRC did not check out, **stream frames and control
+   * replies alike**.
+   *
+   * Not only frames: `_handleFramedChunk` discards any un-exempt message whose
+   * CRC fails and counts it here, so a corrupt inquiry reply moves this as
+   * surely as a corrupt data packet does. That is deliberate — both mean the
+   * link is delivering bytes the firmware did not compose, which is the one
+   * thing worth knowing — but it does mean the number is not per-plane and
+   * cannot be read as a frame loss rate.
+   *
+   * Zeroed wherever a stream starts ({@link startStreaming}) and wherever a
+   * link begins or ends, NOT by {@link setCrcMode}. Turning the CRC off leaves
+   * the count standing on purpose: a caller inspecting it afterwards is asking
+   * what happened while checking was on, and answering 0 would destroy the only
+   * record of it.
+   *
+   * A zero therefore means "nothing failed", which on a link with no CRC means
+   * "nothing was checked" rather than "nothing went wrong". Read it beside
+   * {@link crcMode}.
+   */
+  get crcFailures(): number {
+    return this._crcFailures;
+  }
+
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -2363,11 +2725,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._rxBuf = new Uint8Array(0);
     this._lastTs = 0;
     this._streamAligned = false;
+    this._streamAlignRejects = 0;
+    this._crcFailures = 0;
     /* Framed transports only. A byte stream carries the ACK in the same read as
      * the data and its framer already separates the two, so opening the stream
      * plane early there would route the ACK itself into the stream buffer and
      * the start command would wait for an ACK that had already been eaten. */
-    if (!this._unframed) this._streaming = true;
+    if (!this._reframing) this._streaming = true;
   }
 
   /** Undo {@link _beginStreamPlane} when the start command never took. */
@@ -2645,7 +3009,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Ticks the device clock should advance between consecutive frames, or 0 when
    * the rate is not known (streaming started without an inquiry), in which case
-   * the alignment check below has nothing to compare against and stands down.
+   * only the rate-free band below applies.
    */
   private _expectedFrameTicks(): number {
     const hz = this.samplingRateHz;
@@ -2654,11 +3018,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * Whether a timestamp step could belong to ANY valid configuration.
+   *
+   * The weak test, and the only one available when no interval is known or the
+   * known one has already been contradicted by everything on the wire. It
+   * cannot tell 320 ticks from 640, but it does reject the millions-of-ticks
+   * steps a wrong byte offset produces, which is what the fallback used to
+   * accept without looking.
+   */
+  private _frameDeltaInPlausibleBand(dt: number): boolean {
+    return dt >= 1 && dt <= STREAM_MAX_FRAME_TICKS * STREAM_ALIGN_MAX_SKIP;
+  }
+
+  /**
    * Whether a timestamp step is consistent with correct frame alignment: one
    * sampling interval, or a few of them if the link dropped frames.
+   *
+   * The strong test. Falls back to {@link _frameDeltaInPlausibleBand} when no
+   * interval is known, rather than accepting anything.
    */
   private _plausibleFrameDelta(dt: number, expectedTicks: number): boolean {
-    if (expectedTicks <= 0) return true;
+    if (expectedTicks <= 0) return this._frameDeltaInPlausibleBand(dt);
     for (let k = 1; k <= STREAM_ALIGN_MAX_SKIP; k++) {
       const want = k * expectedTicks;
       if (Math.abs(dt - want) <= Math.max(2, want * STREAM_ALIGN_TICK_TOLERANCE)) return true;
@@ -2673,18 +3053,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const tsBytes = sch.timestampFmt === 'u16' ? 2 : 3;
     const TS_MOD = tsBytes === 3 ? 16777216 : 65536;
     const expectedTicks = this._expectedFrameTicks();
+    /* The firmware appends the CRC to the packet it just built, so the frame ON
+     * THE WIRE is this much wider than the schema's payload. Everything that
+     * steps between frames - the resync stride, the second preamble, the second
+     * timestamp - has to use the wire width, while decoding uses the payload
+     * width. Conflating the two moves every boundary as soon as a CRC is on. */
+    const crcBytes = crcTrailerBytes(this._crcMode);
+    const wireBytes = frameBytes + crcBytes;
 
     let buf = this._rxBuf;
     let frames = 0;
     let drops = 0;
     let anomalies = 0;
 
-    while (buf.length >= frameBytes * 2) {
-      if (buf[0] === preamble && buf[frameBytes] === preamble) {
+    while (buf.length >= wireBytes * 2) {
+      if (buf[0] === preamble && buf[wireBytes] === preamble) {
         let ts1: number, ts2: number;
         try {
           ts1 = tsBytes === 2 ? u16le(buf, 1) : u24le(buf, 1);
-          ts2 = tsBytes === 2 ? u16le(buf, frameBytes + 1) : u24le(buf, frameBytes + 1);
+          ts2 = tsBytes === 2 ? u16le(buf, wireBytes + 1) : u24le(buf, wireBytes + 1);
         } catch {
           buf = buf.subarray(1);
           drops++;
@@ -2703,22 +3090,55 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
          * keep sliding. Only the acquisition is gated: once aligned, a real gap
          * in the link must not be mistaken for a bad lock. */
-        if (!this._streamAligned && !this._plausibleFrameDelta(dt, expectedTicks)) {
+        /* Two tiers. While the expected interval is still credible a candidate
+         * must match it; once every candidate has been rejected that many
+         * times it is the expectation that is wrong, so the test drops to the
+         * rate-free band rather than off altogether. Dropping it off
+         * altogether is what used to let a wrong byte offset lock - its
+         * "timestamp" stepping by millions of ticks - and then look for all the
+         * world like a working stream. */
+        const strictTier = this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS;
+        if (
+          !this._streamAligned &&
+          !(strictTier
+            ? this._plausibleFrameDelta(dt, expectedTicks)
+            : this._frameDeltaInPlausibleBand(dt))
+        ) {
           buf = buf.subarray(1);
           drops++;
+          if (strictTier) {
+            this._streamAlignRejects++;
+            if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
+              /* Said once, at full volume: the reported rate does not describe
+               * what is arriving, and that is the thing to fix. */
+              this._emitStatus(
+                `Frame timing does not match the reported ${expectedTicks}-tick ` +
+                  `interval; accepting any interval a valid configuration could produce.`,
+              );
+            }
+          }
           if (this.debug && drops % 64 === 1) {
             this._log(
-              `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
-                `the ${expectedTicks}-tick frame interval`,
+              strictTier
+                ? `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
+                    `the ${expectedTicks}-tick frame interval`
+                : `align: rejecting candidate, Δt=${dt} ticks is outside any valid frame interval`,
             );
           }
           continue;
         }
 
         const frame = buf.subarray(0, frameBytes);
+        /* Checked before decoding so a corrupt frame is reported as corrupt
+         * rather than as whatever its bytes happen to decode to. It is still
+         * emitted, with crcOk false: dropping it silently would hide the very
+         * corruption the CRC was turned on to find. */
+        const crcOk = crcBytes > 0 ? verifyCrc(buf.subarray(0, wireBytes), this._crcMode) : null;
+        if (crcOk === false) this._crcFailures++;
         try {
           let cursor = 1;
           const oc = new ObjectCluster(this._deviceLabel());
+          oc.crcOk = crcOk;
 
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
@@ -2768,10 +3188,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
           }
           this._lastTs = ts;
           this._streamAligned = true;
+          this._streamAlignRejects = 0;
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
           frames++;
-          buf = buf.subarray(frameBytes);
+          buf = buf.subarray(wireBytes);
         } catch (e: unknown) {
           this._log('⚠️ frame decode error → sliding 1 byte', (e as Error).message);
           buf = buf.subarray(1);
@@ -2789,6 +3210,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
 
     this._rxBuf = buf;
+
     if (drops && drops % 512 === 0) this._lastTs = 0;
     if (this.debug && (frames || drops)) {
       this._log(`parse: frames=${frames}, drops=${drops}, leftover=${this._rxBuf.length}`);

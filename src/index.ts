@@ -93,6 +93,16 @@ export {
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
 export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
+// Bluetooth link CRC (SET_CRC_COMMAND). Device-to-host only: the firmware never
+// checks a CRC on a command, so a host only has to verify what it receives.
+export {
+  CRC_MODE,
+  isCrcMode,
+  crcTrailerBytes,
+  appendCrc,
+  verifyCrc,
+} from './devices/shimmer3r/crcMode.js';
+export type { CrcMode } from './devices/shimmer3r/crcMode.js';
 // Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
 // the COM port a Classic-Bluetooth pairing creates) — needed only when writing
 // a custom transport; the clients apply it themselves.
@@ -484,6 +494,36 @@ export type {
   InfoMemImuConfig,
   InfoMemSdConfig,
   InfoMemCalibrationBlocks,
+} from './devices/infomem/index.js';
+// Derive a sensor's output rate from the packet rate, as the Java driver does:
+// a host that edits the InfoMem fields independently has to reproduce the
+// fan-out Consensys gets from setShimmerAndSensorsSamplingRate /
+// setSensorEnabledState, or it writes pairs the driver never would.
+export {
+  LSM6DSV_ODR,
+  deriveLsm6dsvAccelGyroRate,
+  deriveLsm6dsvRateOnEnableChange,
+} from './devices/infomem/index.js';
+
+// Is the configured sensor output rate fast enough for the configured packet
+// rate? Two independent InfoMem fields that nothing in the firmware relates, so
+// a packet rate above the IMU's ODR makes the device repeat each reading with a
+// fresh timestamp - a perfect-looking stream carrying a staircase.
+export {
+  lsm6dsvAccelGyroRateHz,
+  samplingRateHzFromDivider,
+  checkImuRateCoversPacketRate,
+} from './devices/infomem/index.js';
+export type { ImuRateCoverage } from './devices/infomem/index.js';
+
+// Identity defaults a host applies when it has to invent a configuration
+// (blank/erased InfoMem, or a reset to defaults) — kept in one place so every
+// such path names a device the same way.
+export {
+  DEFAULT_TRIAL_NAME,
+  macShortId,
+  defaultDeviceName,
+  defaultTrialIdentity,
 } from './devices/infomem/index.js';
 export {
   SHIMMER3_INFOMEM_FIELD_SCHEMA,

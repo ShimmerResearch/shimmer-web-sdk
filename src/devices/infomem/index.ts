@@ -65,3 +65,23 @@ export type {
   InfoMemFieldGroup,
   InfoMemFieldSubgroup,
 } from './schema.js';
+
+export {
+  DEFAULT_TRIAL_NAME,
+  macShortId,
+  defaultDeviceName,
+  defaultTrialIdentity,
+} from './defaults.js';
+
+export {
+  lsm6dsvAccelGyroRateHz,
+  samplingRateHzFromDivider,
+  checkImuRateCoversPacketRate,
+} from './rateCoverage.js';
+export type { ImuRateCoverage } from './rateCoverage.js';
+
+export {
+  LSM6DSV_ODR,
+  deriveLsm6dsvAccelGyroRate,
+  deriveLsm6dsvRateOnEnableChange,
+} from './deriveRates.js';
