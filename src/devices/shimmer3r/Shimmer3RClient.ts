@@ -152,6 +152,56 @@ const SHIMMER3R_INFOMEM_BLE_CHUNK_BYTES = 64;
 const CALIB_DUMP_CHUNK_BYTES = 128;
 
 // ---------------------------------------------------------------------------
+// Inquiry response layout
+// ---------------------------------------------------------------------------
+
+/**
+ * Header bytes of an inquiry response, opcode included:
+ * `[opcode][samplingRateTicks:2][configSetupByte0..6][numChannels][bufferSize]`,
+ * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
+ * (`log-and-stream-common/Comms/shimmer_bt_uart.c`).
+ *
+ * The full response is `INQUIRY_RSP_HEADER_BYTES + numChannels` bytes — 18 for
+ * a typical six-channel configuration. Unlike every other multi-byte response
+ * it carries **no length byte**, so its size is only knowable after the header
+ * has arrived, which is why it needs a reader of its own rather than
+ * {@link Shimmer3RClient._readLengthPrefixedResponse}.
+ */
+const INQUIRY_RSP_HEADER_BYTES = 12;
+
+/**
+ * Offset of the channel count within that header (opcode included), i.e. the
+ * one byte that has to be in hand before the total length can be computed.
+ */
+const INQUIRY_RSP_NUM_CHANNELS_OFFSET = 10;
+
+// ---------------------------------------------------------------------------
+// Stream alignment acquisition
+// ---------------------------------------------------------------------------
+
+/**
+ * How many frame intervals a timestamp step may span and still be accepted as
+ * evidence of correct alignment.
+ *
+ * The stream parser locks on by finding a preamble one frame apart, but a frame
+ * layout is periodic: a channel resting at zero puts a `0x00` at a fixed offset
+ * in every frame, so a *wrong* offset can satisfy that check on every frame of
+ * the session. The timestamp step is what separates the two — at the true
+ * alignment it is one sampling interval, while a shifted view reads data bytes
+ * as a timestamp and steps by something else.
+ *
+ * Deliberately small. A misalignment by a whole byte multiplies the apparent
+ * step by 256, which is an exact multiple of the interval, so accepting any
+ * multiple would accept the very alignment this exists to reject. A few
+ * intervals is enough to tolerate frames genuinely dropped by the link while
+ * the parser is acquiring.
+ */
+const STREAM_ALIGN_MAX_SKIP = 4;
+
+/** Fractional tolerance on that comparison, for jitter in the device clock. */
+const STREAM_ALIGN_TICK_TOLERANCE = 0.1;
+
+// ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
 
@@ -277,6 +327,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _expectingAck = 0;
   private _streaming = false;
   private _lastTs = 0;
+
+  /**
+   * Whether the stream parser has confirmed its frame alignment against the
+   * device clock. False until a candidate passes the timestamp-step check, and
+   * cleared again whenever the buffer stops looking frame-aligned, so a
+   * re-acquisition is held to the same evidence as the first one.
+   */
+  private _streamAligned = false;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
   /** Re-framing accumulator, used only when {@link _unframed}. */
@@ -575,7 +633,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (
       chunk.length >= 1 &&
       chunk[0] === OPCODES.ACK_COMMAND_PROCESSED &&
-      (this._expectingAck ?? 0) > 0
+      (this._expectingAck ?? 0) > 0 &&
+      this._chunkIsCredibleAck(chunk)
     ) {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
@@ -619,6 +678,44 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
   };
+
+  /**
+   * Whether a chunk beginning with 0xFF is really the ACK being waited for,
+   * rather than a sample byte that happens to be 0xFF.
+   *
+   * The ambiguity is confined to the stream plane. `startStreaming` opens it
+   * BEFORE writing the command - it has to, because the firmware streams as
+   * soon as it processes one and a notification does not respect frame
+   * boundaries - so for up to the ACK timeout there are stream bytes arriving
+   * while an ACK is expected. 0xFF is common in at-rest inertial data (a small
+   * negative reading is `…0xFF`), and a notification can begin on any byte, so
+   * "first byte is 0xFF" is not on its own evidence of an ACK. Taken wrongly it
+   * spends the ACK the start command is waiting on and diverts that
+   * notification's samples to the control handlers.
+   *
+   * On the control plane, where nothing else is in flight, the old rule is kept
+   * exactly: an expected ACK is an expected ACK.
+   *
+   * @param chunk a whole message, already CRC-stripped, starting with 0xFF
+   * @returns false only when the chunk is better explained as stream data
+   */
+  private _chunkIsCredibleAck(chunk: Uint8Array): boolean {
+    if (!this._streaming) return true;
+    /* A lone ACK notification. With a CRC on this is also the only shape that
+       can get here, since the whole packet had to verify first - which is why
+       this hazard is specific to an un-CRC'd link. */
+    if (chunk.length === 1) return true;
+    // `[ACK][frames…]`, which the branch below already handles.
+    if (chunk[1] === OPCODES.DATA_PACKET) return true;
+    /* Otherwise the remainder has to start like something this framer knows -
+       an in-stream status push, say. Arbitrary sample bytes do not, and RESYNC
+       is exactly the framer saying so. */
+    return (
+      shimmer3rControlMessageLength(chunk.subarray(1), {
+        statusPayloadBytes: this._statusPayloadBytes,
+      }) !== RESYNC
+    );
+  }
 
   /**
    * Surface a STATUS_RESPONSE nobody asked for on {@link onDeviceStatus}.
@@ -945,18 +1042,77 @@ export class Shimmer3RClient extends BaseShimmerClient {
       new Uint8Array([OPCODES.INQUIRY_COMMAND]),
       1500,
     );
-
-    if (remainder && remainder[0] === OPCODES.INQUIRY_RESPONSE) {
-      this._log('Using post-ACK remainder as response');
-      const info = this._interpretInquiryResponseShimmer3R(remainder);
-      this.onInquiry?.(info);
-      return info;
-    }
-    const rsp = await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, 2000);
+    const rsp = await this._readInquiryResponse(remainder, 2000);
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
     const info = this._interpretInquiryResponseShimmer3R(rsp);
     this.onInquiry?.(info);
     return info;
+  }
+
+  /**
+   * Read an inquiry response, reassembling it across notifications.
+   *
+   * A framed transport surfaces one notification per chunk, and the module
+   * decides those boundaries, so a response can arrive split at any point —
+   * including after its first byte. Every other multi-byte response is
+   * accumulated against its length byte by
+   * {@link Shimmer3RClient._readLengthPrefixedResponse}; this one has no length
+   * byte (see {@link INQUIRY_RSP_HEADER_BYTES}), so completeness is judged in
+   * two steps: collect the header, then collect the channel list it sizes.
+   *
+   * Firmware writes the logical response contiguously, so fragments simply
+   * concatenate in order.
+   *
+   * @param seed the post-ACK remainder, when the module packed the start of the
+   *   response in behind its own ACK; otherwise the response is awaited
+   */
+  private async _readInquiryResponse(
+    seed: Uint8Array | null,
+    timeoutMs: number,
+  ): Promise<Uint8Array> {
+    let acc =
+      seed && seed[0] === OPCODES.INQUIRY_RESPONSE
+        ? seed
+        : await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, timeoutMs);
+
+    const isComplete = (buf: Uint8Array): boolean =>
+      buf.length >= INQUIRY_RSP_HEADER_BYTES &&
+      buf.length >= INQUIRY_RSP_HEADER_BYTES + buf[INQUIRY_RSP_NUM_CHANNELS_OFFSET];
+
+    if (isComplete(acc)) return acc;
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const t = setTimeout(() => {
+        this._offTemp(handler);
+        /* Reject rather than parse what did arrive: a truncated inquiry
+         * response is indistinguishable from a valid one describing fewer
+         * channels, and guessing wrong costs the whole streaming session. */
+        reject(
+          new Error(
+            `Inquiry response truncated: ${acc.length} bytes received` +
+              (acc.length >= INQUIRY_RSP_HEADER_BYTES
+                ? `, ${INQUIRY_RSP_HEADER_BYTES + acc[INQUIRY_RSP_NUM_CHANNELS_OFFSET]} expected.`
+                : `, at least ${INQUIRY_RSP_HEADER_BYTES} expected.`),
+          ),
+        );
+      }, timeoutMs);
+
+      const handler = (chunk: Uint8Array): void => {
+        if (!chunk || chunk.length === 0) return;
+        /* Every chunk from here is continuation payload — deliberately NOT
+         * filtering a lone 0xFF as a stray ACK, because a channel id can be
+         * 0xFF and dropping it would misalign every later channel. This
+         * command's ACK was consumed by the caller before this handler was
+         * registered, and commands are issued one at a time. */
+        acc = concatU8(acc, chunk);
+        if (isComplete(acc)) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          resolve(acc);
+        }
+      };
+      this._onTemp(handler);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2160,20 +2316,65 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_STREAM → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
-      1500,
-    );
-    this._streaming = true;
-
-    if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA_PACKET) {
-        this._rxBuf = concatU8(this._rxBuf, remainder);
-      } else {
-        this._emitTemp(remainder);
+    this._beginStreamPlane();
+    try {
+      const remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
+        1500,
+      );
+      this._streaming = true;
+      if (remainder?.length) {
+        if (remainder[0] === OPCODES.DATA_PACKET) {
+          this._rxBuf = concatU8(this._rxBuf, remainder);
+        } else {
+          this._emitTemp(remainder);
+        }
       }
+    } catch (e) {
+      this._endStreamPlane();
+      throw e;
     }
     this._emitStatus('START_STREAM ACK received; frames should follow');
+  }
+
+  /**
+   * Open the stream plane *before* the start command goes out, so that frames
+   * arriving before its ACK are accumulated whole.
+   *
+   * The firmware starts streaming the moment it processes the command, so data
+   * can arrive before the ACK's `await` continuation has run. With `_streaming`
+   * still false, {@link _handleFramedChunk} routes those notifications through
+   * its control branch, which appends one to the stream buffer only when the
+   * notification *starts* with a preamble — so the tail of a frame split across
+   * two notifications was dropped while its head was kept, leaving a truncated
+   * frame at the front of the buffer and every byte after it one frame boundary
+   * out.
+   *
+   * That mattered far more than a few lost bytes: the frame layout is periodic,
+   * so a wrong alignment that satisfies the resync check once satisfies it
+   * forever (a channel resting at zero puts a `0x00` at a fixed offset in every
+   * frame), and the parser stayed locked to it for the whole session, emitting
+   * plausible numbers decoded from the wrong bytes.
+   *
+   * A byte-stream transport never had the problem: its framer stops at the
+   * first preamble and hands the whole remainder over, continuity intact.
+   */
+  private _beginStreamPlane(): void {
+    this._rxBuf = new Uint8Array(0);
+    this._lastTs = 0;
+    this._streamAligned = false;
+    /* Framed transports only. A byte stream carries the ACK in the same read as
+     * the data and its framer already separates the two, so opening the stream
+     * plane early there would route the ACK itself into the stream buffer and
+     * the start command would wait for an ACK that had already been eaten. */
+    if (!this._unframed) this._streaming = true;
+  }
+
+  /** Undo {@link _beginStreamPlane} when the start command never took. */
+  private _endStreamPlane(): void {
+    this._streaming = false;
+    this._rxBuf = new Uint8Array(0);
+    this._streamAligned = false;
   }
 
   /**
@@ -2208,8 +2409,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (err: unknown) {
       this._emitStatus(`STOP_STREAM write failed: ${(err as Error).message}`);
     }
-    this._streaming = false;
-    this._rxBuf = new Uint8Array(0);
+    /* `_endStreamPlane`, not the two fields by hand. It also clears
+       `_streamAligned`, and leaving that set is not cosmetic: `_parseBySchema`
+       is gated on `schema`, NOT on `_streaming`, and a chunk starting with
+       DATA_PACKET is still appended to `_rxBuf` while not streaming. So frames
+       already in flight when the stop was sent get parsed with alignment still
+       claimed, skipping acquisition entirely and accepting whatever offset they
+       happen to land on. */
+    this._endStreamPlane();
     this._emitStatus('Streaming stopped.');
   }
 
@@ -2217,17 +2424,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async startStreamingAndLogging(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
-    const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.START_SDBT_COMMAND]),
-      1500,
-    );
-    this._streaming = true;
-    if (remainder?.length) {
-      if (remainder[0] === OPCODES.DATA_PACKET) {
-        this._rxBuf = concatU8(this._rxBuf, remainder);
-      } else {
-        this._emitTemp(remainder);
+    this._beginStreamPlane();
+    try {
+      const remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_SDBT_COMMAND]),
+        1500,
+      );
+      this._streaming = true;
+      if (remainder?.length) {
+        if (remainder[0] === OPCODES.DATA_PACKET) {
+          this._rxBuf = concatU8(this._rxBuf, remainder);
+        } else {
+          this._emitTemp(remainder);
+        }
       }
+    } catch (e) {
+      this._endStreamPlane();
+      throw e;
     }
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
   }
@@ -2244,8 +2457,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (err: unknown) {
       this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${(err as Error).message}`);
     }
-    this._streaming = false;
-    this._rxBuf = new Uint8Array(0);
+    this._endStreamPlane();
     this._emitStatus('Streaming + logging stopped.');
   }
 
@@ -2254,8 +2466,39 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   private _interpretInquiryResponseShimmer3R(u8: Uint8Array) {
-    let base = 0;
-    if (u8[0] === OPCODES.INQUIRY_RESPONSE && u8.length >= 2) base = 1;
+    /* Whether the opcode byte is present, decided on the byte alone. It used
+       to also require `u8.length >= 2`, which made a lone `[0x02]` chunk look
+       headerless: the offsets below then described a different layout than the
+       buffer actually had, and the minimum-length error under-reported by one.
+       The length checks that follow are what make the extra condition
+       unnecessary — nothing is read before they pass. */
+    const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
+
+    /* Refuse a short buffer instead of degrading into a plausible-looking
+     * configuration. The channel count and the channel ids below used to fall
+     * back to zero/empty on a truncated response, and an empty channel list
+     * parses all the way through to enabledSensors = 0x000000 and a
+     * timestamp-only 4-byte frame — which the device then contradicts with
+     * every real 16/24-byte frame it sends. The only visible symptom was 100%
+     * packet loss at a believable data rate, with nothing pointing at the
+     * inquiry.
+     *
+     * Both lengths are checked here, before any of the parsing below assigns to
+     * `this`, so a rejected response leaves the previous configuration intact
+     * rather than half-replacing it. */
+    const headerEnd = base + 11;
+    if (u8.length < headerEnd) {
+      throw new Error(
+        `Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`,
+      );
+    }
+    const numCh = u8[base + 9];
+    if (u8.length < headerEnd + numCh) {
+      throw new Error(
+        `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + numCh} ` +
+          `for the ${numCh} channels it declares.`,
+      );
+    }
 
     const adcRaw = u16le(u8, base + 0);
     const samplingRateHz = 32768 / adcRaw;
@@ -2292,10 +2535,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       altMag: 0,
     };
 
-    const numCh = u8[base + 9] ?? 0;
-    const bufSize = u8[base + 10] ?? 0;
-    const chStart = base + 11;
-    const channelIds = [...u8.slice(chStart, chStart + numCh)];
+    const bufSize = u8[base + 10];
+    const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
 
     const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24');
     this.schema = schema;
@@ -2401,12 +2642,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Stream frame parser
   // ---------------------------------------------------------------------------
 
+  /**
+   * Ticks the device clock should advance between consecutive frames, or 0 when
+   * the rate is not known (streaming started without an inquiry), in which case
+   * the alignment check below has nothing to compare against and stands down.
+   */
+  private _expectedFrameTicks(): number {
+    const hz = this.samplingRateHz;
+    if (!Number.isFinite(hz) || hz <= 0) return 0;
+    return Math.round(32768 / hz);
+  }
+
+  /**
+   * Whether a timestamp step is consistent with correct frame alignment: one
+   * sampling interval, or a few of them if the link dropped frames.
+   */
+  private _plausibleFrameDelta(dt: number, expectedTicks: number): boolean {
+    if (expectedTicks <= 0) return true;
+    for (let k = 1; k <= STREAM_ALIGN_MAX_SKIP; k++) {
+      const want = k * expectedTicks;
+      if (Math.abs(dt - want) <= Math.max(2, want * STREAM_ALIGN_TICK_TOLERANCE)) return true;
+    }
+    return false;
+  }
+
   private _parseBySchema(): void {
     const sch = this.schema!;
     const preamble = sch.dataPreambleByte;
     const frameBytes = sch.frameBytes >>> 0;
     const tsBytes = sch.timestampFmt === 'u16' ? 2 : 3;
     const TS_MOD = tsBytes === 3 ? 16777216 : 65536;
+    const expectedTicks = this._expectedFrameTicks();
 
     let buf = this._rxBuf;
     let frames = 0;
@@ -2429,6 +2695,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
         if (dt === 0) {
           buf = buf.subarray(1);
           drops++;
+          this._streamAligned = false;
+          continue;
+        }
+
+        /* Two preambles a frame apart are not proof of alignment on a periodic
+         * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
+         * keep sliding. Only the acquisition is gated: once aligned, a real gap
+         * in the link must not be mistaken for a bad lock. */
+        if (!this._streamAligned && !this._plausibleFrameDelta(dt, expectedTicks)) {
+          buf = buf.subarray(1);
+          drops++;
+          if (this.debug && drops % 64 === 1) {
+            this._log(
+              `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
+                `the ${expectedTicks}-tick frame interval`,
+            );
+          }
           continue;
         }
 
@@ -2484,6 +2767,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
             }
           }
           this._lastTs = ts;
+          this._streamAligned = true;
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
           frames++;
@@ -2492,11 +2776,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
           this._log('⚠️ frame decode error → sliding 1 byte', (e as Error).message);
           buf = buf.subarray(1);
           drops++;
+          this._streamAligned = false;
         }
         continue;
       }
       buf = buf.subarray(1);
       drops++;
+      this._streamAligned = false;
       if (this.debug && drops % 64 === 1) {
         this._log(`resync: dropped ${drops} byte(s) so far; bufLen=${buf.length}`);
       }

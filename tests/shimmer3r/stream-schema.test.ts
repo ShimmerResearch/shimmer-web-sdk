@@ -102,7 +102,10 @@ async function streamFrames(s: Session, payload: number[]): Promise<ObjectCluste
   const frames: ObjectCluster[] = [];
   s.client.onStreamFrame = (oc) => frames.push(oc);
   await s.client.startStreaming();
-  s.transport.notify([...frame(100, payload), ...frame(200, payload), ...frame(300, payload)]);
+  // Timestamps step by one 51.2 Hz sampling interval (640 ticks), matching the
+  // rate the inquiry above declares - the stream parser confirms its frame
+  // alignment against that interval.
+  s.transport.notify([...frame(640, payload), ...frame(1280, payload), ...frame(1920, payload)]);
   await tick();
   return frames;
 }

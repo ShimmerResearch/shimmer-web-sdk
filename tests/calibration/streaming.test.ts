@@ -41,7 +41,9 @@ describe('Shimmer3RClient streaming inertial calibration', () => {
     await client.inquiry();
     expect(client.imuRanges.gyro).toBe(0);
     await client.startStreaming();
-    t.notify([...frame3R(100), ...frame3R(200), ...frame3R(300)]);
+    // 640 ticks apart: one sampling interval at the 51.2 Hz the inquiry declares,
+    // which is what the stream parser confirms its frame alignment against.
+    t.notify([...frame3R(640), ...frame3R(1280), ...frame3R(1920)]);
     await tick();
     return frames;
   }
@@ -112,7 +114,9 @@ describe('Shimmer3RClient streaming inertial calibration', () => {
     const got = await client.readCalibration(200);
     expect(got).toContain('gyro');
     await client.startStreaming();
-    t.notify([...frame3R(100), ...frame3R(200), ...frame3R(300)]);
+    // 640 ticks apart: one sampling interval at the 51.2 Hz the inquiry declares,
+    // which is what the stream parser confirms its frame alignment against.
+    t.notify([...frame3R(640), ...frame3R(1280), ...frame3R(1920)]);
     await tick();
     // Device block: sens 100 (÷100 = 1) identity → gyro / 1 = raw value.
     expect(frames[0].get('GYRO_X', 'cal')!.value).toBeCloseTo(229 / 100, 6);
