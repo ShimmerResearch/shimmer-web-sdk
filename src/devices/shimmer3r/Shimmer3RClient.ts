@@ -604,6 +604,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private async _reestablishCrcMode(): Promise<void> {
     if (this._desiredCrcMode === CRC_MODE.OFF) return;
     const want = this._desiredCrcMode;
+    /* The device version first, which the protocol document requires of any
+     * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
+     * §8.2, constraint 3) - and which matters more here than it does for a
+     * host that asks in its own sequence: a CRC turns on the length-aware
+     * framer, and that framer's STATUS_RESPONSE span is 1 byte on a Shimmer3
+     * against 2 on a Shimmer3R. `_deviceVersionCache` is cleared on
+     * disconnect, so on a reconnect this would otherwise frame a Shimmer3's
+     * status one byte too wide. Cached, so it costs a round trip once. */
+    try {
+      await this.readDeviceVersion();
+    } catch {
+      /* Old firmware may not answer. The framer keeps its Shimmer3R default,
+       * which is this client's documented assumption anyway. */
+    }
     try {
       await this.setCrcMode(want);
     } catch (e) {
