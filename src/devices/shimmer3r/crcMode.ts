@@ -37,7 +37,16 @@ import { shimmerUartCrcCalc } from '../dock/crc.js';
 
 /** CRC modes the firmware accepts as `SET_CRC_COMMAND`'s only argument. */
 export const CRC_MODE = Object.freeze({
-  /** No CRC on anything the device sends. The state after every connect. */
+  /**
+   * No CRC on anything the device sends.
+   *
+   * The firmware's own state after every POWER CYCLE — not after every
+   * connection, which it survives. A host cannot read the mode back, so it
+   * cannot tell a reconnect to a power-cycled device from a reconnect to one
+   * that kept its setting; this SDK therefore assumes off on connect, because
+   * expecting a trailer that is not there misplaces every frame boundary while
+   * expecting none when there is one costs only a resync.
+   */
   OFF: 0,
   /** Low byte of the CRC-16 appended to everything the device sends. */
   ONE_BYTE: 1,
@@ -76,9 +85,15 @@ export function crcTrailerBytes(mode: CrcMode): 0 | 1 | 2 {
  * but a test double pretending to *be* the firmware does, and building its
  * frames with the same function the verifier uses is what stops the two
  * drifting apart.
+ *
+ * A new array in EVERY mode, off included. Returning `msg` itself when there is
+ * nothing to append would make the return value sometimes owned and sometimes
+ * aliased, so a caller that retained or wrote through it would mutate its own
+ * input in exactly one mode. The copy costs nothing at the sizes this is used
+ * at, and callers are test doubles building frames rather than a hot path.
  */
 export function appendCrc(msg: Uint8Array, mode: CrcMode): Uint8Array {
-  if (mode === CRC_MODE.OFF) return msg;
+  if (mode === CRC_MODE.OFF) return new Uint8Array(msg);
   const [lsb, msb] = shimmerUartCrcCalc(msg, msg.length);
   const out = new Uint8Array(msg.length + mode);
   out.set(msg, 0);

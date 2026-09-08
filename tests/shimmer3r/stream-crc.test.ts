@@ -343,3 +343,76 @@ describe('Shimmer3R link CRC', () => {
     expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 });
+
+describe('a link that drops under us gives up the CRC mode', () => {
+  /* Review finding. Only the explicit disconnect() cleared the CRC mode; an
+     unexpected drop (_handleTransportDisconnect) left it set, and connect() did
+     not clear it either despite the docblock claiming so. A consumer that
+     reconnects the same client instance after onDisconnect - the common
+     pattern - then framed its very first exchange expecting a trailer the
+     power-cycled device was no longer appending. */
+
+  /**
+   * A transport that ACKs SET_CRC (applying the mode before the ACK, as the
+   * firmware does) and records the client's CRC mode at its first write.
+   */
+  function crcAckTransport() {
+    const t = new LoopbackTransport();
+    const seen: { modeAtFirstWrite: number | null } = { modeAtFirstWrite: null };
+    let mode: number = CRC_MODE.OFF;
+    let first = true;
+    const attach = (client: Shimmer3RClient) => {
+      t.setOnWrite((bytes, tr) => {
+        if (first) {
+          seen.modeAtFirstWrite = client.crcMode;
+          first = false;
+        }
+        if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+          mode = bytes[1];
+          setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
+        }
+      });
+    };
+    return { t, seen, attach };
+  }
+
+  it('clears the mode on an unexpected drop and re-establishes it on reconnect', async () => {
+    const client = new Shimmer3RClient({ debug: false });
+    const first = crcAckTransport();
+    first.attach(client);
+    await client.connect(first.t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
+
+    // The link goes, without disconnect() ever being called.
+    first.t.emitDisconnect(new Error('link lost'));
+    expect(client.crcMode).toBe(CRC_MODE.OFF);
+
+    /* The standing request survives - that is its whole job - so the reconnect
+       puts the width back. What matters is the ORDER: it must be off while the
+       reconnect does its first read, or that read is framed expecting a trailer
+       the device is not appending. */
+    const second = crcAckTransport();
+    second.attach(client);
+    await client.connect(second.t);
+    expect(second.seen.modeAtFirstWrite).toBe(CRC_MODE.OFF);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
+  });
+
+  it('also clears the stream buffer, so stranded bytes are not parsed later', async () => {
+    /* Same reset. A dropped link can leave a partial frame in the stream
+       buffer; without clearing it those bytes would be prepended to the next
+       session's stream and shift every frame boundary after them. */
+    const client = new Shimmer3RClient({ debug: false });
+    const first = crcAckTransport();
+    first.attach(client);
+    await client.connect(first.t);
+
+    const buf = () => (client as unknown as { _rxBuf: Uint8Array })._rxBuf;
+    (client as unknown as { _rxBuf: Uint8Array })._rxBuf = Uint8Array.from([0x00, 0x11, 0x22]);
+    expect(buf()).toHaveLength(3);
+
+    first.t.emitDisconnect();
+    expect(buf()).toHaveLength(0);
+  });
+});

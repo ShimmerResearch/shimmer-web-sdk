@@ -374,8 +374,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * CRC bytes the firmware is appending to every message, 0 when off.
    *
    * Host-side mirror of the firmware's `btCrcMode`. There is no command to read
-   * it back, so this tracks what {@link setCrcMode} last set and is reset
-   * on connect — the firmware's own default is off after every power cycle.
+   * it back, so this tracks what {@link setCrcMode} last set.
+   *
+   * Reset to off wherever a link begins or ends, by
+   * {@link _resetLinkProtocolState}. The firmware's mode is per POWER CYCLE
+   * rather than per connection, so a reconnect cannot actually know — off is
+   * assumed because it is the direction that fails safe. The host's standing
+   * request lives in {@link _desiredCrcMode} and is re-established on connect.
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
 
@@ -558,14 +563,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
   override async connect(transport?: ShimmerTransport): Promise<void> {
     const t = transport ?? this._injectedTransport ?? this._makeWebTransport();
     this._transport = t;
+    /* Before anything is read over the new link. This clears the CRC mode among
+     * the rest, which matters here rather than only on teardown: a link that
+     * dropped under us never cleared it, and _reestablishCrcMode's own
+     * readDeviceVersion below would then be framed expecting a trailer the
+     * device is not appending. Also clears the SD session counter, which
+     * restarts with the connection, and the stream buffer, so bytes stranded by
+     * a dropped link cannot be parsed as part of the new session's stream. */
+    this._resetLinkProtocolState();
     // A byte-stream transport needs its message boundaries rebuilt; BLE gets
     // them from the notification boundaries and takes the untouched path.
     this._unframed = t.capabilities.framed === false;
-    this._ctrlBuf = new Uint8Array(0);
-    // The firmware's SD session counter restarts with the connection
-    this._sdKnownSession = null;
-    // Both version caches describe the device at the far end of the link, so a
-    // reconnect — possibly to a different sensor — must not inherit them.
+    /* Both version caches describe the device at the far end, and the schema
+     * describes its channel layout, so a reconnect - possibly to a DIFFERENT
+     * sensor - must not inherit any of them. */
+    this.schema = null;
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
     this._statusPayloadBytes = 2;
@@ -663,31 +675,53 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._notifyUnsub = this._disconnectUnsub = null;
       this._transport = null;
       this.device = null;
-      this._rxBuf = new Uint8Array(0);
-      this._ctrlBuf = new Uint8Array(0);
+      this._resetLinkProtocolState();
       this._unframed = false;
       this.schema = null;
-      this._streaming = false;
-      this._streamAligned = false;
-      // Firmware's CRC mode is per power cycle, not per connection, but a
-      // reconnect cannot assume the device was not power-cycled in between —
-      // and off is the only assumption that fails safe, since a CRC width the
-      // device is not actually appending misplaces every frame boundary.
-      // `_desiredCrcMode` deliberately survives: that is what a reconnect
-      // re-establishes.
-      this._crcMode = CRC_MODE.OFF;
-      this._crcFailures = 0;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
-      this._sdKnownSession = null;
       this._emitStatus('Disconnected');
     }
   }
 
+  /**
+   * Protocol state that belongs to ONE link, cleared wherever a link ends or
+   * a new one begins.
+   *
+   * Exists because there are three such places — {@link connect},
+   * {@link disconnect} and {@link _handleTransportDisconnect} — and they had
+   * drifted. Only the explicit disconnect cleared the CRC mode, so a link that
+   * dropped under us left it set; `connect` did not clear it either, despite
+   * {@link _crcMode}'s docblock saying it did. The reconnect's very first
+   * exchange is `readDeviceVersion` inside {@link _reestablishCrcMode}, framed
+   * expecting a trailer the freshly power-cycled device is not appending.
+   *
+   * `_desiredCrcMode` deliberately does NOT reset: that is the host's standing
+   * request, and re-establishing it is the whole point of surviving a
+   * reconnect.
+   */
+  private _resetLinkProtocolState(): void {
+    this._rxBuf = new Uint8Array(0);
+    this._ctrlBuf = new Uint8Array(0);
+    this._streaming = false;
+    this._streamAligned = false;
+    this._streamAlignRejects = 0;
+    this._lastTs = 0;
+    /* Off is the only assumption that fails safe. The firmware's CRC mode is
+     * per power cycle rather than per connection, so a reconnect genuinely
+     * cannot know — but a width the device is not appending misplaces every
+     * frame boundary, while expecting none when there is one costs a resync. */
+    this._crcMode = CRC_MODE.OFF;
+    this._crcFailures = 0;
+    this._sdKnownSession = null;
+  }
+
   /** Handle an unexpected transport disconnect (the link dropped under us). */
   private _handleTransportDisconnect = (reason?: Error): void => {
-    this._streaming = false;
-    this._sdKnownSession = null;
+    /* The transport itself is deliberately left in place: this is a
+     * notification, and a caller may still call disconnect() to tear down. Only
+     * the protocol state goes. */
+    this._resetLinkProtocolState();
     this._failFactoryTest('The link dropped during the factory self-test.');
     this._emitStatus('Device disconnected');
     this._emitDisconnect(reason);
@@ -757,10 +791,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * One place, because every whole control message arrives here - from the
      * framer on a reframed link, or straight from a framed transport.
      *
-     * A bare ACK is exempt: its packet is `[ACK][CRC]`, but the framer sizes an
-     * ACK as one byte (the trailer belongs to the packet, and an ACK can share
-     * one with the response behind it), so the CRC bytes are not in this chunk
-     * to check. They are left for the resync to drop. */
+     * An ACK is exempt, but not because its trailer is missing here - the
+     * framer has already verified and sized a lone ACK as `[ACK][CRC]`, so the
+     * bytes may well be in this chunk. It is exempt because that check has
+     * already happened, and because an ACK sharing a packet with the response
+     * behind it is verified as part of that whole packet instead. Re-checking
+     * here would either duplicate the work or fail on a fragment whose CRC was
+     * never over these bytes alone. */
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer > 0 && chunk.length > 1 && messageCarriesLinkCrc(chunk)) {
       if (!verifyCrc(chunk, this._crcMode)) {
@@ -964,10 +1001,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * `_coalesceAckWithResponse` measures it, so the coalesced pair comes out
      * as 1 + base + trailer - exactly the packet.
      *
-     * An ACK transmitted alone is `[ACK][CRC]`, and its CRC bytes are left for
-     * the resync to drop: telling that case apart from `[ACK][response]…` needs
-     * the CRC itself to decide the framing, which is the control-plane
-     * verification still to be ported. */
+     * An ACK transmitted alone is `[ACK][CRC]`, and telling that case apart
+     * from `[ACK][response]…` needs the CRC itself to decide the framing. That
+     * is what the ACK branch at the end of this function does: it verifies a
+     * CRC taken over the ACK byte alone and, when that checks out, consumes the
+     * trailer with it. Nothing is left for the resync to drop. */
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer === 0 || base === NEED_MORE || base === RESYNC) return base;
 
@@ -2570,9 +2608,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Frames whose CRC failed since streaming last started, and 0 when the CRC
-   * is off — with no CRC there is nothing to fail, which is not the same as
-   * nothing having gone wrong.
+   * Frames whose CRC failed since streaming last started.
+   *
+   * NOT gated on {@link crcMode}: turning the CRC off does not zero it, and
+   * deliberately so. The count is about the stream that ran, and a caller
+   * inspecting it after a session has ended is asking what happened during
+   * that session — answering 0 because verification has since been switched
+   * off would destroy the only record of it. Zeroed by the next
+   * {@link startStreaming}, not by {@link setCrcMode}.
+   *
+   * A zero therefore means "nothing failed", which on a link with no CRC means
+   * "nothing was checked" rather than "nothing went wrong". Read it beside
+   * {@link crcMode}.
    */
   get crcFailures(): number {
     return this._crcFailures;

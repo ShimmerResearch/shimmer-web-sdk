@@ -9,6 +9,19 @@ import {
 import { shimmerUartCrcCalc, shimmerUartCrcCheck } from '../../src/devices/dock/crc.js';
 
 describe('crcMode', () => {
+  it('returns an owned array in every mode, off included', () => {
+    /* Review finding. OFF used to return `msg` itself, so the return value was
+       sometimes owned and sometimes an alias of the input - and a caller that
+       wrote through it mutated its own buffer in exactly one mode. */
+    const msg = Uint8Array.from([0x42, 0x43]);
+    for (const mode of [CRC_MODE.OFF, CRC_MODE.ONE_BYTE, CRC_MODE.TWO_BYTE] as const) {
+      const out = appendCrc(msg, mode);
+      expect(out, `mode ${mode}`).not.toBe(msg);
+      out[0] = 0x99;
+      expect(msg[0], `mode ${mode} must not write through to the input`).toBe(0x42);
+    }
+  });
+
   it('accepts only the three modes the firmware understands', () => {
     expect([0, 1, 2].every(isCrcMode)).toBe(true);
     // The firmware casts args[0] into its enum unchecked, so these are the
