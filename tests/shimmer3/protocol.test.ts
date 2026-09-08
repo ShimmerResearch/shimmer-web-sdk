@@ -50,6 +50,64 @@ describe('interpretShimmer3InquiryResponse (Shimmer3 4-byte-config layout)', () 
     expect(info.samplingRateHz).toBeCloseTo(51.2, 5);
   });
 
+  /* The silent-degradation class fixed for Shimmer3R first. A truncated
+     response used to yield numChannels = 0 and an empty channel list, which
+     parses through to enabledSensors = 0 and a timestamp-only frame; the device
+     then contradicts it with every real frame, showing up only as 100% packet
+     loss at a believable rate. Rejecting is the whole point, so these pin the
+     throw rather than the old tolerant values. */
+  it('rejects a buffer shorter than the header instead of reporting zero channels', () => {
+    for (let len = 0; len < 9; len++) {
+      expect(
+        () => interpretShimmer3InquiryResponse(new Uint8Array(INQUIRY_MSG.slice(0, len)), 'u24'),
+        `${len} bytes`,
+      ).toThrow(/too short/i);
+    }
+  });
+
+  it('rejects a response carrying fewer channels than it declares', () => {
+    // Declares 3, carries 2.
+    const short = INQUIRY_MSG.slice(0, INQUIRY_MSG.length - 1);
+    expect(() => interpretShimmer3InquiryResponse(new Uint8Array(short), 'u24')).toThrow(
+      /truncated: 11 bytes, need 12 .*3 channels/i,
+    );
+  });
+
+  it('reports the right minimum for a headerless body', () => {
+    // No opcode, so base = 0 and the header ends at 8 rather than 9. A lone
+    // 0x02 chunk must not be mistaken for a headerless body either.
+    expect(() => interpretShimmer3InquiryResponse(new Uint8Array([]), 'u24')).toThrow(
+      /need at least 8/,
+    );
+    expect(() => interpretShimmer3InquiryResponse(new Uint8Array([INQ_RSP]), 'u24')).toThrow(
+      /need at least 9/,
+    );
+  });
+
+  it('accepts a response declaring zero channels, which is valid', () => {
+    // All sensors off is a real configuration; only a SHORT buffer is not.
+    const noCh = [INQ_RSP, 0x80, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00, 0x01];
+    const info = interpretShimmer3InquiryResponse(new Uint8Array(noCh), 'u24');
+    expect(info.numChannels).toBe(0);
+    expect(info.channelIds).toEqual([]);
+  });
+
+  it('reports the same opcode-inclusive shape for headed and headerless input', () => {
+    /* Review finding. `opcode` was u8[0] and `bytes` was the input as given, so
+       a headerless body reported the sampling divisor's low byte (0x80) as the
+       opcode and a `bytes` the interface documents as opcode-inclusive but
+       which was not. Both forms must now come out identical. */
+    const headed = interpretShimmer3InquiryResponse(new Uint8Array(INQUIRY_MSG), 'u24');
+    const headless = interpretShimmer3InquiryResponse(new Uint8Array(INQUIRY_MSG.slice(1)), 'u24');
+    for (const info of [headed, headless]) {
+      expect(info.opcode).toBe(INQ_RSP);
+      expect(info.bytes[0]).toBe(INQ_RSP);
+      expect([...info.bytes]).toEqual(INQUIRY_MSG);
+    }
+    // And the input itself is not mutated or aliased.
+    expect(headless.bytes.length).toBe(INQUIRY_MSG.length);
+  });
+
   it('does NOT match the Shimmer3R layout (config width differs)', () => {
     // If the same bytes were parsed as Shimmer3R (7-byte config, numCh at [10]),
     // the channel list would be wrong — this pins the layout difference.
