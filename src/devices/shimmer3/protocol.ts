@@ -167,14 +167,42 @@ export function buildShimmer3Schema(
  *
  * @param onProblem optional sink for schema problems (an unrecognised channel
  *   ID); see {@link buildShimmer3Schema}.
+ * @throws if the buffer is shorter than the header, or shorter than the channel
+ *   count it declares. Rejecting is deliberate — see the body — and callers can
+ *   let it propagate: nothing is assigned from the result until it returns.
  */
 export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
   onProblem?: (message: string) => void,
 ): Shimmer3InquiryResult {
-  let base = 0;
-  if (u8[0] === OPCODES.INQUIRY_RESPONSE) base = 1;
+  const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
+
+  /* Refuse a short buffer instead of degrading into a plausible-looking
+   * configuration. The channel count and channel ids used to fall back to
+   * zero/empty on a truncated response, and an empty channel list parses all
+   * the way through to `enabledSensors = 0` and a timestamp-only frame — which
+   * the device then contradicts with every real frame it sends. The only
+   * visible symptom is 100% packet loss at a believable data rate, with nothing
+   * pointing at the inquiry. Fixed for Shimmer3R first; this is the same class
+   * of fault on the classic layout, which differs only in the width of the
+   * config word (4 bytes here, 7 there) and hence where the count sits.
+   *
+   * The response carries no length byte of its own — it is
+   * `9 + numChannels` bytes opcode-inclusive — so the declared count is the
+   * only thing that says how much more to expect, and it has to be read before
+   * it can be trusted. Hence the two checks. */
+  const headerEnd = base + 8;
+  if (u8.length < headerEnd) {
+    throw new Error(`Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`);
+  }
+  const declaredChannels = u8[base + 6];
+  if (u8.length < headerEnd + declaredChannels) {
+    throw new Error(
+      `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + declaredChannels} ` +
+        `for the ${declaredChannels} channels it declares.`,
+    );
+  }
 
   const adcRaw = u16le(u8, base + 0);
   const samplingRateHz = SHIMMER3_SAMPLING_CLOCK_FREQ / adcRaw;
@@ -190,9 +218,9 @@ export function interpretShimmer3InquiryResponse(
   const gsrRange = (configByte0 >>> 25) & 0x7;
   const internalExpPower = (configByte0 >>> 24) & 0x1;
 
-  const numChannels = u8[base + 6] ?? 0;
-  const bufferSize = u8[base + 7] ?? 0;
-  const chStart = base + 8;
+  const numChannels = declaredChannels;
+  const bufferSize = u8[base + 7];
+  const chStart = headerEnd;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
   const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
