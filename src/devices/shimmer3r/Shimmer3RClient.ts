@@ -2370,8 +2370,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (err: unknown) {
       this._emitStatus(`STOP_STREAM write failed: ${(err as Error).message}`);
     }
-    this._streaming = false;
-    this._rxBuf = new Uint8Array(0);
+    /* `_endStreamPlane`, not the two fields by hand. It also clears
+       `_streamAligned`, and leaving that set is not cosmetic: `_parseBySchema`
+       is gated on `schema`, NOT on `_streaming`, and a chunk starting with
+       DATA_PACKET is still appended to `_rxBuf` while not streaming. So frames
+       already in flight when the stop was sent get parsed with alignment still
+       claimed, skipping acquisition entirely and accepting whatever offset they
+       happen to land on. */
+    this._endStreamPlane();
     this._emitStatus('Streaming stopped.');
   }
 
@@ -2412,8 +2418,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (err: unknown) {
       this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${(err as Error).message}`);
     }
-    this._streaming = false;
-    this._rxBuf = new Uint8Array(0);
+    this._endStreamPlane();
     this._emitStatus('Streaming + logging stopped.');
   }
 

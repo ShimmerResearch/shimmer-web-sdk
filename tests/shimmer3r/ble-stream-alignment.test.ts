@@ -208,3 +208,78 @@ describe('Shimmer3R BLE streaming (accel + gyro at rest)', () => {
     }
   });
 });
+
+describe('stopping the stream gives up the alignment claim', () => {
+  /* `_parseBySchema` is gated on `schema`, not on `_streaming`, and a chunk
+     beginning with DATA_PACKET is appended to the stream buffer even when not
+     streaming. So frames already in flight when STOP_STREAM was sent are still
+     parsed. If the stop left the alignment claim set, those residual bytes skip
+     acquisition and are accepted at whatever offset they land on. Both stop
+     paths therefore go through _endStreamPlane rather than clearing the
+     streaming flag and the buffer by hand.
+
+     Engineering a wrong lock takes some care. With at-rest CONSTANT data any
+     wrong offset reads the same bytes each frame, so its step is 0 and the
+     existing zero-step guard catches it regardless - which is why an obvious
+     version of this test passes with the bug present. The residual frames below
+     therefore vary a channel that lands inside the fake timestamp window:
+
+       frame = [00 | ts0 ts1 ts2 | axL axH | ayL ayH | azL azH | gx gy gz...]
+       index     0    1   2   3     4   5     6   7     8   9
+
+     A lock at index 5 sees axH = 0x00 as a preamble (ax stays 100, so its high
+     byte is always zero) and finds the next one exactly one frame later. Its
+     "timestamp" is [ayL, ayH, azL], so stepping az by 1 per frame moves that
+     fake step by 65536 - far from the 640-tick interval, and non-zero, so only
+     the acquisition check can reject it. */
+
+  const FAKE_LOCK_OFFSET = 5;
+
+  /** Residual frames whose az varies, so a wrong lock has a non-zero step. */
+  function residualBytes(startTs: number, n: number): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push(...buildFrame(startTs + i * TICKS_PER_FRAME, { ...SAMPLE, az: SAMPLE.az + i }));
+    }
+    return out;
+  }
+
+  it('re-acquires alignment for frames arriving after a stop', async () => {
+    const { client, t, frames } = await connectStreaming();
+
+    for (let i = 0; i < 20; i++) t.notify(buildFrame(1000 + i * TICKS_PER_FRAME));
+    const delivered = frames.length;
+    expect(delivered).toBeGreaterThan(0);
+
+    await client.stopStreaming();
+
+    // Start mid-frame, at the offset the wrong lock lives on.
+    t.notify(residualBytes(90_000, 10).slice(FAKE_LOCK_OFFSET));
+
+    /* Every frame delivered after the stop must decode to the real channels. A
+       lock at index 5 reports az's low byte as the gyro and shifts everything,
+       so this fails outright when the claim survives the stop. */
+    for (const row of frames.slice(delivered)) {
+      expect(row.TIMESTAMP).toBeGreaterThanOrEqual(90_000);
+      expect(row.TIMESTAMP).toBeLessThan(90_000 + 10 * TICKS_PER_FRAME);
+      expect(row.LN_ACCEL_X).toBe(SAMPLE.ax);
+      expect(row.GYRO_Z).toBe(SAMPLE.gz);
+      expect(row.GYRO_Y).toBe(SAMPLE.gy);
+    }
+  });
+
+  it('clears the same state on the combined stream+logging stop', async () => {
+    const { client, t, frames } = await connectStreaming();
+    for (let i = 0; i < 20; i++) t.notify(buildFrame(1000 + i * TICKS_PER_FRAME));
+    const delivered = frames.length;
+
+    await client.stopStreamingAndLogging();
+    t.notify(residualBytes(90_000, 10).slice(FAKE_LOCK_OFFSET));
+
+    for (const row of frames.slice(delivered)) {
+      expect(row.TIMESTAMP).toBeGreaterThanOrEqual(90_000);
+      expect(row.LN_ACCEL_X).toBe(SAMPLE.ax);
+      expect(row.GYRO_Z).toBe(SAMPLE.gz);
+    }
+  });
+});
