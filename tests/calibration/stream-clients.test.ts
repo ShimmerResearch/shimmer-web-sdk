@@ -575,4 +575,18 @@ describe('Shimmer3RClient — real-world time on the stream', () => {
     }
     expect(client.timelineState.wraps).toBe(1);
   });
+
+  it('unwraps the 16-bit counter too, when the client was asked for one', () => {
+    /* `timestampFmt: 'u16'` is a public option and the packet parser honours
+       it, but the timeline was constructed at 24 bits and never told — so a
+       u16 stream never saw a wrap, and every 2 s its device clock dropped back
+       almost 2 s. `Shimmer3Client` had always set this; this client had the
+       same option and did not. */
+    const client = new Shimmer3RClient({ timestampFmt: 'u16' });
+    expect(client.timelineState.timestampBits).toBe(24);
+    // Reaching into the private prepare step is the honest way to test it
+    // without a whole u16 scripted device: it is what startStreaming calls.
+    (client as unknown as { _prepareStreamTimeline(): void })._prepareStreamTimeline();
+    expect(client.timelineState.timestampBits).toBe(16);
+  });
 });

@@ -317,27 +317,44 @@ describe('calibrateStreamFrame — pressure pair', () => {
     expect(oc.get('PRESSURE', 'cal')).toBeNull();
   });
 
-  it('passes the oversampling to a BMP180', () => {
+  /** BST-BMP180-DS000 §3.5's own coefficients, block and parsed. */
+  const bmp180 = (): PressureCalibration => {
+    const raw = new Uint8Array(22);
+    const put = (o: number, v: number) => {
+      raw[o] = (v >> 8) & 0xff;
+      raw[o + 1] = v & 0xff;
+    };
+    const c = {
+      ac1: 408,
+      ac2: -72,
+      ac3: -14383,
+      ac4: 32741,
+      ac5: 32757,
+      ac6: 23153,
+      b1: 6190,
+      b2: 4,
+      mb: -32768,
+      mc: -8711,
+      md: 2868,
+    };
+    put(0, c.ac1);
+    put(2, c.ac2 & 0xffff);
+    put(4, c.ac3 & 0xffff);
+    put(6, c.ac4);
+    put(8, c.ac5);
+    put(10, c.ac6);
+    put(12, c.b1);
+    put(14, c.b2);
+    put(16, c.mb & 0xffff);
+    put(18, c.mc & 0xffff);
+    put(20, c.md);
+    return { sensor: 'bmp180', coefficients: c, calibrated: true, raw };
+  };
+
+  it('passes the oversampling through to the BMP180 compensation', () => {
     const oc = new ObjectCluster('test');
     oc.add('PRESSURE', 23843 * 256, 'no_units', 'raw');
     oc.add('TEMPERATURE', 27898, 'no_units', 'raw');
-    const bmp180Block = new Uint8Array(22);
-    // Enough of a real block to compensate: the datasheet's own coefficients.
-    const put = (o: number, v: number) => {
-      bmp180Block[o] = (v >> 8) & 0xff;
-      bmp180Block[o + 1] = v & 0xff;
-    };
-    put(0, 408);
-    put(2, -72 & 0xffff);
-    put(4, -14383 & 0xffff);
-    put(6, 32741);
-    put(8, 32757);
-    put(10, 23153);
-    put(12, 6190);
-    put(14, 4);
-    put(16, -32768 & 0xffff);
-    put(18, -8711 & 0xffff);
-    put(20, 2868);
     calibrateStreamFrame(
       oc,
       state({
@@ -345,28 +362,37 @@ describe('calibrateStreamFrame — pressure pair', () => {
         generation: 'shimmer3',
         family: 'shimmer3-old',
         pressureOversampling: 0,
-        pressure: {
-          sensor: 'bmp180',
-          coefficients: {
-            ac1: 408,
-            ac2: -72,
-            ac3: -14383,
-            ac4: 32741,
-            ac5: 32757,
-            ac6: 23153,
-            b1: 6190,
-            b2: 4,
-            mb: -32768,
-            mc: -8711,
-            md: 2868,
-          },
-          calibrated: true,
-          raw: bmp180Block,
-        },
+        pressure: bmp180(),
       }),
     );
     expect(oc.get('PRESSURE', 'cal')!.value).toBeCloseTo(69.9606585, 6);
     expect(oc.get('TEMPERATURE', 'cal')!.value).toBeCloseTo(15.0471242, 6);
+  });
+
+  it('and the setting reaches the compensation, rather than defaulting to zero', () => {
+    /* The oversampling parameter defaults to 0 in `compensatePressure`, so a
+       test that passes 0 cannot tell a forwarded setting from a dropped one.
+       This one passes 3 against a raw value that is NOT the chip's own
+       left-aligned output, where the two settings genuinely disagree: the
+       `2^(8-oss)` shift no longer cancels, and oss 3 reads about eight times
+       the pressure of oss 0. */
+    const read = (oss: number): number => {
+      const oc = new ObjectCluster('test');
+      oc.add('PRESSURE', 23843, 'no_units', 'raw');
+      oc.add('TEMPERATURE', 27898, 'no_units', 'raw');
+      calibrateStreamFrame(
+        oc,
+        state({
+          emitInertial: false,
+          generation: 'shimmer3',
+          family: 'shimmer3-old',
+          pressureOversampling: oss,
+          pressure: bmp180(),
+        }),
+      );
+      return oc.get('PRESSURE', 'cal')!.value;
+    };
+    expect(read(3)).toBeGreaterThan(read(0) * 1.5);
   });
 });
 

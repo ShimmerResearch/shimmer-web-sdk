@@ -86,6 +86,49 @@ describe('unwrapping', () => {
   });
 });
 
+describe('unwrapping — cases an adversarial review found', () => {
+  it('reads a long forward gap on the 16-bit counter as forward, not backwards', () => {
+    /* The 16-bit modulo is 2 s, so a single missed Bluetooth window is a
+       forward step of more than half of it. Splitting forward from backwards
+       at half the modulo called that a reordered packet and placed the sample
+       almost 2 s EARLY, taking the unwrapped value negative. */
+    const t = new StreamTimeline({ timestampBits: 16 });
+    const host = 1_700_000_000_000;
+    t.stamp(1000, host);
+    const after = t.stamp(40000, host); // one burst: the same host timestamp
+    expect(after.unwrappedTicks).toBe(40000);
+    expect(after.deviceMs).toBeGreaterThan(0);
+  });
+
+  it('still reads a step of a few sample periods as a reordered packet', () => {
+    // What the guard is actually for: at 51.2 Hz a swap of adjacent packets is
+    // 640 ticks, and must not add a whole modulo.
+    const t = new StreamTimeline({ timestampBits: 16 });
+    t.stamp(40640);
+    expect(t.stamp(40000).unwrappedTicks).toBe(40000);
+    expect(t.state.wraps).toBe(0);
+  });
+
+  it('never lets the session wrap count fall', () => {
+    /* `wraps` describes the session, not the last sample. Recomputing it from
+       each sample let a reordered packet arriving just after a boundary
+       un-count a crossing that really happened. */
+    const t = new StreamTimeline();
+    t.stamp(MOD24 - 10);
+    t.stamp(5);
+    expect(t.state.wraps).toBe(1);
+    t.stamp(MOD24 - 10); // the duplicate that arrives late
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('reports a sample behind its predecessor at the position it holds', () => {
+    // Not monotonic, on purpose: a late packet is placed when it was taken.
+    const t = new StreamTimeline();
+    t.stamp(100000);
+    expect(t.stamp(99000).unwrappedTicks).toBe(99000);
+  });
+});
+
 describe('rwc-aligned anchoring (Shimmer3R)', () => {
   /** 2026-09-09T12:00:00Z as a tick count, the shape GET_RWC returns. */
   const unixMs = Date.UTC(2026, 8, 9, 12, 0, 0);
@@ -133,6 +176,65 @@ describe('rwc-aligned anchoring (Shimmer3R)', () => {
     t.anchorToRwc(rwcTicks, hostMs, { aligned: true });
     t.stamp(Number(rwcTicks % BigInt(MOD24)), hostMs);
     expect(t.state.skewMs).toBeCloseTo(1000, 0);
+  });
+});
+
+describe('how much to trust an anchor', () => {
+  const rwcTicks = (unixMs: number): bigint => BigInt(Math.round(unixMs * TICKS_PER_MS));
+
+  it('says how far the host clock could have been out and still picked this wrap', () => {
+    /* An aligned anchor is exact to the tick — once the right wrap is chosen,
+       and the host clock is what chooses it. `anchorUncertaintyMs: 0` is true
+       of the arithmetic and says nothing about that choice, so the margin is
+       reported beside it. */
+    const host = 1_700_000_000_000;
+    const t = new StreamTimeline();
+    t.anchorToRwc(rwcTicks(host), host, { rttMs: 20, aligned: true });
+    t.stamp(Number(rwcTicks(host) % BigInt(MOD24)), host);
+    const state = t.state;
+    expect(state.anchorUncertaintyMs).toBe(0);
+    // Half a modulo of slack when the estimate lands on the value itself.
+    expect(state.wrapMarginMs).toBeGreaterThan(200_000);
+    expect(state.wrapMarginMs).toBeLessThanOrEqual(256_000);
+  });
+
+  it('reports a thin margin when the host clock puts the sample near a boundary', () => {
+    const host = 1_700_000_000_000;
+    const t = new StreamTimeline();
+    t.anchorToRwc(rwcTicks(host), host, { rttMs: 20, aligned: true });
+    // Half a modulo away from where the clock says: the decision is a coin toss.
+    const low = Number((rwcTicks(host) + BigInt(MOD24 / 2)) % BigInt(MOD24));
+    t.stamp(low, host);
+    expect(t.state.wrapMarginMs).toBeLessThan(1000);
+  });
+
+  it('grows an estimated anchor’s uncertainty with the age of the reading', () => {
+    /* An anchor request survives a stream restart, so the reading can be hours
+       old by the time a sample binds it, and the two clocks separate over
+       hours. Reporting the round trip alone would call an hour-old reading as
+       good as a fresh one. */
+    const host = 1_700_000_000_000;
+    const fresh = new StreamTimeline();
+    fresh.anchorToRwc(rwcTicks(host), host, { rttMs: 20, aligned: false });
+    fresh.stamp(1000, host);
+
+    const stale = new StreamTimeline();
+    stale.anchorToRwc(rwcTicks(host), host, { rttMs: 20, aligned: false });
+    stale.stamp(1000, host + 6 * 3600_000);
+
+    expect(fresh.state.anchorUncertaintyMs).toBeCloseTo(10, 6);
+    expect(stale.state.anchorUncertaintyMs).toBeGreaterThan(400);
+    expect(stale.state.anchorUncertaintyMs).toBeLessThan(500);
+  });
+
+  it('leaves an aligned anchor’s uncertainty at zero however old it is', () => {
+    // Age costs an aligned anchor wrap margin, not accuracy: the congruence
+    // re-derives the value from the sample itself.
+    const host = 1_700_000_000_000;
+    const t = new StreamTimeline();
+    t.anchorToRwc(rwcTicks(host), host, { rttMs: 20, aligned: true });
+    t.stamp(1000, host + 6 * 3600_000);
+    expect(t.state.anchorUncertaintyMs).toBe(0);
   });
 });
 
@@ -270,6 +372,7 @@ describe('anchor lifecycle', () => {
     const t = new StreamTimeline();
     expect(t.state).toEqual({
       source: null,
+      wrapMarginMs: null,
       anchorHostMs: null,
       anchorUnixMs: null,
       anchorUncertaintyMs: 0,

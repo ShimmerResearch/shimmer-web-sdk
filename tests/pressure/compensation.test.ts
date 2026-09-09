@@ -12,15 +12,26 @@ import {
 import type { PressureCalibration } from '../../src/devices/pressure/index.js';
 
 /**
- * Every vector here is a published one, so the port can be checked against a
- * number nobody in this repository chose:
+ * Where each vector comes from, and how far that goes:
  *
- * - BMP180: BST-BMP180-DS000 §3.5, whose worked example answers 150 (15.0 °C)
- *   and 69964 Pa.
- * - BMP280: BST-BMP280-DS001 §8.2, answering 25.08 °C and 100653 Pa.
- * - BMP390: the vector in the Java driver's own `CalibDetailsBmp390.main()`
- *   (:294-336), which is the only BMP390 example on hand.
- * - BMP581: exact powers of two, because its conversion is two divisions.
+ * - **BMP180**: BST-BMP180-DS000 §3.5, coefficients AND answers — 150
+ *   (15.0 °C) and 69964 Pa. The port reproduces the temperature exactly and
+ *   the pressure to 69961 Pa, 3 Pa low, because the datasheet's worked example
+ *   is integer arithmetic throughout while the Java driver this port follows
+ *   uses real division (`CalibDetailsBmp180.calibratePressureSensorData`).
+ *   The assertions below state the port's value and the datasheet's separately
+ *   rather than pretending they agree: 3 Pa exceeds the part's 2 Pa
+ *   resolution, so it is a real, if tiny, divergence and a reader should know
+ *   which number they are looking at.
+ * - **BMP280**: BST-BMP280-DS001 §8.2, coefficients and answers — 25.08 °C and
+ *   100653 Pa.
+ * - **BMP390**: coefficients from the Java driver's own
+ *   `CalibDetailsBmp390.main()` (:294-336), which is the only BMP390 example on
+ *   hand. Its `main()` prints its results rather than asserting them, so the
+ *   expected values here were computed from Bosch's published algorithm rather
+ *   than copied from a publication. Recompute them, do not trust them because
+ *   they are written down.
+ * - **BMP581**: exact powers of two, because its conversion is two divisions.
  */
 
 // --- BMP180 -----------------------------------------------------------------
@@ -71,9 +82,14 @@ describe('BMP180', () => {
     const out = compensateBmp180(23843 * 256, 27898, c, 0);
     expect(out.temperatureC).toBeCloseTo(15.0471242, 6);
     expect(out.pressureKPa).toBeCloseTo(69.9606585, 6);
-    // The datasheet states 150 (i.e. 15.0 °C) and 69964 Pa.
+    // Temperature matches the datasheet's 150 (15.0 °C) exactly.
     expect(Math.round(out.temperatureC * 10)).toBe(150);
+    /* Pressure is 69961 Pa where the datasheet's integer walk-through gives
+       69964. The 3 Pa is the real-division port, inherited deliberately from
+       the Java driver so a host and Consensys agree; see the file docblock.
+       Pinned both ways so neither number can drift unnoticed. */
     expect(Math.round(out.pressureKPa * 1000)).toBe(69961);
+    expect(Math.abs(out.pressureKPa * 1000 - 69964)).toBeLessThan(4);
   });
 
   it('reads the same pressure at every oversampling setting', () => {
@@ -200,6 +216,15 @@ describe('BMP390', () => {
     const c = parseBmp390Coefficients(b)!;
     expect(c.parT1).toBe(32768 * 256);
     expect(c.parT1).toBeGreaterThan(0);
+
+    /* And the value it produces, which is the point. Reading par_T1 as a short
+       here would put the reference temperature 65536 counts out and drag the
+       compensated temperature to about -140 °C — the Java bug's actual
+       symptom. The reference vector cannot show this: its own par_T1 is 0x6BE7
+       = 27623, below 32768, where signed and unsigned agree. */
+    const out = compensateBmp390(0x640d00, 0x7fba00, c);
+    expect(out.temperatureC).toBeGreaterThan(-40);
+    expect(out.temperatureC).toBeLessThan(85);
   });
 
   it('clamps to the compensation limits Bosch states', () => {

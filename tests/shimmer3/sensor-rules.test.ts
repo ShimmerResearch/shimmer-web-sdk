@@ -28,17 +28,45 @@ const state = (over: Partial<SensorRuleState> = {}): SensorRuleState => ({
 });
 
 describe('the conflict table', () => {
-  it('is symmetric: every conflict lists its partner back', () => {
+  it('holds exactly these pairs', () => {
+    /* The literal table, not a property derived from it. The symmetry test
+       that stood here asked whether `sensorConflicts(a)` contains `b` — but
+       that function is built by scanning both fields of this same table, so it
+       answered yes for any contents at all and could not fail. Symmetry is
+       structural; what needs pinning is the membership. */
+    const pairs = SENSOR_RULE_CONFLICTS.map((p) => [p.a, p.b].sort().join('+')).sort();
+    expect(pairs).toEqual(
+      [
+        'SENSOR_GSR+SENSOR_INT_A3',
+        'SENSOR_GSR+SENSOR_INT_A2',
+        'SENSOR_BRIDGE_AMP+SENSOR_GSR',
+        'EXG+SENSOR_GSR',
+        'SENSOR_BRIDGE_AMP+SENSOR_INT_A1',
+        'SENSOR_BRIDGE_AMP+SENSOR_INT_A2',
+        'SENSOR_BRIDGE_AMP+SENSOR_INT_A0',
+        'EXG+SENSOR_BRIDGE_AMP',
+        'EXG+SENSOR_INT_A3',
+        'EXG+SENSOR_INT_A2',
+        'EXG+SENSOR_INT_A0',
+        'EXG+SENSOR_INT_A1',
+      ].sort(),
+    );
+  });
+
+  it('reads back symmetrically, whichever side is asked', () => {
     for (const pair of SENSOR_RULE_CONFLICTS) {
-      expect(
-        sensorConflicts(pair.a).some((c) => c.key === pair.b),
-        `${pair.a} → ${pair.b}`,
-      ).toBe(true);
-      expect(
-        sensorConflicts(pair.b).some((c) => c.key === pair.a),
-        `${pair.b} → ${pair.a}`,
-      ).toBe(true);
+      expect(sensorConflicts(pair.a).some((c) => c.key === pair.b)).toBe(true);
+      expect(sensorConflicts(pair.b).some((c) => c.key === pair.a)).toBe(true);
     }
+  });
+
+  it('does not claim the ExG width rule, which is not a sensor conflict', () => {
+    /* `checkAndCorrectConfig` also clears a chip's 16-bit flag when its 24-bit
+       flag is set (`shimmer_config.c:839-848`). That is a sample width, and
+       'EXG' covers all four bits here, so it cannot be expressed as a pair —
+       a host reads a bitmap's width back with `exgResolutionFromSensors`
+       instead. Pinned so nobody adds it to this table as a conflict. */
+    expect(SENSOR_RULE_CONFLICTS.some((p) => p.a === 'EXG' && p.b === 'EXG')).toBe(false);
   });
 
   it('marks exactly the five pairs the firmware corrects itself', () => {
@@ -64,6 +92,55 @@ describe('the conflict table', () => {
       B.SENSOR_EXG1_24BIT | B.SENSOR_EXG2_24BIT | B.SENSOR_EXG1_16BIT | B.SENSOR_EXG2_16BIT,
     );
     expect(sensorRuleMask('EXG')).toBe(EXG_ANY_MASK);
+  });
+});
+
+describe('cases an adversarial review found', () => {
+  it('keeps GSR over the bridge amplifier when neither is the board’s own', () => {
+    /* The documented order is ExG, then GSR, then the bridge amplifier. With
+       neither side the preferred owner, the resolver kept whichever the table
+       happened to list second, so this image unticked GSR — the reverse. */
+    const check = checkSensorRules(
+      state({ enabledSensors: B.SENSOR_GSR | B.SENSOR_BRIDGE_AMP, expPower: 1 }),
+    );
+    expect(check.derivations.enabledSensors & B.SENSOR_GSR).toBe(B.SENSOR_GSR);
+    expect(check.derivations.enabledSensors & B.SENSOR_BRIDGE_AMP).toBe(0);
+  });
+
+  it('still lets the fitted board overrule that order', () => {
+    /* An SR49 is a bridge-amplifier board: on one, the bridge amplifier stays.
+       A Shimmer3, because no Shimmer3R packer emits a bridge channel and the
+       generation rule would drop it before the conflict rule could keep it. */
+    const check = checkSensorRules(
+      state({
+        enabledSensors: B.SENSOR_GSR | B.SENSOR_BRIDGE_AMP,
+        expPower: 1,
+        boardId: 49,
+        generation: 'shimmer3',
+      }),
+    );
+    expect(check.derivations.enabledSensors & B.SENSOR_BRIDGE_AMP).toBe(B.SENSOR_BRIDGE_AMP);
+    expect(check.derivations.enabledSensors & B.SENSOR_GSR).toBe(0);
+  });
+
+  it('hands back the ExG state its own expansion-rail derivation used', () => {
+    /* 'EXG' owns no bit, so an ExG turned on here is invisible in the bitmap.
+       Without `exgOn` to feed back, a caller that toggles and then validates
+       gets the rail derived on by the toggle and straight back off by the
+       check, which would look for ExG in the bits and find none. */
+    const toggled = applySensorToggle(state({ enabledSensors: 0, expPower: 0 }), 'EXG', true);
+    expect(toggled.exgOn).toBe(true);
+    expect(toggled.expPower).toBe(1);
+
+    const after = checkSensorRules(
+      state({
+        enabledSensors: toggled.enabledSensors,
+        expPower: toggled.expPower,
+        exgMode: toggled.exgOn ? 'ecg' : 'off',
+      }),
+    );
+    expect(after.derivations.expPower).toBe(1);
+    expect(after.changes).toHaveLength(0);
   });
 });
 

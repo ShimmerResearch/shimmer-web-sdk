@@ -27,6 +27,32 @@
  * from the Java driver's `SensorDetailsRef.mListOfSensorIdsConflicting`, which
  * is what Consensys enforces in its own editor.
  *
+ * **Those lists are easy to look for and not find.** Almost every Shimmer3
+ * entry passes its list as argument 5 of the eight-argument `SensorDetailsRef`
+ * constructor (`driverUtilities/SensorDetailsRef.java:122-140`) rather than
+ * assigning the field, so a search for `mListOfSensorIdsConflicting =` turns up
+ * the Shimmer2 block (`driver/Configuration.java:337-380`) and little else.
+ * Read the constructor calls: `sensors/SensorGSR.java:139-167` names both
+ * internal ADC channels, the bridge amplifier and the host ExG modes, and
+ * `sensors/SensorBridgeAmp.java:97-121` names GSR back.
+ *
+ * Two details of those lists are worth knowing, because they explain what this
+ * table does and does not say. The ExG conflicts are listed as the **host
+ * algorithm** ids (`HOST_ECG`, `HOST_EMG`, `HOST_EXG_TEST` and the rest) and
+ * the four raw ExG bit ids sit commented out beside them, so Java expresses
+ * "GSR cannot be used with ExG" at the level of a chosen ExG mode — which is
+ * exactly what `'EXG'` is here. And Java's per-channel lists are asymmetric
+ * where a derived channel is involved (PPG, the resistance amplifier, skin
+ * temperature); this SDK models none of those, so its table is symmetric.
+ *
+ * **One firmware rule is deliberately absent.** `checkAndCorrectConfig` also
+ * clears a chip's 16-bit ExG flag when its 24-bit flag is set
+ * (`Configuration/shimmer_config.c:839-848`). That is a sample width, not a
+ * pair of sensors, and `'EXG'` covers all four bits at once here — so it cannot
+ * be expressed as a conflict and is not one. A host picks a width when it picks
+ * a preset; `exgResolutionFromSensors` in `devices/exg/` reads back which one a
+ * bitmap holds.
+ *
  * **On required sensors.** There are none in the enabled-bitmap sense.
  * `mListOfSensorIdsRequired` is declared on every `SensorDetailsRef`
  * (`driverUtilities/SensorDetailsRef.java:34`) and populated nowhere in the
@@ -383,6 +409,18 @@ export interface SensorToggleResult {
   expPower: 0 | 1 | null;
   /** True when the ExG front end was turned off, so a host resets its mode control. */
   exgOff: boolean;
+  /**
+   * Whether the ExG front end is on after this toggle.
+   *
+   * Feed it back as {@link SensorRuleState.exgMode} on the next call. It is not
+   * derivable from `enabledSensors`, because `'EXG'` owns no single bit: a host
+   * ORs in the width bits its chosen preset needs, and until it does, an ExG
+   * that this call turned on is invisible in the bitmap. Without it a caller
+   * that toggles and then validates gets `expPower` derived on by the toggle
+   * and derived straight back off by {@link checkSensorRules}, which would
+   * read the rail off the bits and find none set.
+   */
+  exgOn: boolean;
   changes: SensorRuleChange[];
 }
 
@@ -657,7 +695,7 @@ export function applySensorToggle(
     });
   }
 
-  return { enabledSensors: mask, expPower, exgOff, changes };
+  return { enabledSensors: mask, expPower, exgOff, exgOn, changes };
 }
 
 function expPowerReason(
@@ -786,8 +824,27 @@ export function checkSensorRules(state: SensorRuleState): SensorRuleCheck {
           `${sensorRuleLabel(keeper, state.generation)}.`,
       );
     } else {
-      const loser = pair.a === owner ? pair.b : pair.a;
-      const keeper = loser === pair.a ? pair.b : pair.a;
+      /* Two connector owners. The preferred one is kept and the other dropped
+         — and when NEITHER is the preferred one (a GSR-plus-bridge image on a
+         board that is neither, or with no board known, where the preference is
+         ExG) the ranking still has to decide. Taking `pair.b` unless `pair.a`
+         is the winner got that backwards: it dropped whichever side the table
+         happened to list first, so a GSR + bridge-amplifier image kept the
+         bridge amplifier and unticked GSR, the reverse of the documented
+         order. */
+      const rank = (key: SensorRuleKey): number => {
+        const at = CONNECTOR_OWNERS.indexOf(key);
+        return at === -1 ? CONNECTOR_OWNERS.length : at;
+      };
+      const keeper =
+        pair.a === owner
+          ? pair.a
+          : pair.b === owner
+            ? pair.b
+            : rank(pair.a) <= rank(pair.b)
+              ? pair.a
+              : pair.b;
+      const loser = keeper === pair.a ? pair.b : pair.a;
       drop(
         loser,
         `${sensorRuleLabel(loser, state.generation)} unticked — it cannot be used with ` +

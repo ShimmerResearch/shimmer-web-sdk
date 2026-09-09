@@ -54,6 +54,18 @@ export const TICKS_PER_SECOND = 32768;
 /** Ticks per millisecond — 32.768, as the firmware and the Java driver have it. */
 export const TICKS_PER_MS = TICKS_PER_SECOND / 1000;
 
+/**
+ * Relative drift assumed between the sensor's clock and the host's, in parts
+ * per million, when an anchor is bound to a stream some time after the reading
+ * that produced it.
+ *
+ * An assumption, not a measurement: it turns the age of a reading into an
+ * uncertainty a caller can see, and nothing here corrects for it. Twenty ppm
+ * is a plain 32768 Hz crystal's order of magnitude, so an hour-old reading is
+ * reported as good to about 72 ms rather than to the round trip that took it.
+ */
+export const CLOCK_DRIFT_PPM_ASSUMED = 20;
+
 /** Where a timeline's wall-clock time came from. See the module docblock. */
 export type TimelineSource = 'rwc-aligned' | 'rwc-estimated' | 'host';
 
@@ -62,7 +74,16 @@ export type TimestampBits = 16 | 24;
 
 /** One stamped sample. */
 export interface StreamStamp {
-  /** The counter with its wraps added back, monotonic across a session. */
+  /**
+   * The counter with its wraps added back.
+   *
+   * **Not monotonic.** A reordered or duplicated packet reports the position it
+   * actually holds, which is behind the sample before it — that is the honest
+   * answer for a consumer plotting samples against their own times, and the
+   * alternative (clamping to the running maximum) would place a late packet at
+   * a time it was not taken. {@link TimelineState.wraps} *is* monotonic,
+   * because a session's wrap count is not a property of one sample.
+   */
   unwrappedTicks: number;
   /**
    * Milliseconds on the device's own clock: `unwrappedTicks / 32.768`.
@@ -98,7 +119,20 @@ export interface TimelineState {
    * the anchor is still waiting for its first sample.
    */
   skewMs: number | null;
-  /** How many counter wraps have been counted this session. */
+  /**
+   * For an aligned anchor, how far this host's clock could have been wrong and
+   * still have selected the same wrap of the counter, in milliseconds. `null`
+   * for the other sources, which do not choose a wrap.
+   *
+   * Read it beside `anchorUncertaintyMs`, which is zero for an aligned anchor
+   * and honestly so: the value is exact to the tick once the wrap is right.
+   * This is the size of the assumption that makes it right. A margin of
+   * minutes is comfortable; one of seconds means a host clock that stepped
+   * (a resumed laptop, an NTP correction) could have placed the whole stream a
+   * clean 512 seconds out.
+   */
+  wrapMarginMs: number | null;
+  /** How many counter wraps have been counted this session. Never decreases. */
   wraps: number;
   /** The counter width in use. */
   timestampBits: TimestampBits;
@@ -121,6 +155,8 @@ interface ResolvedAnchor {
   unixMs: number;
   hostMs: number;
   uncertaintyMs: number;
+  /** See {@link TimelineState.wrapMarginMs}. */
+  wrapMarginMs: number | null;
   skewMs: number | null;
 }
 
@@ -145,6 +181,12 @@ export class StreamTimeline {
   private _lastUnwrapped = 0;
   private _lastHostMs: number | null = null;
   private _wraps = 0;
+  /**
+   * How far behind the previous sample a value may be and still be read as a
+   * reordered packet rather than as forward motion across a wrap. An eighth of
+   * the modulo; see {@link _unwrap} for why not half.
+   */
+  private _reorderWindow: number;
   private _pending: PendingAnchor | null = null;
   private _anchor: ResolvedAnchor | null = null;
   /**
@@ -158,6 +200,7 @@ export class StreamTimeline {
   constructor(opts: StreamTimelineOptions = {}) {
     this._bits = opts.timestampBits ?? 24;
     this._modulo = 2 ** this._bits;
+    this._reorderWindow = this._modulo / 8;
   }
 
   /** The counter width this timeline is unwrapping. */
@@ -177,6 +220,7 @@ export class StreamTimeline {
     if (bits === this._bits) return;
     this._bits = bits;
     this._modulo = 2 ** bits;
+    this._reorderWindow = this._modulo / 8;
     this.reset();
   }
 
@@ -275,8 +319,10 @@ export class StreamTimeline {
     /* How many counter boundaries this session has crossed. The unwrapped value
        starts below one modulo (it starts AT a raw counter value), so flooring
        the division counts crossings directly. Clamped at zero because a
-       reordered packet arriving first can carry the value slightly negative. */
-    this._wraps = Math.max(0, Math.floor(unwrapped / this._modulo));
+       reordered packet arriving first can carry the value slightly negative,
+       and never allowed to fall: a reordered packet that lands just before a
+       boundary would otherwise un-count a crossing the session really made. */
+    this._wraps = Math.max(this._wraps, Math.max(0, Math.floor(unwrapped / this._modulo)));
     if (hostMs !== undefined) this._lastHostMs = hostMs;
 
     if (this._pending) this._resolveAnchor(unwrapped, hostMs);
@@ -294,16 +340,29 @@ export class StreamTimeline {
     if (this._lastRaw === null) return value;
 
     const half = this._modulo / 2;
-    /* Forward distance from the last sample. A step of less than half a modulo
-       is taken as forward motion (crossing a wrap if it has to); more than half
-       is taken as a small step BACKWARDS, i.e. a duplicated or reordered
-       packet. Without that guard one out-of-order packet adds a whole modulo —
-       512 s on a Shimmer3R — for the rest of the session. */
+    /* Forward distance from the last sample, and whether to read it as forward
+       motion (crossing a wrap if it has to) or as a small step BACKWARDS —
+       a duplicated or reordered packet. Without the backwards case one
+       out-of-order packet adds a whole modulo, 512 s on a Shimmer3R, for the
+       rest of the session.
+
+       The threshold is the REORDER WINDOW, not half the modulo. Half looks
+       like the natural split and is wrong on the 16-bit counter: its whole
+       modulo is 2 s, so a genuine forward gap of more than a second — which a
+       single missed Bluetooth window produces — reads as a step backwards, and
+       the sample lands almost a modulo early. What actually distinguishes the
+       two is magnitude: a reorder swaps packets that are adjacent in time, so
+       it is a handful of sample periods, while a gap is whatever the link
+       dropped. An eighth of the modulo is 64 s on the 24-bit counter and
+       0.25 s on the 16-bit one — far larger than any reorder, far smaller than
+       a gap worth recovering. A duplicate (`forward === 0`) is unaffected
+       either way. */
     const forward = (value - this._lastRaw + this._modulo) % this._modulo;
+    const backwards = this._modulo - forward;
     let unwrapped =
-      forward <= half
-        ? this._lastUnwrapped + forward
-        : this._lastUnwrapped - (this._modulo - forward);
+      backwards <= this._reorderWindow && forward !== 0
+        ? this._lastUnwrapped - backwards
+        : this._lastUnwrapped + forward;
 
     /* The rule above cannot see a wrap that went by entirely — more than a
        whole modulo of samples missed, which is 512 s on a 24-bit counter but
@@ -323,6 +382,26 @@ export class StreamTimeline {
   }
 
   /**
+   * How much the sensor's clock and this host's may have separated between a
+   * clock reading and the sample that binds it.
+   *
+   * Zero for the aligned source, whose value does not depend on the age of the
+   * reading. For the others it is the elapsed time at
+   * {@link CLOCK_DRIFT_PPM_ASSUMED} — a stated assumption rather than a
+   * measurement, which is why it is an uncertainty and not a correction. A
+   * host that wants better should read the clock again.
+   */
+  private _staleAnchorDriftMs(
+    kind: TimelineSource,
+    readAtHostMs: number,
+    boundAtHostMs: number,
+  ): number {
+    if (kind === 'rwc-aligned') return 0;
+    const ageMs = Math.abs(boundAtHostMs - readAtHostMs);
+    return (ageMs * CLOCK_DRIFT_PPM_ASSUMED) / 1e6;
+  }
+
+  /**
    * Turn a pending anchor into a resolved one, now that a sample's unwrapped
    * tick value is known to bind it to.
    */
@@ -338,7 +417,8 @@ export class StreamTimeline {
         unwrappedTicks: unwrapped,
         unixMs: at,
         hostMs: at,
-        uncertaintyMs: pending.uncertaintyMs,
+        uncertaintyMs: pending.uncertaintyMs + this._staleAnchorDriftMs('host', pending.hostMs, at),
+        wrapMarginMs: null,
         skewMs: null,
       };
       return;
@@ -357,15 +437,22 @@ export class StreamTimeline {
     const approxTicks = Number(rwcTicks) + elapsedSinceAnchorTicks;
 
     let absoluteTicks: number;
+    let wrapMarginMs: number | null = null;
     if (pending.kind === 'rwc-aligned') {
       /* The sample's counter value IS the low bits of the device's real-world
          clock, so the answer is the value congruent to it that lies nearest the
-         estimate above. The estimate only has to be right to within half a
-         modulo — 256 seconds — so this is exact in practice however sloppy the
-         host clock is. */
+         estimate above. Exact to the tick — but only once the right wrap is
+         chosen, and it is the host clock that chooses it. Get that wrong and
+         the error is a clean multiple of 512 s, not a small one.
+         `wrapMarginMs` is how far the host clock could have been out and still
+         have picked this wrap, so a caller can tell a comfortable choice from
+         a marginal one instead of reading `anchorUncertaintyMs: 0` as a
+         promise the host clock cannot make. */
       const low = ((unwrapped % this._modulo) + this._modulo) % this._modulo;
-      const base = Math.round((approxTicks - low) / this._modulo) * this._modulo;
+      const wraps = (approxTicks - low) / this._modulo;
+      const base = Math.round(wraps) * this._modulo;
       absoluteTicks = base + low;
+      wrapMarginMs = ((0.5 - Math.abs(wraps - Math.round(wraps))) * this._modulo) / TICKS_PER_MS;
     } else {
       /* No congruence to exploit: a Shimmer3's counter and its real-world clock
          differ by an offset only the device knows. The estimate is the answer,
@@ -380,7 +467,15 @@ export class StreamTimeline {
       unwrappedTicks: unwrapped,
       unixMs,
       hostMs: at,
-      uncertaintyMs: pending.uncertaintyMs,
+      /* An anchor request survives a stream restart, so the reading being
+         bound here can be hours old, and over hours the two clocks separate.
+         The aligned case is immune — the congruence re-derives the value from
+         the sample itself, and what age costs there is wrap margin, reported
+         above — but an estimated anchor carries the whole of that drift into
+         its offset. */
+      uncertaintyMs:
+        pending.uncertaintyMs + this._staleAnchorDriftMs(pending.kind, pending.hostMs, at),
+      wrapMarginMs,
       skewMs: unixMs - at,
     };
   }
@@ -399,6 +494,7 @@ export class StreamTimeline {
       anchorHostMs: this._anchor?.hostMs ?? null,
       anchorUnixMs: this._anchor?.unixMs ?? null,
       anchorUncertaintyMs: this._anchor?.uncertaintyMs ?? 0,
+      wrapMarginMs: this._anchor?.wrapMarginMs ?? null,
       skewMs: this._anchor?.skewMs ?? null,
       wraps: this._wraps,
       timestampBits: this._bits,
