@@ -266,7 +266,15 @@ export class Shimmer3Client extends BaseShimmerClient {
 
     this._emitStatus('Opening RFCOMM connection…');
     await t.connect();
-    this._emitStatus(`Connected: ${this._deviceLabel()}`);
+    /* Same reasoning as Shimmer3RClient: report the transport's own name when
+     * it has one, and do not let `_deviceLabel()`'s ObjectCluster fallback
+     * stand in for it. A Web Serial port has no name to report. */
+    const connected = this._transport?.deviceName ?? null;
+    this._emitStatus(
+      connected
+        ? `Connected: ${connected}`
+        : `Connected: an unnamed ${this._transport?.kind ?? 'serial'} port`,
+    );
 
     await this._handshake();
   }

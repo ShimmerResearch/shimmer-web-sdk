@@ -610,7 +610,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(overBle ? 'Requesting Bluetooth device…' : `Opening ${t.kind} link…`);
     await t.connect();
     if (t instanceof WebBluetoothTransport) this.device = t.device;
-    this._emitStatus(`Selected: ${this._deviceLabel()}`);
+    /* The name the transport actually supplied, and NO invented one where it
+     * supplied none. `_deviceLabel()` is not usable here: its fallback is the
+     * generation string, because ObjectCluster needs a stable identifier on
+     * every frame, and printing that produced `Selected: Shimmer3R` for a Web
+     * Serial port. That reads as the name from the chooser and is not one -
+     * Chrome's SerialPort exposes no name at all (getInfo() returns a
+     * Bluetooth service class, or USB ids, nothing identifying), so on that
+     * path the first honest identification of the sensor is its own MAC. */
+    const selected = this.device?.name ?? this._transport?.deviceName ?? null;
+    this._emitStatus(selected ? `Selected: ${selected}` : `Selected: an unnamed ${t.kind} port`);
     if (overBle) {
       this._emitStatus('GATT connected');
       this._emitStatus('RX/TX obtained');
