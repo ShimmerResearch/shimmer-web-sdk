@@ -211,6 +211,15 @@ export const SCALAR_CALIBRATORS: Readonly<Record<string, ScalarCalibrator>> = Ob
 // Pressure / temperature
 // ---------------------------------------------------------------------------
 
+/**
+ * `'Timestamp_Unix'` — Unix milliseconds per sample.
+ *
+ * Only present when the client's timeline has an anchor. The name is the one
+ * Consensys writes into its own exports, so a recording from either tool
+ * describes wall-clock time under the same header.
+ */
+export const UNIX_TIMESTAMP_NAME = 'Timestamp_Unix';
+
 /** `'PRESSURE'`, in kPa once compensated. */
 export const PRESSURE_NAME = 'PRESSURE';
 /** `'TEMPERATURE'`, in °C once compensated. */

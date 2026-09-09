@@ -20,6 +20,8 @@ import {
 } from '../exg/index.js';
 import { buildStreamSchema, type StreamSchemaBase } from './streamSchema.js';
 import { CHANNEL_UNITS } from '../../core/units.js';
+import { StreamTimeline, type TimelineState } from '../../core/StreamTimeline.js';
+import { UNIX_TIMESTAMP_NAME } from '../calibration/streamChannels.js';
 import {
   ADC_BITS,
   ADC_VREF_VOLTS,
@@ -522,6 +524,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   pressureOversampling = 0;
 
+  /**
+   * Unwraps the sample counter and, once anchored, places every sample on a
+   * wall clock. See `core/StreamTimeline.ts`.
+   *
+   * On a Shimmer3R the anchor is exact: the packet timestamp is the low 24 bits
+   * of the same counter `GET_RWC` reads, so one clock reading pins the whole
+   * stream to the tick.
+   */
+  private _timeline = new StreamTimeline({ timestampBits: 24 });
+
+  /**
+   * Whether {@link startStreaming} reads the real-world clock first, to place
+   * samples on a wall clock. Default true; one round trip.
+   */
+  anchorStreamClock = true;
+
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
@@ -772,6 +790,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._crcFailures = 0;
     this._sdKnownSession = null;
     this._resetCalibrationState();
+    this._timeline.reset();
   }
 
   /**
@@ -2303,6 +2322,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async getRtcTime(): Promise<{ ticks: bigint; unixMs: number }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    const hostBeforeMs = Date.now();
     const remainder = await this._writeExpectingAck(
       new Uint8Array([OPCODES.GET_RWC_COMMAND]),
       1500,
@@ -2324,7 +2344,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
     for (let i = 8; i >= 1; i--) {
       ticks = (ticks << 8n) | BigInt(rsp[i]);
     }
-    return { ticks, unixMs: Number(ticks) / 32.768 };
+    const unixMs = Number(ticks) / 32.768;
+    /* Anchor the stream timeline on the way past. The midpoint of the exchange
+       is the best single estimate of when the device composed its reply, and
+       the round trip is the uncertainty — neither matters for the aligned case,
+       where the sample's own counter value carries the answer, but both are
+       recorded so `timelineState` can report honestly either way. */
+    const hostAfterMs = Date.now();
+    this._timeline.anchorToRwc(ticks, (hostBeforeMs + hostAfterMs) / 2, {
+      rttMs: hostAfterMs - hostBeforeMs,
+      // The Shimmer3R's packet timestamp IS the low 24 bits of this counter
+      // (`Sensing/shimmer_sensing.c:445-476`, `RTC/shimmer_rtc.h:25-28`).
+      aligned: this.generation === 'shimmer3r',
+    });
+    return { ticks, unixMs };
   }
 
   /**
@@ -2348,6 +2381,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     cmd[0] = OPCODES.SET_RWC_COMMAND;
     cmd.set(msToRtcBytesLE(unixMs), 1);
     await this._writeExpectingAck(cmd, 1500);
+    /* The write steps the very counter the samples are timed by, so any anchor
+       taken before it is now void. Dropped rather than adjusted: the host knows
+       what it asked for but not what the device rounded it to, and a re-read is
+       one round trip. */
+    this._timeline.clearAnchor();
     this._emitStatus('RWC set');
   }
 
@@ -2884,6 +2922,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   override async startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
     this._beginStreamPlane();
     try {
@@ -2994,6 +3033,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Start streaming AND SD card logging simultaneously. */
   async startStreamingAndLogging(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    this._prepareStreamTimeline();
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
     this._beginStreamPlane();
     try {
@@ -3184,6 +3224,51 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
   // Streaming calibration
   // ---------------------------------------------------------------------------
+
+  /**
+   * `'Timestamp_Unix'` — Unix milliseconds per sample, when the timeline is
+   * anchored.
+   *
+   * Named for Consensys's own column so a CSV from this SDK and one from the
+   * desktop describe the same thing with the same header.
+   */
+  static readonly UNIX_TIMESTAMP_NAME = UNIX_TIMESTAMP_NAME;
+
+  /**
+   * Get the stream timeline ready, and anchor it if asked.
+   *
+   * Called before a stream starts, which is the right moment for two reasons:
+   * the counter's unwrap has to begin from this stream's first sample, and a
+   * clock reading taken now is as close as a host can get to the data it will
+   * time. One round trip, and a failure is not fatal — the timeline falls back
+   * to the host's own clock, which is what Consensys uses always.
+   */
+  private _prepareStreamTimeline(): void {
+    this._timeline.reset();
+    if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
+    /* Nobody has read the sensor's clock, so fall back to this host's — the
+       Consensys method, `SystemTimestampPlot.java:19-42`: the first sample is
+       taken to have happened now and the device's counter carries time forward
+       from there.
+
+       Deliberately NOT a `getRtcTime()` call. Spending a round trip inside
+       `startStreaming` would delay every stream, and on firmware that does not
+       answer the command it would delay it by a whole timeout — a cost the host
+       never asked for. A host that wants the sensor's own clock as the
+       reference calls `getRtcTime()` once, which anchors the timeline for the
+       rest of the session; reading the clock on connect, as a host generally
+       does anyway, is enough. */
+    this._timeline.anchorToHost(Date.now());
+    this._emitStatus(
+      "Stream clock anchored to this host's clock. Read the sensor's real-world " +
+        'clock (getRtcTime) for times taken from the sensor itself.',
+    );
+  }
+
+  /** Where the streamed wall-clock times come from, and how well. */
+  get timelineState(): TimelineState {
+    return this._timeline.state;
+  }
 
   /** The calibration state one decoded frame is converted against. */
   private _streamCalibrationState(): StreamCalibrationState {
@@ -3464,6 +3549,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
           oc.add('TIMESTAMP', ts, CHANNEL_UNITS.TICKS, 'raw');
+          /* The raw counter wraps every 512 s; the timeline unwraps it and, when
+             anchored, places it on a wall clock. Both go on the frame as
+             calibrated fields so a plot and a CSV can use them like any other. */
+          const stamped = this._timeline.stamp(ts, Date.now());
+          oc.add('TIMESTAMP', stamped.deviceMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          if (stamped.unixMs !== null) {
+            oc.add(UNIX_TIMESTAMP_NAME, stamped.unixMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          }
 
           for (const f of sch.fields) {
             if (cursor + f.sizeBytes > frame.length) {

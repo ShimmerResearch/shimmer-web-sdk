@@ -18,6 +18,9 @@ import {
   type CalibDump,
 } from '../calibration/index.js';
 import { CHANNEL_UNITS } from '../../core/units.js';
+import { StreamTimeline, TICKS_PER_MS, type TimelineState } from '../../core/StreamTimeline.js';
+import { UNIX_TIMESTAMP_NAME } from '../calibration/streamChannels.js';
+import { msToRtcBytesLE } from '../dock/protocol.js';
 import {
   ADC_BITS,
   ADC_VREF_VOLTS,
@@ -231,6 +234,16 @@ export class Shimmer3Client extends BaseShimmerClient {
    */
   pressureOversampling = 0;
 
+  /**
+   * Unwraps the sample counter and, once anchored, places every sample on a
+   * wall clock. The width follows the firmware: 16 bits — a 2-second wrap — on
+   * anything older than LogAndStream 0.5.4.
+   */
+  private _timeline = new StreamTimeline({ timestampBits: 24 });
+
+  /** Whether {@link startStreaming} reads the real-world clock first. */
+  anchorStreamClock = true;
+
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
@@ -376,6 +389,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._streamStarting = false;
       this.ExpPower = 0;
       this._resetCalibrationState();
+      this._timeline.reset();
       this._emitStatus('Disconnected');
     }
   }
@@ -640,6 +654,139 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._exgBanks = { exg1, exg2 };
     this._exgBanksSource = 'device';
     return { exg1, exg2 };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-world clock
+  // ---------------------------------------------------------------------------
+
+  /**
+   * True when this firmware serves the real-world-clock commands.
+   *
+   * The Java driver gates its own `readRealTimeClock` on LogAndStream with a
+   * firmware version code of 6 or more (`ShimmerBluetooth.java:2847-2853`), and
+   * this follows it. Older firmware answers nothing at all rather than NACKing,
+   * so asking costs a timeout — worth avoiding when the version already says.
+   */
+  get supportsRealWorldClock(): boolean {
+    if (this.firmwareVersion == null || this.deviceVersion == null) return false;
+    return (
+      deriveShimmer3FirmwareVersionCode(this.firmwareVersion, this.deviceVersion.hardwareVersion) >=
+      6
+    );
+  }
+
+  /**
+   * Read the device's real-world clock (GET_RWC → RWC_RESPONSE).
+   *
+   * **What a Shimmer3's real-world clock is, and why it is not the stream's
+   * timestamp.** The MSP430's counter cannot be set: it free-runs from boot.
+   * Setting the clock stores an offset instead, and the reply to this command
+   * is `rwcTimeDiff64 + RTC_get64()` — counter plus offset
+   * (`Shimmer_Driver/5xx_HAL/hal_RTC.c:73-76,85`). The offset itself never goes
+   * over Bluetooth, only into an SD-file header. So unlike a Shimmer3R, whose
+   * packet timestamp is the low 24 bits of this very value, a Shimmer3 leaves a
+   * host to estimate where the counter stood when the reply was composed. This
+   * anchors the stream timeline accordingly — `rwc-estimated`, carrying half
+   * the round trip as its uncertainty.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3 has answered this command through this
+   * SDK.
+   *
+   * @throws Error when not connected, while streaming, or when the firmware
+   *   does not serve the command.
+   */
+  async getRtcTime(
+    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<{ ticks: bigint; unixMs: number }> {
+    if (!this._transport) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot read the real-world clock while streaming');
+    this._assertRwcSupported('read');
+
+    const hostBeforeMs = Date.now();
+    await this._write(new Uint8Array([OPCODES.GET_RWC_COMMAND]));
+    const rsp = await this._waitForResponse(OPCODES.RWC_RESPONSE, timeoutMs);
+    if (rsp[0] !== OPCODES.RWC_RESPONSE || rsp.length < 9) {
+      throw new Error(`Malformed RWC response (${rsp.length} bytes).`);
+    }
+    let ticks = 0n;
+    for (let i = 8; i >= 1; i--) ticks = (ticks << 8n) | BigInt(rsp[i]);
+    const hostAfterMs = Date.now();
+
+    this._timeline.anchorToRwc(ticks, (hostBeforeMs + hostAfterMs) / 2, {
+      rttMs: hostAfterMs - hostBeforeMs,
+      // Never aligned on a Shimmer3: see the docblock above.
+      aligned: false,
+    });
+    return { ticks, unixMs: Number(ticks) / TICKS_PER_MS };
+  }
+
+  /**
+   * Set the device's real-world clock (SET_RWC) to a Unix millisecond time,
+   * encoded as 64-bit little-endian 32768 Hz ticks.
+   *
+   * A plain Unix epoch, as desktop Consensys and the dock driver both write.
+   * The firmware stores it as an offset from its free-running counter, so the
+   * stream's own timestamps do not move — but the mapping from them to wall
+   * time does, which is why any existing anchor is dropped.
+   *
+   * HARDWARE-VERIFY: not exercised against a real Shimmer3.
+   */
+  async setRtcTime(unixMs: number): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isFinite(unixMs)) throw new Error('setRtcTime: unixMs must be a finite number.');
+    this._assertRwcSupported('write');
+    const cmd = new Uint8Array(9);
+    cmd[0] = OPCODES.SET_RWC_COMMAND;
+    cmd.set(msToRtcBytesLE(unixMs), 1);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    this._timeline.clearAnchor();
+    this._emitStatus('RWC set');
+  }
+
+  private _assertRwcSupported(verb: 'read' | 'write'): void {
+    if (this.supportsRealWorldClock) return;
+    if (this.firmwareVersion == null || this.deviceVersion == null) {
+      throw new Error(
+        `Cannot ${verb} the real-world clock before the handshake has read the ` +
+          'firmware and device versions.',
+      );
+    }
+    const { major, minor, internal } = this.firmwareVersion;
+    throw new Error(
+      `This firmware does not serve the real-world-clock commands ` +
+        `(v${major}.${minor}.${internal}). They need a firmware version code of 6 ` +
+        'or more — LogAndStream 0.5.0 and later.',
+    );
+  }
+
+  /** Where the streamed wall-clock times come from, and how well. */
+  get timelineState(): TimelineState {
+    return this._timeline.state;
+  }
+
+  /**
+   * Get the stream timeline ready, and anchor it if asked. See
+   * `Shimmer3RClient._prepareStreamTimeline`; a Shimmer3's anchor is always the
+   * estimated kind.
+   */
+  private _prepareStreamTimeline(): void {
+    // The width is a firmware property the handshake has established by now:
+    // 16 bits, wrapping every 2 s, on anything older than LogAndStream 0.5.4.
+    this._timeline.setTimestampBits(this._timestampFmt === 'u16' ? 16 : 24);
+    this._timeline.reset();
+    if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
+    /* This host's clock, the Consensys method. No round trip is spent here —
+       see `Shimmer3RClient._prepareStreamTimeline` for why. A host wanting the
+       sensor's own clock as the reference calls {@link getRtcTime} once, which
+       needs LogAndStream 0.5.0 or later ({@link supportsRealWorldClock}). */
+    this._timeline.anchorToHost(Date.now());
+    this._emitStatus(
+      "Stream clock anchored to this host's clock" +
+        (this.supportsRealWorldClock
+          ? ". Read the sensor's real-world clock (getRtcTime) for times taken from the sensor itself."
+          : ' — this firmware has no real-world clock.'),
+    );
   }
 
   /**
@@ -1091,6 +1238,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    this._prepareStreamTimeline();
     // Stale buffered bytes (e.g. residual post-stop stream data) would desync
     // the ACK wait for START — drain to quiescence and discard them first. A
     // clean state (empty buffer) skips this entirely.
@@ -1209,6 +1357,13 @@ export class Shimmer3Client extends BaseShimmerClient {
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
           oc.add('TIMESTAMP', ts, CHANNEL_UNITS.TICKS, 'raw');
+          /* Unwrap the counter — every 2 s on older firmware, every 512 s on
+             newer — and place it on a wall clock when anchored. */
+          const stamped = this._timeline.stamp(ts, Date.now());
+          oc.add('TIMESTAMP', stamped.deviceMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          if (stamped.unixMs !== null) {
+            oc.add(UNIX_TIMESTAMP_NAME, stamped.unixMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          }
 
           for (const f of sch.fields) {
             let v: number;

@@ -422,3 +422,157 @@ describe('Shimmer3RClient — calibration provenance', () => {
     expect(client.calibrationInfo.exg.source).toBe('default');
   });
 });
+
+describe('Shimmer3RClient — real-world time on the stream', () => {
+  const unixMs = Date.UTC(2026, 8, 9, 12, 0, 0);
+  const rwcTicks = BigInt(Math.round(unixMs * 32.768));
+
+  /** A device that also answers GET_RWC with a fixed clock reading. */
+  function withClock(channelIds: number[]): LoopbackTransport {
+    // Replaces the base script's handler, so it re-answers the inquiry itself.
+    const t = scriptedDevice({ channelIds });
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      const reply = (data: number[]) => setTimeout(() => tr.notify(data), 0);
+      if (op === OPCODES.INQUIRY_COMMAND) {
+        reply([ACK, ...inquiry(channelIds)]);
+      } else if (op === OPCODES.GET_RWC_COMMAND) {
+        const le: number[] = [];
+        let v = rwcTicks;
+        for (let i = 0; i < 8; i++) {
+          le.push(Number(v & 0xffn));
+          v >>= 8n;
+        }
+        reply([ACK, OPCODES.RWC_RESPONSE, ...le]);
+      } else if (
+        op === OPCODES.START_STREAMING_COMMAND ||
+        op === OPCODES.STOP_STREAMING_COMMAND ||
+        op === OPCODES.SET_RWC_COMMAND
+      ) {
+        reply([ACK]);
+      }
+    });
+    return t;
+  }
+
+  it('emits an unwrapped device clock in ms, and no unix time before an anchor', async () => {
+    const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
+    const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
+    const client = new Shimmer3RClient({ transport: t, anchorStreamClock: false });
+    const received: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => received.push(oc);
+    await client.connect();
+    await client.inquiry();
+    client.anchorStreamClock = false;
+    await client.startStreaming();
+    t.notify(frame(640, payload));
+    t.notify(frame(1280, payload));
+    t.notify(frame(1920, payload));
+    await tick();
+
+    const oc = received[0];
+    // The raw counter is still there, in ticks.
+    expect(oc.get('TIMESTAMP', 'raw')!.value).toBe(640);
+    expect(oc.get('TIMESTAMP', 'raw')!.unit).toBe('ticks');
+    // And now a device clock in milliseconds, not zeroed at stream start.
+    expect(oc.get('TIMESTAMP', 'cal')!.value).toBeCloseTo(640 / 32.768, 9);
+    expect(oc.get('TIMESTAMP', 'cal')!.unit).toBe('ms');
+    // No wall clock without an anchor.
+    expect(oc.get('Timestamp_Unix', 'cal')).toBeNull();
+  });
+
+  it('places samples on the sensor’s own clock, exactly, once it has been read', async () => {
+    const t = withClock([0x0a, 0x0b, 0x0c]);
+    const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
+    const client = new Shimmer3RClient({ transport: t });
+    const received: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => received.push(oc);
+    await client.connect();
+    await client.readDeviceVersion().catch(() => null);
+    await client.inquiry();
+    await client.getRtcTime();
+
+    expect(client.timelineState.source).toBe('rwc-aligned');
+    // Exact: the packet timestamp is the low 24 bits of this very counter.
+    expect(client.timelineState.anchorUncertaintyMs).toBe(0);
+
+    await client.startStreaming();
+    // A sample whose counter value is the clock's own low bits, then one 640
+    // ticks later.
+    const low = Number(rwcTicks % BigInt(2 ** 24));
+    t.notify(frame(low, payload));
+    t.notify(frame((low + 640) % 2 ** 24, payload));
+    t.notify(frame((low + 1280) % 2 ** 24, payload));
+    await tick();
+
+    const first = received[0].get('Timestamp_Unix', 'cal')!;
+    expect(first.unit).toBe('ms');
+    expect(first.value).toBeCloseTo(unixMs, 3);
+    // The second sample is one sampling interval later, on the device's clock.
+    const second = received[1].get('Timestamp_Unix', 'cal')!;
+    expect(second.value - first.value).toBeCloseTo(640 / 32.768, 6);
+  });
+
+  it('falls back to this host’s clock when nobody read the sensor’s', async () => {
+    const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
+    const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
+    const before = Date.now();
+    const { client, received } = await connectAndStream(t, [
+      frame(640, payload),
+      frame(1280, payload),
+      frame(1920, payload),
+    ]);
+    expect(client.timelineState.source).toBe('host');
+    const unix = received[0].get('Timestamp_Unix', 'cal')!.value;
+    expect(unix).toBeGreaterThanOrEqual(before);
+    expect(unix).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('does not spend a round trip on the clock inside startStreaming', async () => {
+    // A device that never answers GET_RWC must not make starting a stream wait
+    // for a timeout. Nothing here scripts 0xA7 or 0x91.
+    const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
+    const client = new Shimmer3RClient({ transport: t });
+    await client.connect();
+    await client.inquiry();
+    const started = Date.now();
+    await client.startStreaming();
+    expect(Date.now() - started).toBeLessThan(300);
+    expect(client.timelineState.source).toBe('host');
+  });
+
+  it('re-anchors after the clock is written, so the axis follows the new time', async () => {
+    const t = withClock([0x0a, 0x0b, 0x0c]);
+    const client = new Shimmer3RClient({ transport: t });
+    await client.connect();
+    await client.inquiry();
+    await client.getRtcTime();
+    expect(client.timelineState.source).toBe('rwc-aligned');
+    // Writing the clock steps the counter the samples are timed by.
+    await client.setRtcTime(Date.now());
+    expect(client.timelineState.source).toBeNull();
+  });
+
+  it('unwraps the counter, so a stream across the 512 s boundary is monotonic', async () => {
+    const t = withClock([0x0a, 0x0b, 0x0c]);
+    const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
+    const client = new Shimmer3RClient({ transport: t });
+    const received: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => received.push(oc);
+    await client.connect();
+    await client.inquiry();
+    await client.startStreaming();
+    const MOD = 2 ** 24;
+    for (let i = 0; i < 6; i++) t.notify(frame((MOD - 3 * 640 + i * 640) % MOD, payload));
+    await tick();
+
+    expect(received.length).toBeGreaterThanOrEqual(4);
+    const ms = received.map((oc) => oc.get('TIMESTAMP', 'cal')!.value);
+    for (let i = 1; i < ms.length; i++) {
+      // The raw counter went back to zero partway through; the device clock
+      // must not.
+      expect(ms[i], `sample ${i}`).toBeGreaterThan(ms[i - 1]);
+    }
+    expect(client.timelineState.wraps).toBe(1);
+  });
+});
