@@ -129,12 +129,18 @@ the link itself works perfectly well.
 
   client.onStatus = (msg) => console.log('[status]', msg);
   client.onStreamFrame = (oc) => {
-    const gz = oc.get('GYRO_Z', 'raw')?.value;
-    console.log('GYRO_Z =', gz);
+    // Every channel carries a raw count and, where a conversion exists, a
+    // calibrated value with its unit. Ask for the one you want.
+    const gz = oc.get('GYRO_Z', 'cal'); // { value: 12.4, unit: 'deg/s' }
+    const batt = oc.get('BATTERY', 'cal'); // { value: 3841.2, unit: 'mV' }
+    const t = oc.get('Timestamp_Unix', 'cal')?.value; // epoch ms, once anchored
+    const when = t == null ? '(unanchored)' : new Date(t).toISOString();
+    console.log(when, gz?.value, gz?.unit, batt?.value);
   };
 
   document.getElementById('btnConnect').addEventListener('click', async () => {
     await client.connect();
+    await client.getRtcTime(); // one reading pins the whole session to a wall clock
     await client.setSamplingRate(51.2);
     await client.setSensors(SensorBitmapShimmer3.SENSOR_GYRO | SensorBitmapShimmer3.SENSOR_A_ACCEL);
     await client.startStreaming();
@@ -157,6 +163,49 @@ the link itself works perfectly well.
   });
 </script>
 ```
+
+## Calibrated Streaming
+
+Every channel a Shimmer3 or Shimmer3R streams reaches `onStreamFrame` twice: as
+a raw converter count, and — where a conversion exists — as a calibrated value
+carrying its unit. `oc.get(name, 'raw' | 'cal')` picks one; `oc.fields` walks
+them all.
+
+| Family                       | Unit                             | Notes                                                                                                                               |
+| ---------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Inertial (6 triples)         | `m/(s^2)`, `deg/s`, `local_flux` | Uses the device's own calibration once `applyCalibDump()` or `readCalibration()` has run; the range's factory seed otherwise        |
+| Battery                      | `mV`                             | ADC millivolts × 2, the board's divider                                                                                             |
+| External / internal ADC, PPG | `mV`                             | `raw × 3000 / 4095` — 12-bit at 3.0 V on **both** generations                                                                       |
+| Bridge amplifier HIGH / LOW  | `mV`                             | Shimmer3 with an SR49 board                                                                                                         |
+| ExG CH1 / CH2, both chips    | `mV`                             | From the chip's own reference and PGA gain; 16-bit mode is bits 22:7 of the 24-bit conversion, so its divisor carries a factor of 2 |
+| ExG status                   | `no_units`                       | The lead-off register, relayed untouched                                                                                            |
+| GSR                          | `uS`                             | Plus `GSR_RESISTANCE` in `kOhms` and `GSR_RANGE`, both calibrated-only                                                              |
+| Pressure / temperature       | `kPa`, `Degrees Celsius`         | Needs `readPressureCalibration()` first; a BMP581 self-compensates and needs nothing                                                |
+| `TIMESTAMP`                  | `ticks` raw, `ms` calibrated     | Unwrapped, not zeroed at stream start — the Java driver's convention                                                                |
+| `Timestamp_Unix`             | `ms`                             | Epoch milliseconds, present once the timeline is anchored                                                                           |
+
+Three rules worth knowing before reading the numbers:
+
+- **A channel with no conversion gets no `'cal'` field at all**, rather than a
+  copy of the raw count. A raw-only column is honest; one claiming a
+  calibration it does not have is not.
+- **Pressure and temperature are raw-only until the coefficients are fetched.**
+  `readPressureCalibration()` returns `null` rather than throwing when the
+  firmware predates the command, and says so through `onStatus`.
+- **The device's inertial calibration is adopted explicitly.** `readCalibDump()`
+  hands back a dump for inspection; `applyCalibDump(dump)` is what makes the
+  stream use it. Which numbers are in force, per group and per range, is what
+  `calibrationInfo` reports.
+
+`client.timelineState` says how absolute time was fixed: `rwc-aligned` (exact,
+Shimmer3R — its packet timestamp is the low 24 bits of the same counter
+`GET_RWC` returns), `rwc-estimated` (Shimmer3, from the request round trip, with
+the uncertainty stated), or `host` (no device clock; the Consensys method).
+
+`devices/calibration/streamChannels.ts` is the single table behind all of it, so
+the two platforms cannot drift apart on a formula, and
+`devices/shimmer3/sensorRules.ts` answers the configuration-side question of
+which sensors can be enabled together and which need the expansion rail.
 
 ## Pluggable Transports
 
@@ -320,11 +369,15 @@ model and is a later phase).
 - **VER payload width.** The parser accepts both the 7-byte (1-byte HW version)
   and 8-byte (2-byte HW version) layouts; which a given docked firmware returns
   needs confirming on hardware.
-- **Battery semantics.** Voltage (ADC → V via the shared U12 calibration ×1.988
-  divider) and the 4th-order charge-% polynomial are ported exactly, but the
+- **Battery semantics.** Voltage (ADC → V via the shared U12 calibration, then
+  the divider) and the 4th-order charge-% polynomial are ported exactly, but the
   charging-status byte values (`0xC0`/`0x40`/`0x80`/`0x00`/`0xFF`) and the
   percentage curve should be sanity-checked against a docked device across
-  charge states.
+  charge states. Note this path keeps Java's ×1.988 divider, where the streamed
+  `BATTERY` channel uses the firmware's own ×2 — 0.6% apart. The charge-%
+  polynomial was fitted against the 1.988 figure, so changing it here would move
+  the reported percentage; the two are deliberately not unified until a docked
+  device has been measured.
 - **Expansion-board / MAC byte order.** MAC is emitted in device byte order
   (first 6 payload bytes, no reversal, per the Java); the daughter-card ID is
   read as `[boardId, boardRev, specialRev]`. Confirm against known hardware.
@@ -534,12 +587,28 @@ src/
     types.ts                   ← shared interfaces (IShimmerClient, SensorField…)
     ObjectCluster.ts            ← sensor data frame container
     BaseShimmerClient.ts        ← abstract base class
+    units.ts                    ← CHANNEL_UNITS — the Java driver's unit strings
+    StreamTimeline.ts           ← counter unwrap + wall-clock anchoring
     transport/                  ← pluggable byte-pipe layer
       types.ts                  ← ShimmerTransport interface + capabilities
       WebBluetoothTransport.ts  ← Web Bluetooth GATT transport (default web)
       WebSerialTransport.ts     ← Web Serial (USB) transport
       LoopbackTransport.ts      ← in-memory transport for tests
   devices/
+    calibration/
+      streamChannels.ts         ← the one per-channel conversion table
+      gsr.ts                    ← GSR µS / kΩ / range, shared by both clients
+      sensorIds.ts              ← SC_SENSOR ids, dump → per-group calibration
+    pressure/                   ← Bosch BMP180 / 280 / 390 / 581 compensation
+      response.ts               ← the 0xA7 reply, coefficient parsers
+      compensate.ts             ← raw registers → kPa and °C
+    exg/
+      registers.ts              ← ADS1292R register codec
+      calibration.ts            ← reference voltage and PGA gain → mV factor
+    shimmer3/
+      Shimmer3Client.ts         ← classic Bluetooth / unframed byte stream
+      sensorRules.ts            ← conflicts, expansion power, board gating
+      protocol.ts               ← control-message framing, firmware gates
     shimmer3r/
       Shimmer3RClient.ts        ← main BLE client class
       constants.ts              ← opcodes, UUIDs, defaults
