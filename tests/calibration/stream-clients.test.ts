@@ -458,7 +458,7 @@ describe('Shimmer3RClient — real-world time on the stream', () => {
   it('emits an unwrapped device clock in ms, and no unix time before an anchor', async () => {
     const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
     const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
-    const client = new Shimmer3RClient({ transport: t, anchorStreamClock: false });
+    const client = new Shimmer3RClient({ transport: t });
     const received: ObjectCluster[] = [];
     client.onStreamFrame = (oc) => received.push(oc);
     await client.connect();

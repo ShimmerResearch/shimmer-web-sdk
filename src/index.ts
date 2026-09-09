@@ -681,6 +681,132 @@ export type {
   CalibReadSource,
 } from './devices/calibration/index.js';
 
+// The unit vocabulary every calibrated field is labelled with — the Java
+// driver's own CHANNEL_UNITS strings, so a recording from this SDK and one from
+// Consensys describe the same signal with the same word.
+export { CHANNEL_UNITS } from './core/units.js';
+export type { ChannelUnit } from './core/units.js';
+
+// Per-channel streaming calibration: every channel a Shimmer3/Shimmer3R can
+// send, converted to engineering units. The clients call this themselves; it is
+// exported for a host that decodes frames some other way, and for the
+// provenance types `calibrationInfo` reports.
+export {
+  calibrateStreamFrame,
+  SCALAR_CALIBRATORS,
+  ADC_VREF_VOLTS,
+  ADC_BITS,
+  BATTERY_DIVIDER_RATIO,
+  PRESSURE_NAME,
+  TEMPERATURE_NAME,
+  UNIX_TIMESTAMP_NAME,
+} from './devices/calibration/streamChannels.js';
+export type {
+  StreamCalibrationState,
+  StreamCalibrationInfo,
+  StreamCalibrationSource,
+  ExgCalibrationSource,
+} from './devices/calibration/streamChannels.js';
+
+// GSR: one raw word to resistance, conductance and the range that produced it.
+export {
+  calibrateGsrSample,
+  calibrateGsrChannel,
+  gsrRangeForSample,
+  GSR_RESISTANCE_NAME,
+  GSR_RANGE_NAME,
+} from './devices/calibration/gsr.js';
+export type { CalibratedGsr } from './devices/calibration/gsr.js';
+
+// The firmware's own calibration-domain sensor ids, and dump → group mapping.
+export {
+  SC_SENSOR,
+  SC_SENSOR_NAMES,
+  CALIB_SENSOR_ID_BY_GROUP,
+  calibSensorIdForGroup,
+  groupForCalibSensorId,
+  selectDumpCalibrations,
+} from './devices/calibration/sensorIds.js';
+export type { DumpCalibrationsByGroup } from './devices/calibration/sensorIds.js';
+
+// Pressure and temperature: the four Bosch parts, their factory trim, and the
+// compensation the firmware leaves to the host.
+export {
+  parseBmp180Coefficients,
+  compensateBmp180,
+  parseBmp280Coefficients,
+  compensateBmp280,
+  parseBmp390Coefficients,
+  compensateBmp390,
+  compensateBmp581,
+  parsePressureCalibrationResponse,
+  compensatePressure,
+  PRESSURE_SENSOR_ID,
+  PRESSURE_SENSOR_ID_BY_KIND,
+  PRESSURE_COEFFICIENT_BYTES,
+  PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD,
+} from './devices/pressure/index.js';
+export type {
+  PressureSensorKind,
+  PressureCalibration,
+  PressureCoefficients,
+  CompensatedPressure,
+  Bmp180Coefficients,
+  Bmp280Coefficients,
+  Bmp390Coefficients,
+} from './devices/pressure/index.js';
+
+// Unwrapping the sample counter, and placing samples on a wall clock. Usable on
+// its own by a host that decodes frames itself.
+export { StreamTimeline, TICKS_PER_SECOND, TICKS_PER_MS } from './core/StreamTimeline.js';
+export type {
+  StreamStamp,
+  TimelineState,
+  TimelineSource,
+  TimestampBits,
+  StreamTimelineOptions,
+} from './core/StreamTimeline.js';
+
+// Which sensors can be enabled together, which need the expansion rail, and
+// which need a particular board. Pure, so a configuration editor can consult it
+// against an image it has not written yet.
+export {
+  applySensorToggle,
+  checkSensorRules,
+  deriveExpPower,
+  describeSensorRules,
+  sensorAvailability,
+  sensorConflicts,
+  requiresExpansionPower,
+  sensorRuleLabel,
+  sensorRuleMask,
+  SENSOR_RULE_CONFLICTS,
+  SR_BOARD,
+  EXG_ANY_MASK,
+} from './devices/shimmer3/sensorRules.js';
+export type {
+  SensorRuleKey,
+  SensorRuleState,
+  SensorRuleCheck,
+  SensorRuleChange,
+  SensorRuleViolation,
+  SensorToggleResult,
+  SensorAvailability,
+  SensorRuleDescription,
+  SensorGate,
+} from './devices/shimmer3/sensorRules.js';
+
+// ExG counts to millivolts, with the gain and reference read out of the chip's
+// own register bank.
+export {
+  EXG_VREF_VOLTS,
+  exgChannelMillivoltFactor,
+  calibrateExgSample,
+  summariseExgCalibration,
+  summariseExgBanks,
+} from './devices/exg/calibration.js';
+export type { ExgSampleResolution, ExgCalibrationSummary } from './devices/exg/calibration.js';
+
 // Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
 export {
   SDLOG_HW_ID,
