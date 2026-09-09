@@ -2,14 +2,7 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
-import {
-  OPCODES,
-  BT_FEATURE,
-  SHIMMER3R_DEFAULTS,
-  GSR_NAME,
-  GSR_UNCAL_LIMIT_RANGE3,
-  type TimestampFmt,
-} from './constants.js';
+import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './constants.js';
 import { CRC_MODE, crcTrailerBytes, isCrcMode, verifyCrc, type CrcMode } from './crcMode.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
 import {
@@ -26,11 +19,20 @@ import {
   type ExgResolution,
 } from '../exg/index.js';
 import { buildStreamSchema, type StreamSchemaBase } from './streamSchema.js';
+import { CHANNEL_UNITS } from '../../core/units.js';
 import {
-  calibrateGsrDataToResistanceFromAmplifierEq,
-  nudgeGsrResistance,
-  getOversamplingRatioADS1292R,
-} from './calibration.js';
+  ADC_BITS,
+  ADC_VREF_VOLTS,
+  calibrateStreamFrame,
+  type StreamCalibrationInfo,
+  type StreamCalibrationSource,
+  type StreamCalibrationState,
+} from '../calibration/streamChannels.js';
+import { selectDumpCalibrations, type DumpCalibrationsByGroup } from '../calibration/sensorIds.js';
+import { summariseExgBanks } from '../exg/calibration.js';
+import type { ExgBanks } from '../exg/knobs.js';
+import { parsePressureCalibrationResponse, type PressureCalibration } from '../pressure/index.js';
+import { getOversamplingRatioADS1292R } from './calibration.js';
 import {
   concatU8,
   u16le,
@@ -80,9 +82,9 @@ import {
   DECLARED_LENGTH_RESPONSE_CAPS,
 } from './streamFraming.js';
 import {
-  applyStreamingCalibration,
   parseKinematicCalibBlock,
   getGroupDefaults,
+  getDefaultCalibration,
   parseCalibDump,
   MAX_CALIB_DUMP_BYTES,
   type StreamingImuRanges,
@@ -468,10 +470,57 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** When false, inertial channels are emitted raw-only (no `'cal'` field). Default true. */
   emitCalibratedInertial = true;
   /**
-   * Device calibrations fetched via {@link readCalibration}. These override the
-   * range-selected defaults (calibration source-priority ladder).
+   * The kinematic calibration actually applied to each streamed inertial group:
+   * whichever of the dump and the per-sensor commands won, at the range now
+   * configured. Recomputed by {@link _reselectDeviceCalibrations}; a group
+   * absent here streams against its range-selected default.
    */
   private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
+
+  /**
+   * Every usable block from the calibration dump, by group and range
+   * ({@link applyCalibDump}). Kept whole rather than flattened because the
+   * configured range changes while a host is connected, and the dump covers
+   * ranges that are not currently selected.
+   */
+  private _dumpCalibrations: DumpCalibrationsByGroup = {};
+
+  /**
+   * Blocks fetched by {@link readCalibration}, with the range each was read at.
+   *
+   * The per-sensor commands answer for the *currently configured* range only
+   * and do not say which that was, so the range in force at read time is
+   * recorded with them. Once a range setter runs, a block read at the old range
+   * no longer describes the sensor and is dropped rather than misapplied.
+   */
+  private _btCommandCalibrations: Partial<
+    Record<InertialGroup, { cal: KinematicCalibration; range: number }>
+  > = {};
+
+  /**
+   * Both ExG chips' register banks, when a host has read them. The millivolt
+   * conversion needs the PGA gain and the reference voltage out of these; with
+   * `null` the chip defaults are assumed (gain 6, 2.42 V).
+   */
+  private _exgBanks: ExgBanks | null = null;
+
+  /** Where {@link _exgBanks} came from, for {@link calibrationInfo}. */
+  private _exgBanksSource: 'device' | 'infomem' | null = null;
+
+  /**
+   * The fitted pressure part and its factory trim
+   * ({@link readPressureCalibration}). Without it PRESSURE and TEMPERATURE
+   * stream raw-only — a Bosch compensation against a blank block returns a
+   * confident, wrong pressure.
+   */
+  private _pressureCalibration: PressureCalibration | null = null;
+
+  /**
+   * Configured pressure oversampling, 0-3, from the inquiry's config word.
+   * Only the BMP180 uses it, and there it is part of the pressure maths rather
+   * than a scale applied afterwards.
+   */
+  pressureOversampling = 0;
 
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
@@ -722,6 +771,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._crcMode = CRC_MODE.OFF;
     this._crcFailures = 0;
     this._sdKnownSession = null;
+    this._resetCalibrationState();
+  }
+
+  /**
+   * Forget everything read off the device about how to calibrate it.
+   *
+   * Per link, and in the same place as the rest of the per-link state: a
+   * calibration belongs to the device that answered, and carrying one across a
+   * reconnect would calibrate a different sensor's data with it. The
+   * configured ranges are deliberately NOT reset here — they are refreshed by
+   * the next inquiry, which every connect performs.
+   */
+  private _resetCalibrationState(): void {
+    this._deviceCalibrations = {};
+    this._dumpCalibrations = {};
+    this._btCommandCalibrations = {};
+    this._exgBanks = null;
+    this._exgBanksSource = null;
+    this._pressureCalibration = null;
   }
 
   /** Handle an unexpected transport disconnect (the link dropped under us). */
@@ -1230,7 +1298,99 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const ackRemainder = await this._writeExpectingAck(cmd, 1500);
     this._emitStatus('SET_GYRO_RANGE (ACK received).');
     this.imuRanges = { ...this.imuRanges, gyro: gyroRange };
+    this._reselectDeviceCalibrations();
     return { gyroRange, ackRemainder };
+  }
+
+  /**
+   * Set the alternative magnetometer (LIS3MDL) range on a Shimmer3R.
+   *
+   * The command is `SET_MAG_GAIN` (0x37) — the same opcode a Shimmer3 uses for
+   * its own magnetometer range, which the Shimmer3R firmware routes to
+   * `altMagRange` (`Comms/shimmer_bt_uart.c`, the `SET_MAG_GAIN` case). The
+   * setting reads back in the inquiry's ConfigSetupByte2 bits 5-7.
+   *
+   * Worth having for calibration rather than for configuration: the LIS3MDL's
+   * four ranges have sensitivities 6842/3421/2281/1711 LSB/gauss, so streaming
+   * an alt-mag channel against the wrong one is out by up to a factor of four.
+   *
+   * @param range 0 = ±4, 1 = ±8, 2 = ±12, 3 = ±16 gauss.
+   */
+  async setAltMagRange(
+    range: number,
+  ): Promise<{ altMagRange: number; ackRemainder: Uint8Array | null }> {
+    if (!Number.isInteger(range) || range < 0 || range > 3) {
+      throw new Error('altMagRange must be 0–3 (±4/8/12/16 Ga)');
+    }
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+
+    const cmd = new Uint8Array([OPCODES.SET_MAG_GAIN_COMMAND, range & 0xff]);
+    this._emitStatus('SET_MAG_GAIN (alt mag range) → waiting for ACK…');
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    this._emitStatus('SET_MAG_GAIN (ACK received).');
+    this.imuRanges = { ...this.imuRanges, altMag: range };
+    this._reselectDeviceCalibrations();
+    return { altMagRange: range, ackRemainder };
+  }
+
+  /**
+   * Read the fitted pressure sensor's identity and its factory trim
+   * coefficients, so PRESSURE and TEMPERATURE can be streamed in kPa and °C.
+   *
+   * `GET_PRESSURE_CALIBRATION_COEFFICIENTS` (0xA7) answers
+   * `[0xA6][1 + n][sensorId][coeffs × n]`
+   * (`log-and-stream-common/Comms/shimmer_bt_uart.c:2064-2099`). One round trip,
+   * and the answer cannot change while the link is up — the part is soldered
+   * down — so a host calls this once, on connect.
+   *
+   * **A refusal is not an error.** Firmware older than the command NACKs it, and
+   * older still does not answer at all; either way the honest outcome is that
+   * these two channels stream raw-only, which this reports through
+   * {@link onStatus} and by returning `null`. Throwing would make a host choose
+   * between failing a whole connect over an optional capability and swallowing
+   * every pressure fault alike. A BMP581 answering with its id and no
+   * coefficients is a **success**: it compensates on-chip, and the firmware
+   * sends the id in-band precisely so a host can tell that from a NACK.
+   *
+   * HARDWARE-VERIFY: no real sensor has answered this command through this SDK.
+   * The reply shape is read from the firmware source and pinned by tests
+   * against a scripted device.
+   *
+   * @throws Error only when not connected.
+   */
+  async readPressureCalibration(timeoutMs = 2000): Promise<PressureCalibration | null> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    try {
+      const payload = await this._readLengthPrefixedResponse(
+        new Uint8Array([OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND]),
+        OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE,
+        'declared',
+        'Pressure calibration read',
+        1,
+        1500,
+        timeoutMs,
+      );
+      const calibration = parsePressureCalibrationResponse(payload);
+      this._pressureCalibration = calibration;
+      this._emitStatus(
+        calibration.calibrated
+          ? `Pressure sensor ${calibration.sensor}: ${
+              calibration.coefficients
+                ? 'coefficients loaded'
+                : 'pre-compensated, no coefficients needed'
+            }.`
+          : `Pressure sensor ${calibration.sensor} returned a blank coefficient block; ` +
+              'PRESSURE and TEMPERATURE stream raw-only.',
+      );
+      return calibration;
+    } catch (err: unknown) {
+      this._pressureCalibration = null;
+      this._emitStatus(
+        'This firmware does not serve GET_PRESSURE_CALIBRATION_COEFFICIENTS (0xA7), so ' +
+          `PRESSURE and TEMPERATURE stream raw-only (${(err as Error).message}).`,
+      );
+      return null;
+    }
   }
 
   getInternalExpPower(): number {
@@ -1887,7 +2047,36 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async readInfoMemConfig(): Promise<InfoMemDeviceConfig> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const ctx = await this._infoMemCtx();
-    return parseInfoMem(await this._readInfoMemBytesImpl(ctx), ctx);
+    const config = parseInfoMem(await this._readInfoMemBytesImpl(ctx), ctx);
+    this._adoptConfigForCalibration(config);
+    return config;
+  }
+
+  /**
+   * Take from a configuration image the few settings the streaming conversion
+   * depends on.
+   *
+   * A side effect on a read, which is worth justifying: without it a host that
+   * reads the image — which every connect does — still converts ExG counts
+   * against the chip's default gain, because the stored banks are the only
+   * statement of it available before a stream starts and `readExgConfig`
+   * cannot run during one. The values are the device's own; nothing here
+   * overrides something a host set more recently, because the image IS what the
+   * host would have set.
+   *
+   * The ExG banks are marked as coming from the image rather than the chip:
+   * the firmware forces some bits at sensing start (`CLK_EN` where the clock
+   * lines are tied), so a bank read back from the chip can differ from the
+   * stored one, and {@link calibrationInfo} says which a host is looking at.
+   */
+  private _adoptConfigForCalibration(config: InfoMemDeviceConfig): void {
+    if (config.exg1?.length === EXG_BANK_LENGTH && config.exg2?.length === EXG_BANK_LENGTH) {
+      // A bank read from the chip itself is the better source; do not demote it.
+      if (this._exgBanksSource !== 'device') {
+        this._exgBanks = { exg1: config.exg1, exg2: config.exg2 };
+        this._exgBanksSource = 'infomem';
+      }
+    }
   }
 
   /**
@@ -2187,6 +2376,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
     const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
     const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    /* Cache for the streaming conversion: the millivolt factor needs the PGA
+       gain and the reference voltage, and this is the authoritative answer for
+       both — the chip's own registers rather than what the stored image says
+       they should be. */
+    this._exgBanks = { exg1, exg2 };
+    this._exgBanksSource = 'device';
     return { exg1, exg2 };
   }
 
@@ -2422,13 +2617,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
       try {
         const cal = await this._readOneCalibration(group, get, resp, timeoutMs);
         if (cal) {
-          this._deviceCalibrations[group] = cal;
+          /* With the range it was read at: these commands answer for the
+             CONFIGURED range and do not say which that was, so the block stops
+             applying the moment a range setter runs. */
+          this._btCommandCalibrations[group] = { cal, range: this.imuRanges[group] };
           done.push(group);
         }
       } catch (err: unknown) {
         this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
       }
     }
+    this._reselectDeviceCalibrations();
     return done;
   }
 
@@ -2895,7 +3094,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     //   gyro (LSM6DSV): LSB setup2 bits 0-1 (cfg bits 16-17) + MSB setup4 bit 2
     //     (cfg bit 34) → 6 ranges (0-5)
     //   LN accel (LSM6DSV): setup3 bits 6-7 → cfg bits 30-31
-    // mag/alt-accel/alt-mag are single-range or not carried here → 0.
+    //   alt mag (LIS3MDL): setup2 bits 5-7 → cfg bits 21-23
+    // The LIS2MDL magnetometer and the ADXL371 high-g accel are single-range
+    // parts, so 0 is not a placeholder for them — it is their only range.
     const gyroLsb = Number((cfg >> 16n) & 0x3n);
     const gyroMsb = Number((cfg >> 34n) & 0x1n);
     this.imuRanges = {
@@ -2904,8 +3105,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
       gyro: gyroLsb | (gyroMsb << 2),
       mag: 0,
       altAccel: 0,
-      altMag: 0,
+      altMag: Number((cfg >> 21n) & 0x7n),
     };
+    /* Pressure oversampling: ConfigSetupByte3 bits 4-5 → cfg bits 28-29, plus
+       the MSB at ConfigSetupByte4 bit 0 → cfg bit 32 for the BMP390/BMP581's
+       wider ladder (schema keys `pressureOversampling.bmpX80` and
+       `.bmp390_581`). The BMP180 is the only part whose compensation consumes
+       it, and there it is part of the maths rather than a later scale. */
+    this.pressureOversampling = Number((cfg >> 28n) & 0x3n) | (Number((cfg >> 32n) & 0x1n) << 2);
+    // The ranges just moved, so re-pick which stored block applies to each group.
+    this._reselectDeviceCalibrations();
 
     const bufSize = u8[base + 10];
     const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
@@ -2973,41 +3182,145 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // GSR calibration (applied inline during stream parsing)
+  // Streaming calibration
   // ---------------------------------------------------------------------------
 
+  /** The calibration state one decoded frame is converted against. */
+  private _streamCalibrationState(): StreamCalibrationState {
+    return {
+      generation: this.generation,
+      family: 'shimmer3r',
+      ranges: this.imuRanges,
+      device: this._deviceCalibrations,
+      emitInertial: this.emitCalibratedInertial,
+      gsrRange: this.gsrRangeSetting,
+      exg: this._exgBanks,
+      pressure: this._pressureCalibration,
+      pressureOversampling: this.pressureOversampling,
+    };
+  }
+
+  /**
+   * Add a calibrated field, with a unit, for every channel in the frame this
+   * SDK can convert. See `devices/calibration/streamChannels.ts` for the
+   * per-channel table and where each formula comes from.
+   */
   private _calibrateData(oc: ObjectCluster): void {
-    const snapshot = [...oc.fields];
-    for (const field of snapshot) {
-      if (field.name === GSR_NAME) {
-        const rawField = oc.get(GSR_NAME, 'raw');
-        const gsrraw = rawField?.value ?? null;
-        if (gsrraw === null) continue;
+    calibrateStreamFrame(oc, this._streamCalibrationState());
+  }
 
-        let adc12 = gsrraw & 0x0fff;
-        let currentRange = this.gsrRangeSetting;
-        if (currentRange === 4) {
-          currentRange = (gsrraw >> 14) & 0x03;
-        }
-        if (currentRange === 3 && adc12 < GSR_UNCAL_LIMIT_RANGE3) {
-          adc12 = GSR_UNCAL_LIMIT_RANGE3;
-        }
-        let gsrkOhm = calibrateGsrDataToResistanceFromAmplifierEq(adc12, currentRange);
-        gsrkOhm = nudgeGsrResistance(gsrkOhm, this.gsrRangeSetting);
-        const gsrConductanceUSiemens = (1.0 / gsrkOhm) * 1000;
-        oc.add(GSR_NAME, gsrConductanceUSiemens, 'uSiemens', 'cal');
+  /**
+   * Re-pick which stored calibration applies to each inertial group, now.
+   *
+   * Runs whenever the inputs move: an inquiry (which refreshes every range), a
+   * range setter, a dump adoption, or a per-sensor calibration read. The dump
+   * wins over the per-sensor commands where both cover a group, which is the
+   * calibration source-priority ladder's own ordering
+   * (`CALIB_READ_SOURCE`: `RADIO_DUMP` outranks `LEGACY_BT_COMMAND`).
+   *
+   * A block read by the per-sensor commands is dropped once the range moves
+   * away from the one it was read at: those commands answer for the configured
+   * range without saying which it was, so after a range change the block
+   * describes a scale the sensor is no longer using. Falling back to that
+   * range's default is the safer of the two wrong answers, and the only honest
+   * one.
+   */
+  private _reselectDeviceCalibrations(): void {
+    const next: Partial<Record<InertialGroup, KinematicCalibration>> = {};
+    const groups = Object.keys(this.imuRanges) as InertialGroup[];
+    for (const group of groups) {
+      const range = this.imuRanges[group];
+      const fromDump = this._dumpCalibrations[group]?.[range];
+      if (fromDump) {
+        next[group] = fromDump;
+        continue;
       }
+      const fromCommand = this._btCommandCalibrations[group];
+      if (fromCommand && fromCommand.range === range) next[group] = fromCommand.cal;
     }
+    this._deviceCalibrations = next;
+  }
 
-    // Inertial calibration (accel/gyro/mag/alt): device calibration from
-    // readCalibration() when available, else the range-selected default.
-    if (this.emitCalibratedInertial) {
-      applyStreamingCalibration(oc, {
-        family: 'shimmer3r',
-        ranges: this.imuRanges,
-        device: this._deviceCalibrations,
-      });
+  /**
+   * Take the calibration a device just handed over as a dump and use it for
+   * streaming.
+   *
+   * `readCalibDump()` returns the bytes and the parsed records but changes no
+   * client state, because a dump is also the thing a host edits and writes
+   * back — adopting every dump that passed through would mean a host could not
+   * inspect one without changing how its data is calibrated. So adoption is
+   * this separate step, and a host calls it for a dump that came off the
+   * device it is streaming from (not for one loaded from a file, which is a
+   * candidate for writing rather than a statement about this sensor).
+   *
+   * Blocks the dump holds for ranges other than the configured ones are kept,
+   * so a later range change re-selects without another read.
+   *
+   * @returns the groups this dump supplied a usable block for, at any range.
+   */
+  applyCalibDump(dump: CalibDump): InertialGroup[] {
+    this._dumpCalibrations = selectDumpCalibrations(dump, 'shimmer3r');
+    this._reselectDeviceCalibrations();
+    const groups = Object.keys(this._dumpCalibrations) as InertialGroup[];
+    this._emitStatus(
+      groups.length
+        ? `Streaming calibration now follows the dump for: ${groups.join(', ')}.`
+        : 'The calibration dump held no usable inertial block; defaults stay in force.',
+    );
+    return groups;
+  }
+
+  /** Both ExG chips' register banks as last read, or `null`. */
+  get exgBanks(): ExgBanks | null {
+    return this._exgBanks;
+  }
+
+  /** The fitted pressure part and its trim, or `null` if never read. */
+  get pressureCalibration(): PressureCalibration | null {
+    return this._pressureCalibration;
+  }
+
+  /**
+   * What every streamed channel is being calibrated against, right now.
+   *
+   * The point of this is provenance rather than the numbers: a host showing
+   * "gyro ±500 dps (radio dump)" against "gyro ±500 dps (default)" is telling
+   * a user whether they are looking at this sensor's own calibration or the
+   * factory seed for its part, and those differ by percent. Computed on
+   * demand — nothing here belongs on a per-frame field, at 1 kHz.
+   */
+  get calibrationInfo(): StreamCalibrationInfo {
+    const inertial: StreamCalibrationInfo['inertial'] = {};
+    const groups = Object.keys(this.imuRanges) as InertialGroup[];
+    for (const group of groups) {
+      const range = this.imuRanges[group];
+      const defaults = getDefaultCalibration('shimmer3r', group, range);
+      if (!defaults) continue;
+      const fromDump = this._dumpCalibrations[group]?.[range];
+      const fromCommand = this._btCommandCalibrations[group];
+      const source: StreamCalibrationSource = fromDump
+        ? 'radio-dump'
+        : fromCommand && fromCommand.range === range
+          ? 'bt-command'
+          : 'default';
+      inertial[group] = {
+        range,
+        source,
+        usingDefaultCalibration: source === 'default',
+        unit: defaults.unit,
+      };
     }
+    return {
+      inertial,
+      gsr: { range: this.gsrRangeSetting },
+      exg: { source: this._exgBanksSource ?? 'default', ...summariseExgBanks(this._exgBanks) },
+      pressure: {
+        sensor: this._pressureCalibration?.sensor ?? null,
+        calibrated: this._pressureCalibration?.calibrated ?? false,
+        oversampling: this.pressureOversampling,
+      },
+      adc: { vrefVolts: ADC_VREF_VOLTS, bits: ADC_BITS },
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -3150,7 +3463,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
-          oc.add('TIMESTAMP', ts, 'ticks', 'raw');
+          oc.add('TIMESTAMP', ts, CHANNEL_UNITS.TICKS, 'raw');
 
           for (const f of sch.fields) {
             if (cursor + f.sizeBytes > frame.length) {
@@ -3184,7 +3497,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
                 v = u16le(frame, cursor);
             }
             cursor += f.sizeBytes;
-            oc.add(f.name, v, null, 'raw');
+            oc.add(f.name, v, CHANNEL_UNITS.NO_UNITS, 'raw');
           }
 
           if (this._lastTs) {
