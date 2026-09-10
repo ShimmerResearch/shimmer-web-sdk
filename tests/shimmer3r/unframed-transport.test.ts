@@ -52,6 +52,20 @@ function makeStatusFrame(sessionId: number, status: number, nextOffset: number):
 describe('shimmer3rControlMessageLength', () => {
   const len = (bytes: number[]): number => shimmer3rControlMessageLength(new Uint8Array(bytes));
 
+  it('sizes the ExG register reply from its count byte', () => {
+    /* [0x62][count][regs…]. Missing from this framer, and the gap only bit on
+       a link with a CRC: with one on, every chunk goes through here (a CRC
+       needs a message boundary), and an opcode the framer cannot size resyncs
+       a byte at a time — so the ExG install failed its CRC check against a
+       mis-sized chunk and timed out. `Shimmer3Client`'s framer had it all
+       along. */
+    expect(len([0x62, 10, ...Array(10).fill(0)])).toBe(12);
+    expect(len([0x62, 10, 0, 0])).toBe(NEED_MORE);
+    expect(len([0x62])).toBe(NEED_MORE);
+    // One bank is 10 registers, so a bigger count is a stray byte.
+    expect(len([0x62, 11, ...Array(11).fill(0)])).toBe(RESYNC);
+  });
+
   it('treats ACK and NACK as one-byte messages', () => {
     expect(len([ACK])).toBe(1);
     expect(len([NACK])).toBe(1);

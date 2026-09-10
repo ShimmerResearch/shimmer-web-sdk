@@ -149,14 +149,33 @@ export function buildSetFactoryTestCommand(type: number): Uint8Array {
  *
  * The firmware answers the command with the generic one-byte ACK (0xFF) or NACK
  * (0xFE) and then prints the report as bare ASCII on the same link, so anything
- * that is not one of those two bytes is already report text. Both answers are
- * one byte, so this never needs more.
+ * that is not one of those two bytes is already report text.
+ *
+ * **The link CRC counts, and this is the one place in the report path that has
+ * to know about it.** A capture is fed the RAW notification, before the
+ * client's CRC verification — it has to be, because report bytes are unframed
+ * ASCII and must not reach the framer — so with a CRC on, the ACK arrives as
+ * `[0xFF][crc…]` and `consumed: 1` leaves the trailer to be transcribed as the
+ * first bytes of the report. The visible symptom was a report beginning
+ * `e//**** TEST START`: of the two-byte trailer `F4 65`, `0xF4` fails
+ * `isReportByte` and is counted as noise while `0x65` is printable ASCII and
+ * became text. Anything comparing the report byte-for-byte against what the
+ * sensor printed then failed, and only with the CRC on.
+ *
+ * @param crcBytes width of the link CRC in force, 0 when it is off
  */
-export function classifyLiteProtocolAck(buf: Uint8Array): AckVerdict {
+export function classifyLiteProtocolAck(buf: Uint8Array, crcBytes = 0): AckVerdict {
   if (buf.length === 0) return { kind: 'need-more' };
-  if (buf[0] === OPCODES.ACK_COMMAND_PROCESSED) return { kind: 'ack', consumed: 1 };
+  const answer = 1 + crcBytes;
+  if (buf[0] === OPCODES.ACK_COMMAND_PROCESSED) {
+    // The trailer belongs to the ACK, so wait for it rather than reading a
+    // half-arrived one as report text.
+    if (buf.length < answer) return { kind: 'need-more' };
+    return { kind: 'ack', consumed: answer };
+  }
   if (buf[0] === OPCODES.NACK_COMMAND_PROCESSED) {
-    return { kind: 'nack', consumed: 1, detail: 'NACK 0xFE' };
+    if (buf.length < answer) return { kind: 'need-more' };
+    return { kind: 'nack', consumed: answer, detail: 'NACK 0xFE' };
   }
   return { kind: 'text' };
 }

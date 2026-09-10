@@ -13,6 +13,7 @@
  *   com.shimmerresearch.bluetooth.ShimmerBluetooth (response byte layouts + handshake)
  */
 
+import { PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD } from '../pressure/types.js';
 import { OPCODES, type TimestampFmt } from '../shimmer3r/constants.js';
 import {
   buildStreamSchema,
@@ -118,6 +119,12 @@ export interface Shimmer3InquiryResult {
   accelRange: number;
   gyroRange: number;
   magRange: number;
+  /**
+   * BMP180/BMP280 oversampling, 0-3 — ConfigSetupByte3 bits 4-5, i.e. bits
+   * 28-29 of the config word. Part of the pressure compensation rather than a
+   * scale applied to its result, so a host converting PRESSURE needs it.
+   */
+  pressureResolution: number;
   numChannels: number;
   bufferSize: number;
   channelIds: number[];
@@ -217,6 +224,7 @@ export function interpretShimmer3InquiryResponse(
   const magRange = (configByte0 & 0xe00000) >>> 21;
   const gsrRange = (configByte0 >>> 25) & 0x7;
   const internalExpPower = (configByte0 >>> 24) & 0x1;
+  const pressureResolution = (configByte0 >>> 28) & 0x3;
 
   const numChannels = declaredChannels;
   const bufferSize = u8[base + 7];
@@ -244,6 +252,7 @@ export function interpretShimmer3InquiryResponse(
     accelRange,
     gyroRange,
     magRange,
+    pressureResolution,
     numChannels,
     bufferSize,
     channelIds,
@@ -437,6 +446,13 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
   [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
   [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
   [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
+  /* The two legacy pressure-coefficient replies are a bare fixed-length block
+     with no length byte: 22 bytes for a BMP180 and 24 for a BMP280
+     (`Shimmer_Driver/BMP280_driver/bmp280.h:693,740`). Older LogAndStream
+     firmware serves only these, and serves them without a NACK for the wrong
+     one, so a host tries both — see `Shimmer3Client.readPressureCalibration`. */
+  [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22, // 0x58
+  [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24, // 0x9F
 });
 
 /** Sentinel: need more bytes before the message length can be determined. */
@@ -502,6 +518,17 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     const memLen = buf[1];
     if (memLen > 128) return RESYNC;
     return 2 + memLen;
+  }
+
+  if (opcode === OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE) {
+    // Variable length: [opcode][1 + n][sensorId][coeffs...]. The length byte
+    // counts the sensor id, and the largest block any part sends is the
+    // BMP280's 24 bytes, so anything beyond that is garbage rather than a
+    // giant response. A BMP581 answers length 1 — the id alone.
+    if (buf.length < 2) return NEED_MORE;
+    const declared = buf[1];
+    if (declared < 1 || declared > PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD) return RESYNC;
+    return 2 + declared;
   }
 
   const payload = SHIMMER3_RESPONSE_PAYLOAD_LENGTHS[opcode];

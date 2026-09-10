@@ -12,6 +12,7 @@
  * `i12*>` = Shimmer3R high-g accel packing (MSB << 4 | LSB >> 4).
  */
 
+import { CHANNEL_UNITS } from '../../core/units.js';
 import { SDLogHeaderBitmask as BM, hasSensorBit } from './constants.js';
 import type { SdLogChannel } from './types.js';
 
@@ -111,7 +112,7 @@ const uncal = (name: string, dataType: SdLogDataType): SdLogChannelSpec => ({
  */
 const gsrChannel = (): SdLogChannelSpec => ({
   name: 'GSR',
-  unit: 'uSiemens',
+  unit: CHANNEL_UNITS.MICRO_SIEMENS,
   calibrated: true,
   dataType: 'u16',
   sizeBytes: 2,
