@@ -109,3 +109,13 @@ export {
 } from './live.js';
 
 export type { ExgChipIndex } from './live.js';
+
+export {
+  EXG_VREF_VOLTS,
+  exgChannelMillivoltFactor,
+  calibrateExgSample,
+  summariseExgCalibration,
+  summariseExgBanks,
+} from './calibration.js';
+
+export type { ExgSampleResolution, ExgCalibrationSummary } from './calibration.js';

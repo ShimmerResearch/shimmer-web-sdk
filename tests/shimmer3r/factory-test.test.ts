@@ -9,6 +9,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
 import { FactoryTestError } from '../../src/devices/factoryTest/capture.js';
 import {
   SHIMMER3_FACTORY_TEST_TYPE,
@@ -149,6 +150,56 @@ describe.each([
     expect(text).toBe(REPORT);
     await new Promise((r) => setTimeout(r, 10));
     expect(seen).toHaveLength(1);
+  });
+});
+
+describe('runFactoryTest — with the link CRC on', () => {
+  it('does not put the SET_CRC ACK’s own trailer on the front of the report', async () => {
+    /* The one ACK the client cannot frame: the firmware sets the CRC mode
+       while processing SET_CRC's arguments and composes the ACK afterwards
+       from the NEW mode, so that ACK already carries a trailer this client is
+       not yet looking for.
+
+       Those bytes used to be forwarded to the control plane on the reasoning
+       that nothing would match them. A byte-stream link resyncs past them, so
+       that held there — but on a FRAMED link the ACK and its trailer arrive in
+       one notification and everything behind the ACK is forwarded, and a
+       reader that accumulates raw bytes takes it. The report then began with
+       a stray character: `e//**** TEST START` on a real page. Every downstream
+       check of "is this byte-for-byte what the sensor printed" failed, and so
+       did the CRC on the next length-framed reply, one byte out of step. */
+    const t = new LoopbackTransport({ capabilities: { framed: true } });
+    let mode = 0;
+    t.setOnWrite((raw) => {
+      const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
+        mode = cmd[1];
+        // ACK plus the trailer the new mode implies, in ONE notification.
+        setTimeout(() => t.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
+        return;
+      }
+      if (cmd[0] === OPCODES.SET_FACTORY_TEST) {
+        /* The ACK is its own CRC'd protocol message; the report that follows is
+           raw ASCII the test routine prints, with no CRC of its own. The two
+           still share a notification, which is the shape that matters here:
+           `[FF][crc][crc][//*** TEST START …`. */
+        setTimeout(
+          () => t.notify(cat(appendCrc(new Uint8Array([ACK]), mode as never), bytesOf(REPORT))),
+          0,
+        );
+        return;
+      }
+      setTimeout(() => t.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(2);
+
+    const text = await client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.MAIN, {
+      preflight: false,
+    });
+    expect(text.startsWith(START_BANNER)).toBe(true);
+    expect(text).toBe(REPORT);
   });
 });
 

@@ -19,11 +19,7 @@ import { SDLOG_CLOCK_FREQ, SDLOG_SYNC_OFFSET_LENGTH } from './constants.js';
 import { decodeSdLogValue } from './channels.js';
 import { parseSdLog, type ParsedSdLog } from './header.js';
 import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js';
-import {
-  calibrateGsrDataToResistanceFromAmplifierEq,
-  nudgeGsrResistance,
-} from '../shimmer3r/calibration.js';
-import { GSR_UNCAL_LIMIT_RANGE3 } from '../shimmer3r/constants.js';
+import { calibrateGsrSample } from '../calibration/gsr.js';
 import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
@@ -41,25 +37,15 @@ export interface SdLogDecodeResult {
 }
 
 /**
- * Convert a raw GSR sample to conductance in µS, reusing the streaming
- * clients' amplifier-equation path (Shimmer3Client/Shimmer3RClient
- * #_calibrateData) seeded with the header's GSR range setting.
+ * Convert a raw GSR sample to conductance in µS, through the one shared
+ * amplifier-equation path (`devices/calibration/gsr.ts`) that the streaming
+ * clients also use, seeded with the header's GSR range setting.
  */
 // HARDWARE-VERIFY: GSR amplifier-equation calibration is shared by the SDK's
 // Shimmer3 and Shimmer3R streaming clients; confirm it holds for SD-logged
 // GSR data on older (pre-GSR+) Shimmer3 expansion boards.
 function calibrateGsr(raw: number, gsrRangeSetting: number): number {
-  let adc12 = raw & 0x0fff;
-  let range = gsrRangeSetting;
-  if (range === 4) {
-    range = (raw >> 14) & 0x03; // auto-range: range travels in bits 14-15
-  }
-  if (range === 3 && adc12 < GSR_UNCAL_LIMIT_RANGE3) {
-    adc12 = GSR_UNCAL_LIMIT_RANGE3;
-  }
-  let gsrkOhm = calibrateGsrDataToResistanceFromAmplifierEq(adc12, range);
-  gsrkOhm = nudgeGsrResistance(gsrkOhm, gsrRangeSetting);
-  return (1.0 / gsrkOhm) * 1000;
+  return calibrateGsrSample(raw, gsrRangeSetting).conductanceUSiemens;
 }
 
 interface DecodeBudget {

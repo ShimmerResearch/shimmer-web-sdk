@@ -4,27 +4,35 @@ import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { drainByteStream, type DrainVerdict } from '../../core/framing.js';
-import {
-  OPCODES,
-  BT_FEATURE,
-  SHIMMER3_DEFAULTS,
-  GSR_NAME,
-  GSR_UNCAL_LIMIT_RANGE3,
-} from './constants.js';
+import { OPCODES, BT_FEATURE, SHIMMER3_DEFAULTS } from './constants.js';
 import type { TimestampFmt } from './constants.js';
+import {} from '../shimmer3r/calibration.js';
 import {
-  calibrateGsrDataToResistanceFromAmplifierEq,
-  nudgeGsrResistance,
-} from '../shimmer3r/calibration.js';
-import {
-  applyStreamingCalibration,
   parseKinematicCalibBlock,
   getGroupDefaults,
+  getDefaultCalibration,
   type ImuFamily,
   type StreamingImuRanges,
   type InertialGroup,
   type KinematicCalibration,
+  type CalibDump,
 } from '../calibration/index.js';
+import { CHANNEL_UNITS } from '../../core/units.js';
+import { StreamTimeline, TICKS_PER_MS, type TimelineState } from '../../core/StreamTimeline.js';
+import { UNIX_TIMESTAMP_NAME } from '../calibration/streamChannels.js';
+import { msToRtcBytesLE } from '../dock/protocol.js';
+import {
+  ADC_BITS,
+  ADC_VREF_VOLTS,
+  calibrateStreamFrame,
+  type StreamCalibrationInfo,
+  type StreamCalibrationSource,
+  type StreamCalibrationState,
+} from '../calibration/streamChannels.js';
+import { selectDumpCalibrations, type DumpCalibrationsByGroup } from '../calibration/sensorIds.js';
+import { summariseExgBanks } from '../exg/calibration.js';
+import type { ExgBanks } from '../exg/knobs.js';
+import { parsePressureCalibrationResponse, type PressureCalibration } from '../pressure/index.js';
 import {
   resolveInfoMemLayout,
   INFOMEM_PAGE_SIZE,
@@ -196,6 +204,46 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _imuFamily: ImuFamily;
   private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
 
+  /**
+   * Every usable block from a calibration dump, by group and range
+   * ({@link applyCalibDump}).
+   */
+  private _dumpCalibrations: DumpCalibrationsByGroup = {};
+
+  /**
+   * Blocks fetched by {@link readCalibration}, with the range each was read at
+   * — those commands answer for the configured range without saying which, so
+   * a block stops applying once a range moves.
+   */
+  private _btCommandCalibrations: Partial<
+    Record<InertialGroup, { cal: KinematicCalibration; range: number }>
+  > = {};
+
+  /** Both ExG chips' register banks, when read; `null` assumes chip defaults. */
+  private _exgBanks: ExgBanks | null = null;
+
+  /** Where {@link _exgBanks} came from, for {@link calibrationInfo}. */
+  private _exgBanksSource: 'device' | 'infomem' | null = null;
+
+  /** The fitted pressure part and its trim, or `null` when unread. */
+  private _pressureCalibration: PressureCalibration | null = null;
+
+  /**
+   * Configured pressure oversampling, 0-3, from the inquiry's config word. The
+   * BMP180 and BMP280 a Shimmer3 can carry both use it.
+   */
+  pressureOversampling = 0;
+
+  /**
+   * Unwraps the sample counter and, once anchored, places every sample on a
+   * wall clock. The width follows the firmware: 16 bits — a 2-second wrap — on
+   * anything older than LogAndStream 0.5.4.
+   */
+  private _timeline = new StreamTimeline({ timestampBits: 24 });
+
+  /** Whether {@link startStreaming} reads the real-world clock first. */
+  anchorStreamClock = true;
+
   /** Minimum valid GSR conductance in µS (below this, connectivity = "Disconnected"). */
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
 
@@ -340,7 +388,8 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._streaming = false;
       this._streamStarting = false;
       this.ExpPower = 0;
-      this._deviceCalibrations = {};
+      this._resetCalibrationState();
+      this._timeline.reset();
       this._emitStatus('Disconnected');
     }
   }
@@ -600,7 +649,232 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
     const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
     const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    /* Cache for the streaming conversion: the millivolt factor needs the PGA
+       gain and the reference voltage out of these registers. */
+    this._exgBanks = { exg1, exg2 };
+    this._exgBanksSource = 'device';
     return { exg1, exg2 };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-world clock
+  // ---------------------------------------------------------------------------
+
+  /**
+   * True when this firmware serves the real-world-clock commands.
+   *
+   * The Java driver gates its own `readRealTimeClock` on LogAndStream with a
+   * firmware version code of 6 or more (`ShimmerBluetooth.java:2847-2853`), and
+   * this follows it. Older firmware answers nothing at all rather than NACKing,
+   * so asking costs a timeout — worth avoiding when the version already says.
+   */
+  get supportsRealWorldClock(): boolean {
+    if (this.firmwareVersion == null || this.deviceVersion == null) return false;
+    return (
+      deriveShimmer3FirmwareVersionCode(this.firmwareVersion, this.deviceVersion.hardwareVersion) >=
+      6
+    );
+  }
+
+  /**
+   * Read the device's real-world clock (GET_RWC → RWC_RESPONSE).
+   *
+   * **What a Shimmer3's real-world clock is, and why it is not the stream's
+   * timestamp.** The MSP430's counter cannot be set: it free-runs from boot.
+   * Setting the clock stores an offset instead, and the reply to this command
+   * is `rwcTimeDiff64 + RTC_get64()` — counter plus offset
+   * (`Shimmer_Driver/5xx_HAL/hal_RTC.c:73-76,85`). The offset itself never goes
+   * over Bluetooth, only into an SD-file header. So unlike a Shimmer3R, whose
+   * packet timestamp is the low 24 bits of this very value, a Shimmer3 leaves a
+   * host to estimate where the counter stood when the reply was composed. This
+   * anchors the stream timeline accordingly — `rwc-estimated`, carrying half
+   * the round trip as its uncertainty.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3 has answered this command through this
+   * SDK.
+   *
+   * @throws Error when not connected, while streaming, or when the firmware
+   *   does not serve the command.
+   */
+  async getRtcTime(
+    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<{ ticks: bigint; unixMs: number }> {
+    if (!this._transport) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot read the real-world clock while streaming');
+    this._assertRwcSupported('read');
+
+    const hostBeforeMs = Date.now();
+    await this._write(new Uint8Array([OPCODES.GET_RWC_COMMAND]));
+    const rsp = await this._waitForResponse(OPCODES.RWC_RESPONSE, timeoutMs);
+    if (rsp[0] !== OPCODES.RWC_RESPONSE || rsp.length < 9) {
+      throw new Error(`Malformed RWC response (${rsp.length} bytes).`);
+    }
+    let ticks = 0n;
+    for (let i = 8; i >= 1; i--) ticks = (ticks << 8n) | BigInt(rsp[i]);
+    const hostAfterMs = Date.now();
+
+    this._timeline.anchorToRwc(ticks, (hostBeforeMs + hostAfterMs) / 2, {
+      rttMs: hostAfterMs - hostBeforeMs,
+      // Never aligned on a Shimmer3: see the docblock above.
+      aligned: false,
+    });
+    return { ticks, unixMs: Number(ticks) / TICKS_PER_MS };
+  }
+
+  /**
+   * Set the device's real-world clock (SET_RWC) to a Unix millisecond time,
+   * encoded as 64-bit little-endian 32768 Hz ticks.
+   *
+   * A plain Unix epoch, as desktop Consensys and the dock driver both write.
+   * The firmware stores it as an offset from its free-running counter, so the
+   * stream's own timestamps do not move — but the mapping from them to wall
+   * time does, which is why any existing anchor is dropped.
+   *
+   * HARDWARE-VERIFY: not exercised against a real Shimmer3.
+   */
+  async setRtcTime(unixMs: number): Promise<void> {
+    if (!this._transport) throw new Error('Not connected');
+    if (!Number.isFinite(unixMs)) throw new Error('setRtcTime: unixMs must be a finite number.');
+    this._assertRwcSupported('write');
+    const cmd = new Uint8Array(9);
+    cmd[0] = OPCODES.SET_RWC_COMMAND;
+    cmd.set(msToRtcBytesLE(unixMs), 1);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    this._timeline.clearAnchor();
+    this._emitStatus('RWC set');
+  }
+
+  private _assertRwcSupported(verb: 'read' | 'write'): void {
+    if (this.supportsRealWorldClock) return;
+    if (this.firmwareVersion == null || this.deviceVersion == null) {
+      throw new Error(
+        `Cannot ${verb} the real-world clock before the handshake has read the ` +
+          'firmware and device versions.',
+      );
+    }
+    const { major, minor, internal } = this.firmwareVersion;
+    throw new Error(
+      `This firmware does not serve the real-world-clock commands ` +
+        `(v${major}.${minor}.${internal}). They need a firmware version code of 6 ` +
+        'or more — LogAndStream 0.5.0 and later.',
+    );
+  }
+
+  /** Where the streamed wall-clock times come from, and how well. */
+  get timelineState(): TimelineState {
+    return this._timeline.state;
+  }
+
+  /**
+   * Get the stream timeline ready, and anchor it if asked. See
+   * `Shimmer3RClient._prepareStreamTimeline`; a Shimmer3's anchor is always the
+   * estimated kind.
+   */
+  private _prepareStreamTimeline(): void {
+    // The width is a firmware property the handshake has established by now:
+    // 16 bits, wrapping every 2 s, on anything older than LogAndStream 0.5.4.
+    this._timeline.setTimestampBits(this._timestampFmt === 'u16' ? 16 : 24);
+    this._timeline.reset();
+    if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
+    /* This host's clock, the Consensys method. No round trip is spent here —
+       see `Shimmer3RClient._prepareStreamTimeline` for why. A host wanting the
+       sensor's own clock as the reference calls {@link getRtcTime} once, which
+       needs LogAndStream 0.5.0 or later ({@link supportsRealWorldClock}). */
+    this._timeline.anchorToHost(Date.now());
+    this._emitStatus(
+      "Stream clock anchored to this host's clock" +
+        (this.supportsRealWorldClock
+          ? ". Read the sensor's real-world clock (getRtcTime) for times taken from the sensor itself."
+          : ' — this firmware has no real-world clock.'),
+    );
+  }
+
+  /**
+   * Read the fitted pressure sensor's identity and factory trim, so PRESSURE and
+   * TEMPERATURE can be streamed in kPa and °C.
+   *
+   * The modern command is `GET_PRESSURE_CALIBRATION_COEFFICIENTS` (0xA7),
+   * answering `[0xA6][1 + n][sensorId][coeffs]`. A classic Shimmer3 running
+   * older LogAndStream firmware serves only the two legacy commands instead —
+   * `0xA0 → 0x9F` (BMP280, 24 bytes) and `0x59 → 0x58` (BMP180, 22 bytes) — and
+   * that firmware has **no NACK at all**, so an unsupported command produces
+   * silence rather than a refusal
+   * (`ccs_workspace/FW_Shimmer3/LogAndStream/main.c`, whose command switch has
+   * no `sendNack`). Both legacy paths are therefore tried after the modern one,
+   * and the part they name is inferred from which answered — with one trap
+   * handled in the parser: asked for BMP180 coefficients on a BMP280 board,
+   * that firmware answers a full-length block of `0x01` filler rather than
+   * declining, and compensating against it would yield a confident, wrong
+   * pressure.
+   *
+   * **A refusal is not an error**: the channels stream raw-only and this
+   * returns `null`, having said so through {@link onStatus}.
+   *
+   * HARDWARE-VERIFY: no real Shimmer3 has answered any of the three commands
+   * through this SDK.
+   *
+   * @throws Error only when not connected.
+   */
+  async readPressureCalibration(
+    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<PressureCalibration | null> {
+    if (!this._transport) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot read the pressure calibration while streaming');
+
+    const attempts: Array<{ cmd: number; resp: number; label: string; legacy: 0 | 1 | null }> = [
+      {
+        cmd: OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND,
+        resp: OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE,
+        label: 'GET_PRESSURE_CALIBRATION_COEFFICIENTS (0xA7)',
+        legacy: null,
+      },
+      {
+        cmd: OPCODES.GET_BMP280_CALIBRATION_COEFFICIENTS_COMMAND,
+        resp: OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE,
+        label: 'GET_BMP280_CALIBRATION_COEFFICIENTS (0xA0)',
+        legacy: 1,
+      },
+      {
+        cmd: OPCODES.GET_BMP180_CALIBRATION_COEFFICIENTS_COMMAND,
+        resp: OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE,
+        label: 'GET_BMP180_CALIBRATION_COEFFICIENTS (0x59)',
+        legacy: 0,
+      },
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        await this._write(new Uint8Array([attempt.cmd]));
+        const frame = await this._waitForResponse(attempt.resp, timeoutMs);
+        /* The modern reply is length-prefixed and self-describing; the legacy
+           ones are a bare fixed-length block, so the sensor id has to come from
+           which command answered. */
+        const payload =
+          attempt.legacy === null
+            ? frame.subarray(2)
+            : Uint8Array.from([attempt.legacy, ...frame.subarray(1)]);
+        const calibration = parsePressureCalibrationResponse(payload);
+        this._pressureCalibration = calibration;
+        this._emitStatus(
+          calibration.calibrated
+            ? `Pressure sensor ${calibration.sensor}: coefficients loaded.`
+            : `Pressure sensor ${calibration.sensor} returned a blank coefficient block; ` +
+                'PRESSURE and TEMPERATURE stream raw-only.',
+        );
+        if (calibration.calibrated) return calibration;
+        // A blank block means this was the wrong command for the fitted part;
+        // keep trying the others rather than settling for it.
+      } catch {
+        /* No answer, or an answer that was not what it claimed. Try the next. */
+      }
+    }
+
+    this._pressureCalibration = null;
+    this._emitStatus(
+      'No pressure calibration is available from this firmware, so PRESSURE and ' +
+        'TEMPERATURE stream raw-only.',
+    );
+    return null;
   }
 
   private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
@@ -749,6 +1023,9 @@ export class Shimmer3Client extends BaseShimmerClient {
       altAccel: 0,
       altMag: 0,
     };
+    this.pressureOversampling = info.pressureResolution;
+    // The ranges just moved, so re-pick which stored block applies to each group.
+    this._reselectDeviceCalibrations();
     this._emitStatus(
       `Inquiry: ${info.numChannels} ch, ${info.samplingRateHz.toFixed(2)} Hz, ` +
         `sensors=0x${info.schema.enabledSensors.toString(16).toUpperCase()}`,
@@ -961,6 +1238,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    this._prepareStreamTimeline();
     // Stale buffered bytes (e.g. residual post-stop stream data) would desync
     // the ACK wait for START — drain to quiescence and discard them first. A
     // clean state (empty buffer) skips this entirely.
@@ -1078,7 +1356,14 @@ export class Shimmer3Client extends BaseShimmerClient {
           const oc = new ObjectCluster(this._deviceLabel());
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
-          oc.add('TIMESTAMP', ts, 'ticks', 'raw');
+          oc.add('TIMESTAMP', ts, CHANNEL_UNITS.TICKS, 'raw');
+          /* Unwrap the counter — every 2 s on older firmware, every 512 s on
+             newer — and place it on a wall clock when anchored. */
+          const stamped = this._timeline.stamp(ts, Date.now());
+          oc.add('TIMESTAMP', stamped.deviceMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          if (stamped.unixMs !== null) {
+            oc.add(UNIX_TIMESTAMP_NAME, stamped.unixMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
+          }
 
           for (const f of sch.fields) {
             let v: number;
@@ -1107,7 +1392,7 @@ export class Shimmer3Client extends BaseShimmerClient {
                 v = u16le(frame, cursor);
             }
             cursor += f.sizeBytes;
-            oc.add(f.name, v, null, 'raw');
+            oc.add(f.name, v, CHANNEL_UNITS.NO_UNITS, 'raw');
           }
 
           this._lastTs = ts;
@@ -1125,30 +1410,121 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._rxBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
   }
 
-  /** Inline GSR calibration, matching Shimmer3RClient. */
-  private _calibrateData(oc: ObjectCluster): void {
-    for (const field of [...oc.fields]) {
-      if (field.name !== GSR_NAME) continue;
-      const gsrraw = oc.get(GSR_NAME, 'raw')?.value ?? null;
-      if (gsrraw === null) continue;
-      let adc12 = gsrraw & 0x0fff;
-      let currentRange = this.gsrRangeSetting;
-      if (currentRange === 4) currentRange = (gsrraw >> 14) & 0x03;
-      if (currentRange === 3 && adc12 < GSR_UNCAL_LIMIT_RANGE3) adc12 = GSR_UNCAL_LIMIT_RANGE3;
-      let gsrkOhm = calibrateGsrDataToResistanceFromAmplifierEq(adc12, currentRange);
-      gsrkOhm = nudgeGsrResistance(gsrkOhm, this.gsrRangeSetting);
-      oc.add(GSR_NAME, (1.0 / gsrkOhm) * 1000, 'uSiemens', 'cal');
-    }
+  /** The calibration state one decoded frame is converted against. */
+  private _streamCalibrationState(): StreamCalibrationState {
+    return {
+      generation: 'shimmer3',
+      family: this._imuFamily,
+      ranges: this.imuRanges,
+      device: this._deviceCalibrations,
+      emitInertial: this.emitCalibratedInertial,
+      gsrRange: this.gsrRangeSetting,
+      exg: this._exgBanks,
+      pressure: this._pressureCalibration,
+      pressureOversampling: this.pressureOversampling,
+    };
+  }
 
-    // Inertial calibration (LN/WR accel, gyro, mag): device calibration from
-    // readCalibration() when available, else the range-selected default.
-    if (this.emitCalibratedInertial) {
-      applyStreamingCalibration(oc, {
-        family: this._imuFamily,
-        ranges: this.imuRanges,
-        device: this._deviceCalibrations,
-      });
+  /**
+   * Add a calibrated field, with a unit, for every channel this SDK can
+   * convert — the same registry the Shimmer3R client uses
+   * (`devices/calibration/streamChannels.ts`), so the two platforms cannot
+   * drift apart on a formula.
+   */
+  private _calibrateData(oc: ObjectCluster): void {
+    calibrateStreamFrame(oc, this._streamCalibrationState());
+  }
+
+  /** Forget everything read off the device about how to calibrate it. */
+  private _resetCalibrationState(): void {
+    this._deviceCalibrations = {};
+    this._dumpCalibrations = {};
+    this._btCommandCalibrations = {};
+    this._exgBanks = null;
+    this._exgBanksSource = null;
+    this._pressureCalibration = null;
+  }
+
+  /**
+   * Re-pick which stored calibration applies to each inertial group at the
+   * ranges now configured. See the Shimmer3R client's method of the same name
+   * for why a per-sensor block is dropped once its range moves.
+   */
+  private _reselectDeviceCalibrations(): void {
+    const next: Partial<Record<InertialGroup, KinematicCalibration>> = {};
+    const groups = Object.keys(this.imuRanges) as InertialGroup[];
+    for (const group of groups) {
+      const range = this.imuRanges[group];
+      const fromDump = this._dumpCalibrations[group]?.[range];
+      if (fromDump) {
+        next[group] = fromDump;
+        continue;
+      }
+      const fromCommand = this._btCommandCalibrations[group];
+      if (fromCommand && fromCommand.range === range) next[group] = fromCommand.cal;
     }
+    this._deviceCalibrations = next;
+  }
+
+  /**
+   * Take a calibration dump this device just produced and use it for streaming.
+   * See `Shimmer3RClient.applyCalibDump`.
+   */
+  applyCalibDump(dump: CalibDump): InertialGroup[] {
+    this._dumpCalibrations = selectDumpCalibrations(dump, this._imuFamily);
+    this._reselectDeviceCalibrations();
+    const groups = Object.keys(this._dumpCalibrations) as InertialGroup[];
+    this._emitStatus(
+      groups.length
+        ? `Streaming calibration now follows the dump for: ${groups.join(', ')}.`
+        : 'The calibration dump held no usable inertial block; defaults stay in force.',
+    );
+    return groups;
+  }
+
+  /** Both ExG chips' register banks as last read, or `null`. */
+  get exgBanks(): ExgBanks | null {
+    return this._exgBanks;
+  }
+
+  /** The fitted pressure part and its trim, or `null` if never read. */
+  get pressureCalibration(): PressureCalibration | null {
+    return this._pressureCalibration;
+  }
+
+  /** What every streamed channel is being calibrated against, right now. */
+  get calibrationInfo(): StreamCalibrationInfo {
+    const inertial: StreamCalibrationInfo['inertial'] = {};
+    const groups = Object.keys(this.imuRanges) as InertialGroup[];
+    for (const group of groups) {
+      const range = this.imuRanges[group];
+      const defaults = getDefaultCalibration(this._imuFamily, group, range);
+      if (!defaults) continue;
+      const fromDump = this._dumpCalibrations[group]?.[range];
+      const fromCommand = this._btCommandCalibrations[group];
+      const source: StreamCalibrationSource = fromDump
+        ? 'radio-dump'
+        : fromCommand && fromCommand.range === range
+          ? 'bt-command'
+          : 'default';
+      inertial[group] = {
+        range,
+        source,
+        usingDefaultCalibration: source === 'default',
+        unit: defaults.unit,
+      };
+    }
+    return {
+      inertial,
+      gsr: { range: this.gsrRangeSetting },
+      exg: { source: this._exgBanksSource ?? 'default', ...summariseExgBanks(this._exgBanks) },
+      pressure: {
+        sensor: this._pressureCalibration?.sensor ?? null,
+        calibrated: this._pressureCalibration?.calibrated ?? false,
+        oversampling: this.pressureOversampling,
+      },
+      adc: { vrefVolts: ADC_VREF_VOLTS, bits: ADC_BITS },
+    };
   }
 
   /**
@@ -1199,13 +1575,14 @@ export class Shimmer3Client extends BaseShimmerClient {
         const scale = getGroupDefaults(this._imuFamily, group)?.sensitivityScale ?? 1;
         const cal = parseKinematicCalibBlock(rsp.subarray(1, 22), { sensitivityScale: scale });
         if (cal) {
-          this._deviceCalibrations[group] = cal;
+          this._btCommandCalibrations[group] = { cal, range: this.imuRanges[group] };
           done.push(group);
         }
       } catch (err: unknown) {
         this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
       }
     }
+    this._reselectDeviceCalibrations();
     return done;
   }
 

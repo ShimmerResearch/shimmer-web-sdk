@@ -92,7 +92,7 @@ describe('parseSdLogHeader — modern Shimmer3 (256 B)', () => {
     expect(h.packetSizeBytes).toBe(25);
     const gsr = h.channels.find((c) => c.name === 'GSR')!;
     expect(gsr.calibrated).toBe(true);
-    expect(gsr.unit).toBe('uSiemens');
+    expect(gsr.unit).toBe('uS');
     const gyro = h.channels.find((c) => c.name === 'GYRO_X')!;
     expect(gyro.calibrated).toBe(false);
     expect(gyro.unit).toBeNull();
