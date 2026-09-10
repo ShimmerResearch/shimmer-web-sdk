@@ -1375,9 +1375,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * coefficients is a **success**: it compensates on-chip, and the firmware
    * sends the id in-band precisely so a host can tell that from a NACK.
    *
-   * HARDWARE-VERIFY: no real sensor has answered this command through this SDK.
    * The reply shape is read from the firmware source and pinned by tests
-   * against a scripted device.
+   * against a scripted device, not from a captured exchange.
    *
    * @throws Error only when not connected.
    */
