@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
+import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import {
   SD_TRANSFER_OPCODES as OP,
   SD_STATUS,
@@ -282,6 +284,15 @@ interface SimOptions {
    * pairing creates. Combine with a small `chunkSize` to split messages.
    */
   framed?: boolean;
+  /**
+   * Ask for a link CRC of this width once connected, and answer accordingly.
+   *
+   * The demo page connects with 2 bytes, so this is the shape a user is
+   * actually on. It changes more than the trailer: the client re-frames every
+   * inbound chunk when a CRC is on, even over BLE, because verifying one means
+   * knowing where a message ends.
+   */
+  crcBytes?: 1 | 2;
 }
 
 /** Scripted Shimmer3R firmware: answers SD-transfer commands from a VirtualCard. */
@@ -289,9 +300,22 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
   const state = { session: 0, reads: [] as { path: string; offset: number; windowLen: number }[] };
   let corruptArmed = opts.corruptSeqOnce !== undefined;
   let dropArmed = opts.dropSeqOnce !== undefined;
+  /* The link CRC in force, as SET_CRC_COMMAND left it. Zero until a host asks,
+     which is the state after every power cycle. */
+  let crcMode: 0 | 1 | 2 = 0;
 
+  /* A control reply: composed by `ShimBt_sendRspOrAck`, which is one of the
+     three places the firmware honours `btCrcMode`. */
   const send = (bytes: Uint8Array | number[]): void => {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const msg = crcMode ? appendCrc(u8, crcMode) : u8;
+    scheduleChunks(t, opts.chunkSize ? fragment(msg, opts.chunkSize) : [msg]);
+  };
+
+  /* An SD-transfer frame: written straight to the TX buffer by
+     `shimmer_sd_file_transfer.c`, so it carries its own CRC-16 per frame and
+     never the link CRC, whatever the host asked for. */
+  const sendRaw = (u8: Uint8Array): void => {
     scheduleChunks(t, opts.chunkSize ? fragment(u8, opts.chunkSize) : [u8]);
   };
 
@@ -301,6 +325,15 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
       String.fromCharCode(...cmd.slice(lenIdx + 1, lenIdx + 1 + cmd[lenIdx]));
 
     switch (cmd[0]) {
+      case OPCODES.SET_CRC_COMMAND: {
+        /* The firmware sets its mode while processing the arguments and
+           composes the ACK afterwards from the NEW mode
+           (`shimmer_bt_uart.c:944` then `:2422`), so this ACK already carries
+           a trailer the host is not yet expecting. */
+        crcMode = (cmd[1] === 1 || cmd[1] === 2 ? cmd[1] : 0) as 0 | 1 | 2;
+        send([ACK]);
+        return;
+      }
       case 0x2e: {
         // GET_FW_VERSION → LogAndStream (3), v1.01.<fwPatch> — default 11, the
         // corruption-free gate (v1.01.009/.010 transfer but corrupt)
@@ -361,10 +394,14 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
         const node = card.lookup(path);
         if (!node || node.kind !== 'file') {
           send(new Uint8Array([ACK]));
-          send(makeStatusFrame(sid, SD_XFER.NOT_FOUND, offset));
+          sendRaw(makeStatusFrame(sid, SD_XFER.NOT_FOUND, offset));
           return;
         }
-        const chunks: Uint8Array[] = [new Uint8Array([ACK])];
+        /* The ACK is a control reply and carries the link CRC; every frame
+           after it is written straight to the TX buffer and does not. */
+        const chunks: Uint8Array[] = [
+          crcMode ? appendCrc(new Uint8Array([ACK]), crcMode) : new Uint8Array([ACK]),
+        ];
         const end = Math.min(offset + windowLen, node.data.length);
         let pos = offset;
         let seq = 0;
@@ -409,6 +446,7 @@ async function makeClient(card: VirtualCard, opts: SimOptions = {}) {
   const sim = attachFwSim(t, card, opts);
   const client = new Shimmer3RClient({ debug: false });
   await client.connect(t);
+  if (opts.crcBytes) await client.setCrcMode(opts.crcBytes);
   return { client, sim, t };
 }
 
@@ -549,6 +587,29 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
     expect(res.nextOffset).toBe(1200);
     expect(res.bytesReceived).toBe(1200);
     expect(new Uint8Array(got)).toEqual(asciiBytes(1200));
+  });
+
+  it('sdReadFileWindow works with a link CRC on, which is what the demo connects with', async () => {
+    /* A CRC changes more than the trailer: `_reframing` turns on, so every
+       inbound chunk goes through the framer even over BLE. The SD frames are
+       CRC-exempt and carry their own CRC-16, so nothing about them should
+       change — and this is the shape a user is on, the demo page connecting
+       with 2 bytes by default. */
+    const { client } = await makeClient(makeCard(), { crcBytes: 2 });
+    const got: number[] = [];
+    const res = await client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1200, {
+      blockPayloadLen: 256,
+      onBlock: (p) => got.push(...Array.from(p)),
+    });
+    expect(res.status).toBe(SD_XFER.WINDOW_COMPLETE);
+    expect(res.bytesReceived).toBe(1200);
+    expect(new Uint8Array(got)).toEqual(asciiBytes(1200));
+  });
+
+  it('sdListDir works with a link CRC on', async () => {
+    const { client } = await makeClient(makeCard(), { crcBytes: 2 });
+    const entries = await client.sdListDir('data/Trial_1');
+    expect(entries.map((e) => e.name).sort()).toEqual(['Shim-000', 'Shim-001']);
   });
 
   it('sdReadFileWindow rejects on a CRC-corrupted block', async () => {
