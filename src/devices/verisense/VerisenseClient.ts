@@ -75,6 +75,7 @@ import { toArrayBuffer } from '../../core/arrayBuffer.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import { WebSerialTransport } from '../../core/transport/WebSerialTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { StreamStatsTracker, type StreamStatsSnapshot } from '../../core/StreamStats.js';
 import {
   defaultAcceptedCommands,
@@ -395,6 +396,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
    */
   private _mirrorTransportHandles(): void {
     const t = this._transport;
+    /* Clear first, so this MIRRORS the live transport instead of accumulating
+     * across links. Without it the branches below only ever assign: a BLE
+     * session followed by a serial (or injected) reconnect kept the previous
+     * peripheral in `device`, and the connect log and the `connected` event
+     * then reported a name belonging to a sensor that was no longer on the
+     * other end. A drop does not clear these either - `_unwireTransport()`
+     * only drops the subscriptions - and a caller need not call disconnect()
+     * after one. This is what the field comment above already promises: they
+     * stay null for a transport that cannot supply them. */
+    this.device = null;
+    this.server = null;
+    this.tx = null;
+    this.rx = null;
+    this.port = null;
     if (t instanceof WebBluetoothTransport) {
       this.device = t.device;
       this.server = t.server;
@@ -435,8 +450,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await transport.connect();
     this._mirrorTransportHandles();
 
-    const name = this.device?.name ?? transport.deviceName;
-    this._emitStatus(`Connected: ${name ?? 'Verisense'}`);
+    /* The name the link reported, and no invented one where it reported none:
+     * `Connected: Verisense` read as the name from the chooser and was a
+     * constant. `_makeWebBleTransport` filters on the service UUID rather than
+     * a name prefix, so a peripheral advertising no local name reaches here. */
+    const name = transport.deviceName?.trim() || null;
+    this._emitStatus(`Connected: ${name ?? unnamedLink(transport.kind)}`);
     this.emit('connected', { name: this.device?.name, id: this.device?.id });
 
     await this._bootstrapConfigsAfterConnect();

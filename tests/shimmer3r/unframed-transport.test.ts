@@ -450,4 +450,37 @@ describe('connect status text follows the transport', () => {
     const framed = await statusesFor('serial', true);
     expect(framed).toContain('Connected over serial (framed)');
   });
+
+  /*
+   * The same rule applied to the one line that names the DEVICE rather than the
+   * link. `Selected: Shimmer3R` used to be printed for a Web Serial port, where
+   * the platform supplies no name at all, because the string came from the
+   * label that doubles as `ObjectCluster.deviceId` and so needs a non-null
+   * fallback. Read in a line beginning "Selected:", a generation name looks like
+   * the name from the chooser — which is exactly the question being asked when a
+   * connect has failed in the field.
+   *
+   * `statusesFor` is the right fixture for it: it builds the transport with no
+   * `deviceName`, which is the Web Serial case, and it stands `kind` in for the
+   * real ones. Asserting the exact string matters here — a loose match cannot
+   * tell "an unnamed serial port" from a wrong kind's noun, and calling a GATT
+   * peripheral a port is the same defect as claiming GATT on an RFCOMM link.
+   */
+  it('says the serial port is unnamed rather than naming it Shimmer3R', async () => {
+    const seen = await statusesFor('serial', true);
+    expect(seen).toContain('Selected: an unnamed serial port');
+    expect(seen.join('\n')).not.toContain('Selected: Shimmer3R');
+  });
+
+  it('calls an RFCOMM link a port, in its own vocabulary', async () => {
+    const seen = await statusesFor('rfcomm', false);
+    expect(seen).toContain('Selected: an unnamed RFCOMM port');
+  });
+
+  it('does not call a nameless BLE peripheral a port', async () => {
+    const seen = await statusesFor('ble', true);
+    // A GATT peripheral is not a port, and 'GATT connected' follows two lines later.
+    expect(seen).toContain('Selected: an unnamed Bluetooth device');
+    expect(seen.join('\n')).not.toMatch(/unnamed ble port/);
+  });
 });

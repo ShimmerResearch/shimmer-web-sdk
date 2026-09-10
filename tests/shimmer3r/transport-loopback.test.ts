@@ -549,44 +549,48 @@ describe('Shimmer3RClient fragmented BLE responses', () => {
 });
 
 describe('the connect log does not invent a device name', () => {
-  /* `Selected: Shimmer3R` used to be printed for a Web Serial port, where the
-     platform supplies no name at all: Chrome's SerialPort exposes none, and
-     getInfo() returns a Bluetooth service class or USB ids, nothing
-     identifying. The string came from `_deviceLabel()`, whose fallback is the
-     generation name because ObjectCluster needs a stable per-frame identifier.
-     Read in a log line beginning "Selected:", it looked like the name from the
-     chooser - which mattered when a connect failed and the question was
-     whether the right device had been picked at all. */
+  /* `Selected: Shimmer3R` used to be printed for a link that supplied no name,
+     because the string came from the label that doubles as
+     `ObjectCluster.deviceId` and so needs a non-null fallback. Read in a line
+     beginning "Selected:", a generation name looks like the name from the
+     chooser - which is the question being asked when a connect has failed.
 
-  it('reports the transport name when there is one', async () => {
-    const t = new LoopbackTransport({ deviceName: 'Shimmer3R-5AA4-BLE' });
+     The wording for each transport kind is pinned in
+     `unframed-transport.test.ts`, alongside the rest of the connect vocabulary
+     and against the kinds a user can actually reach. What is pinned here is the
+     other half: which SOURCE the name comes from. */
+
+  it('echoes the name the transport supplied, verbatim', async () => {
+    const deviceName = 'Shimmer3R-TEST';
+    const t = new LoopbackTransport({ deviceName });
     const client = new Shimmer3RClient({ debug: false });
     const status: string[] = [];
     client.onStatus = (m) => status.push(m);
     await client.connect(t);
-    expect(status).toContain('Selected: Shimmer3R-5AA4-BLE');
+    expect(status).toContain(`Selected: ${deviceName}`);
   });
 
-  it('says the port is unnamed rather than naming it Shimmer3R', async () => {
-    // No deviceName: exactly the Web Serial / rfcomm case.
-    const t = new LoopbackTransport();
+  it('does not carry a previous session name onto a new link', async () => {
+    /* The failure this prevents: connect over BLE, let the link drop, then
+       reconnect over Web Serial. `device` is only ever ASSIGNED for a Web
+       Bluetooth transport and only ever cleared by disconnect(), which a caller
+       need not call after a drop - so the old peripheral used to survive into
+       the new session and its name was printed for a serial port. That is worse
+       than the generic fallback it replaced: it is a specific, plausible, wrong
+       name. Standing in for the dropped BLE session by setting the public field
+       directly, which is exactly the state the old code left behind. */
     const client = new Shimmer3RClient({ debug: false });
+    client.device = { name: 'Shimmer3R-AAAA' } as unknown as BluetoothDevice;
+
     const status: string[] = [];
     client.onStatus = (m) => status.push(m);
-    await client.connect(t);
+    await client.connect(new LoopbackTransport());
+
     const selected = status.filter((m) => m.startsWith('Selected:'));
     expect(selected).toHaveLength(1);
-    expect(selected[0]).toMatch(/unnamed .* port/);
-    expect(selected[0]).not.toContain('Shimmer3R');
-  });
-
-  it('still labels streamed frames with a stable identifier', async () => {
-    /* The other half of the split: ObjectCluster must keep a usable deviceId
-       even when the transport is anonymous, so the log fix must not have been
-       made by changing _deviceLabel() itself. */
-    const t = new LoopbackTransport();
-    const client = new Shimmer3RClient({ debug: false });
-    await client.connect(t);
-    expect(client['_deviceLabel']()).toBe('Shimmer3R');
+    expect(selected[0]).not.toContain('Shimmer3R-AAAA');
+    // And the field itself is back to what its docblock promises for an
+    // injected transport, so the frame labels cannot inherit it either.
+    expect(client.device).toBeNull();
   });
 });

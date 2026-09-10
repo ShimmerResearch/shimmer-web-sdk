@@ -28,13 +28,24 @@ function replyHandshake(bytes: Uint8Array, tr: LoopbackTransport): void {
     setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
 }
 
-function newTransport(): LoopbackTransport {
-  return new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'Shimmer3-TEST' });
+/**
+ * `deviceName` is what the LINK reports; `null` means it reports none, which is
+ * the real Web Serial case (Chrome's `SerialPort` exposes no name at all).
+ * `null` rather than `undefined` because a default parameter cannot tell an
+ * explicit `undefined` from an omitted argument.
+ */
+function newTransport(deviceName: string | null = 'Shimmer3-TEST'): LoopbackTransport {
+  return new LoopbackTransport({
+    capabilities: { framed: false },
+    deviceName: deviceName ?? undefined,
+  });
 }
 
 /** Connect a client (running the handshake) and return both. */
-async function connected(): Promise<{ t: LoopbackTransport; client: Shimmer3Client }> {
-  const t = newTransport();
+async function connected(
+  deviceName: string | null = 'Shimmer3-TEST',
+): Promise<{ t: LoopbackTransport; client: Shimmer3Client }> {
+  const t = newTransport(deviceName);
   t.setOnWrite((bytes, tr) => replyHandshake(bytes, tr));
   const client = new Shimmer3Client({ debug: false, transport: t });
   await client.connect();
@@ -231,6 +242,32 @@ describe('Shimmer3Client streaming', () => {
     expect(frames[0].get('TIMESTAMP', 'raw')?.value).toBe(100);
     expect(frames[0].get('GYRO_X', 'raw')?.value).toBe(1);
     expect(frames[1].get('GYRO_Z', 'raw')?.value).toBe(6);
+    // The frame label is the other half of the connect-log split: it keeps the
+    // link's name when there is one, and needs a non-null value regardless.
+    expect(frames[0].deviceId).toBe('Shimmer3-TEST');
+  });
+
+  it('labels frames from an anonymous link with the generation name', async () => {
+    /* The fallback that must survive: an ObjectCluster needs an attributable
+       deviceId even when the link supplies no name, which is precisely why the
+       connect log must not print this same string as though it were a name. */
+    const { t, client } = await connected(null);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+    });
+    await client.inquiry();
+
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.startStreaming();
+    t.notify([...frame(100, 1, 2, 3), ...frame(200, 4, 5, 6), ...frame(300, 7, 8, 9)]);
+
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+    expect(frames[0].deviceId).toBe('Shimmer3');
   });
 
   it('stopStreaming is best-effort and clears state', async () => {
@@ -755,5 +792,48 @@ describe('Shimmer3Client stray 0x02 after a real inquiry', () => {
     expect(seen.some((m) => m.length === 1 && m[0] === ACK)).toBe(true);
     // And the stray was never delivered as a second inquiry.
     expect(seen.filter((m) => m[0] === INQ_RSP)).toHaveLength(1);
+  });
+});
+
+describe('Shimmer3Client connect log does not invent a device name', () => {
+  /*
+   * The Shimmer3 half of the same defect. This client's only working browser
+   * transport is a WebSerialTransport over the COM port a Classic-Bluetooth
+   * pairing creates, and Web Serial reports no device name at all — so the
+   * fallback fired on every real connect and `Connected: Shimmer3` was a
+   * constant that read as the name from the chooser.
+   */
+  async function statusesFor(deviceName: string | null, kind?: 'serial' | 'rfcomm') {
+    const t = newTransport(deviceName);
+    // LoopbackTransport hardcodes kind 'loopback'; stand in for the real ones.
+    if (kind) Object.defineProperty(t, 'kind', { value: kind, configurable: true });
+    t.setOnWrite((bytes, tr) => replyHandshake(bytes, tr));
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    const seen: string[] = [];
+    client.onStatus = (m) => seen.push(m);
+    await client.connect();
+    return seen;
+  }
+
+  it('echoes the name the transport supplied, verbatim', async () => {
+    const seen = await statusesFor('Shimmer3-TEST');
+    expect(seen).toContain('Connected: Shimmer3-TEST');
+  });
+
+  it('says the RFCOMM port is unnamed rather than naming it Shimmer3', async () => {
+    // The documented browser path: a virtual COM port over Classic Bluetooth.
+    const seen = await statusesFor(null, 'rfcomm');
+    expect(seen).toContain('Connected: an unnamed RFCOMM port');
+    expect(seen.join('\n')).not.toContain('Connected: Shimmer3');
+  });
+
+  it('reports the kind it was actually given, not a hardcoded serial', async () => {
+    const seen = await statusesFor(null, 'serial');
+    expect(seen).toContain('Connected: an unnamed serial port');
+  });
+
+  it('treats a blank reported name as no name', async () => {
+    const seen = await statusesFor('', 'serial');
+    expect(seen).toContain('Connected: an unnamed serial port');
   });
 });

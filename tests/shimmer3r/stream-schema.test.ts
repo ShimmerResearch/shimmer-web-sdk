@@ -73,9 +73,21 @@ interface Session {
   status: string[];
 }
 
-/** A connected client whose fake firmware answers the version and the inquiry. */
-async function session(hardwareVersion: number | null, channelIds: number[]): Promise<Session> {
-  const transport = new LoopbackTransport({ deviceName: 'Shimmer3R-TEST' });
+/**
+ * A connected client whose fake firmware answers the version and the inquiry.
+ *
+ * `deviceName` is what the LINK reports. It defaults to a name because most
+ * tests want the ordinary case, and is overridable so the frame-labelling tests
+ * below can drive the anonymous transport (Web Serial reports no name at all).
+ * `null` means the transport reports none — not `undefined`, which a default
+ * parameter cannot tell from an omitted argument.
+ */
+async function session(
+  hardwareVersion: number | null,
+  channelIds: number[],
+  deviceName: string | null = 'Shimmer3R-TEST',
+): Promise<Session> {
+  const transport = new LoopbackTransport({ deviceName: deviceName ?? undefined });
   transport.setOnWrite((bytes, tr) => {
     const op = bytes[0];
     if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) {
@@ -478,5 +490,56 @@ describe('buildStreamSchema', () => {
     expect(s.fields.map((f) => f.sizeBytes)).toEqual([1, 3, 3]);
     expect(s.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_EXG1_24BIT);
     expect(s.frameBytes).toBe(4 + 1 + 3 + 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The other half of the split: what labels the FRAMES
+// ---------------------------------------------------------------------------
+
+describe('every streamed frame carries a usable deviceId', () => {
+  /*
+   * `ObjectCluster.deviceId` is documented as "Identifier of the source device"
+   * and rides on every frame, so it needs a non-null value even when the link
+   * supplies no name — which is why the label it comes from has a generation-name
+   * fallback, and why the connect log must NOT use that same label.
+   *
+   * Nothing in the suite asserted `deviceId` before, so a change that routed the
+   * frames through the log-side value (which is null for an anonymous link) would
+   * have shipped green. These pin both sides of the fallback, on real frames.
+   */
+  const CHANNELS = [CH.GYRO_X, CH.BATTERY];
+  const PAYLOAD = [...u16le(229), ...u16le(3054)];
+
+  /** Connect, inquire (so there is a schema), stream, and return the first frame. */
+  async function firstFrame(deviceName: string | null) {
+    const s = await session(HW_SHIMMER3R, CHANNELS, deviceName);
+    await s.client.inquiry();
+    const frames = await streamFrames(s, PAYLOAD);
+    expect(frames.length).toBeGreaterThan(0);
+    return { s, frame: frames[0] };
+  }
+
+  it('uses the name the link reported, when it reported one', async () => {
+    const { frame } = await firstFrame('Shimmer3R-TEST');
+    expect(frame.deviceId).toBe('Shimmer3R-TEST');
+  });
+
+  it('falls back to the generation name on an anonymous link', async () => {
+    const { s, frame } = await firstFrame(null);
+    // Not '' and not null: a frame must stay attributable to something.
+    expect(frame.deviceId).toBe('Shimmer3R');
+    // ...while the connect log for the same session declines to name it.
+    expect(s.status.join('\n')).not.toContain('Selected: Shimmer3R');
+  });
+
+  it('treats a blank reported name as no name, in both places', async () => {
+    /* A transport reporting '' has told us nothing. The log and the frame label
+       have to agree on that: they used to disagree, because one tested for
+       nullish and the other for truthiness, so the log said "unnamed" while
+       every frame carried `new ObjectCluster('')` - an unusable id. */
+    const { s, frame } = await firstFrame('');
+    expect(frame.deviceId).toBe('Shimmer3R');
+    expect(s.status).toContain('Selected: an unnamed loopback link');
   });
 });
