@@ -278,16 +278,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### HARDWARE-VERIFY
 
-Nothing in this release has been exercised against a real sensor. In particular:
-
-- the 0xA7 round trip, and a BMP581 answering with its id alone;
-- BMP390 kPa and °C against Consensys reading the same device;
-- the BMP280 path, whose 20-bit values are recovered by shifting the streamed 16-bit temperature up by four and the 24-bit pressure down by four (`SensorBMP280.java:414-415`) — worth checking against a thermometer;
-- BMP581 temperature signedness (24-bit two's complement per the Bosch driver, `bmp5.c:684-700`);
-- the ExG 4.033 V reference path, which the Java driver never uses;
-- `SET_MAG_GAIN` setting `altMagRange` on a Shimmer3R, and the inquiry reflecting it;
-- every `Shimmer3Client` real-world-clock call;
-- that a Shimmer3R's packet timestamp really is the low 24 bits of its `GET_RWC` counter, which the exact anchor depends on.
+Nothing in this release has been exercised against a real sensor: every value and reply shape in it was read out of firmware source or the Java driver and pinned by tests against a scripted device. The eight checks that need a device on the bench are listed on DEV-976, which is where they are tracked.
 
 ### Known
 

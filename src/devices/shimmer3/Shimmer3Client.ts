@@ -690,9 +690,6 @@ export class Shimmer3Client extends BaseShimmerClient {
    * anchors the stream timeline accordingly — `rwc-estimated`, carrying half
    * the round trip as its uncertainty.
    *
-   * HARDWARE-VERIFY: no real Shimmer3 has answered this command through this
-   * SDK.
-   *
    * @throws Error when not connected, while streaming, or when the firmware
    *   does not serve the command.
    */
@@ -729,8 +726,6 @@ export class Shimmer3Client extends BaseShimmerClient {
    * The firmware stores it as an offset from its free-running counter, so the
    * stream's own timestamps do not move — but the mapping from them to wall
    * time does, which is why any existing anchor is dropped.
-   *
-   * HARDWARE-VERIFY: not exercised against a real Shimmer3.
    */
   async setRtcTime(unixMs: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
@@ -809,9 +804,6 @@ export class Shimmer3Client extends BaseShimmerClient {
    *
    * **A refusal is not an error**: the channels stream raw-only and this
    * returns `null`, having said so through {@link onStatus}.
-   *
-   * HARDWARE-VERIFY: no real Shimmer3 has answered any of the three commands
-   * through this SDK.
    *
    * @throws Error only when not connected.
    */
