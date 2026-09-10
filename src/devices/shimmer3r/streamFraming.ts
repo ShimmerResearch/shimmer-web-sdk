@@ -66,7 +66,15 @@ export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>
   [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24,
 });
 
-/** SD-transfer response opcodes, which {@link sdMessageSpan} owns. */
+/**
+ * SD-transfer response opcodes, which {@link sdMessageSpan} owns.
+ *
+ * All four are ordinary COMMAND RESPONSES: the firmware builds them inside
+ * `ShimBt_sendRsp`'s switch (`Comms/shimmer_bt_uart.c:2379-2399`) and the
+ * function CRCs whatever it composed on the way out (`:2421-2427`). So they
+ * carry the link CRC and must not be exempt from it — see
+ * {@link CRC_EXEMPT_RESPONSE_OPCODES}. Only the file-transfer FRAMES skip it.
+ */
 const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
   SD_TRANSFER_OPCODES.LIST_DIR_RESPONSE,
   SD_TRANSFER_OPCODES.FILE_STAT_RESPONSE,
@@ -88,7 +96,19 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
  *    (`:2987`). It is a raw throughput flood by design.
  *  - **SD file transfer** writes its status frames and data blocks straight to
  *    the TX buffer (`Comms/shimmer_sd_file_transfer.c:342,636`). Those blocks
- *    carry their own CRC-16 per block instead (`:160`).
+ *    carry their own CRC-16 per block instead (`:160`). This covers the
+ *    `0x8A`-prefixed FRAMES only, and not the four one-shot SD command
+ *    responses — list-dir, stat, free-space and delete — which are built
+ *    inside `ShimBt_sendRsp` and CRC'd with every other command response
+ *    (`Comms/shimmer_bt_uart.c:2379-2399` then `:2421-2427`). Those four were
+ *    exempt here and should not have been — though nothing in practice reached
+ *    the mistake, because the firmware stages an ACK into the front of the same
+ *    packet (`sendAck = 1`, `:1692-1698`) and the ACK branch of
+ *    `Shimmer3RClient`'s framer measures `[ACK][body][CRC]` as ONE packet
+ *    without consulting this set, so the CRC was verified anyway. The case it
+ *    did reach is a reply arriving on its own, which this firmware does not
+ *    send for these opcodes. `sdMessageSpan` still sizes them, which is a
+ *    separate question from whether they are verified.
  *  - **SD sync** appends a CRC of its own at a FIXED width
  *    (`SDSync/shimmer_sd_sync.c:441`, `BT_SD_SYNC_CRC_MODE`) that has nothing
  *    to do with the mode the host selected.
@@ -100,7 +120,6 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
 export const CRC_EXEMPT_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
   OPCODES.DATA_RATE_TEST_RESPONSE,
   OPCODES.SD_SYNC_RESPONSE,
-  ...SD_RESPONSE_OPCODES,
 ]);
 
 /**
@@ -108,7 +127,14 @@ export const CRC_EXEMPT_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>(
  *
  * `INSTREAM_CMD_RESPONSE` (0x8A) is the awkward one: it prefixes both the
  * status push, which IS CRC'd, and the SD-transfer frames, which are not — so
- * the second byte decides, and a one-byte buffer cannot be judged yet.
+ * the second byte decides, and a one-byte buffer cannot be judged yet. The
+ * battery reply under the same prefix is CRC'd too, being an ordinary command
+ * response, and reaches the `true` below.
+ *
+ * The four one-shot SD replies (list-dir, stat, free-space, delete) are NOT
+ * exempt, whatever their name suggests: they are command responses built
+ * inside `ShimBt_sendRsp` and CRC'd with the rest. Only the frames under 0x8A
+ * skip the link CRC.
  *
  * @param msg a complete message, opcode first
  * @returns true when the firmware would have appended the CRC to it

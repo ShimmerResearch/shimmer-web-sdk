@@ -302,13 +302,70 @@ describe('Shimmer3R link CRC', () => {
     expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 
+  it('DOES verify the one-shot SD replies, which the firmware CRCs like any response', async () => {
+    /* The counterpart to the test below, and the reason it needed correcting.
+       List-dir, stat, free-space and delete were exempt in this client, so a
+       reply arriving on its own was neither stripped nor checked.
+
+       Note the shape: a trailer, as the firmware sends, and NOTHING in front
+       of it. That is deliberate, and it is also why the exemption never bit in
+       practice — the firmware stages an ACK into the same packet for every one
+       of these commands (`Comms/shimmer_bt_uart.c:1692-1698`), and the ACK
+       branch of `_controlMessageLength` measures `[ACK][body][CRC]` as one
+       packet without consulting the exempt set, so the CRC was verified on the
+       real path either way. This test pins the set itself: it is the only one
+       here that goes red when the four are exempt again. */
+    const t = new LoopbackTransport();
+    let mode: 0 | 1 | 2 = 0;
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+        mode = bytes[1] as 0 | 1 | 2;
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.setCrcMode(CRC_MODE.TWO_BYTE);
+
+    const reply = new Uint8Array([
+      SD_TRANSFER_OPCODES.FREE_SPACE_RESPONSE,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      8,
+      0,
+      0,
+    ]);
+    t.notify(appendCrc(reply, CRC_MODE.TWO_BYTE));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.crcFailures).toBe(0);
+
+    // And a bad one is caught rather than acted on.
+    const bad = appendCrc(reply, CRC_MODE.TWO_BYTE);
+    bad[bad.length - 1] ^= 0xff;
+    t.notify(bad);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.crcFailures).toBe(1);
+  });
+
   it('does not verify a CRC on message types the firmware never CRCs', async () => {
     /* `btCrcMode` is honoured in three places only: the command response path,
        the instream status push and the stream data packet. SD file transfer
-       writes its frames straight to the TX buffer (they carry their own block
+       writes its FRAMES straight to the TX buffer (they carry their own block
        CRCs), the data-rate test bypasses the ring entirely, and SD sync uses a
        CRC of its own at a fixed width. Verifying any of them rejects every
-       packet - which is how enabling a CRC broke the link-speed test. */
+       packet - which is how enabling a CRC broke the link-speed test.
+
+       "Frames" is the word that matters, and this test used to get it wrong:
+       it listed the SD FREE-SPACE RESPONSE among the exempt. That one is an
+       ordinary command response, built inside `ShimBt_sendRsp`'s switch
+       (`Comms/shimmer_bt_uart.c:2391-2394`) and CRC'd with everything else it
+       composes (`:2421-2427`) — as are list-dir, stat and delete. Only the
+       0x8A-prefixed transfer frames skip the link CRC, so one of those stands
+       here in its place. */
     const t = new LoopbackTransport();
     let mode: 0 | 1 | 2 = 0;
     t.setOnWrite((bytes, tr) => {
@@ -324,7 +381,12 @@ describe('Shimmer3R link CRC', () => {
     // Each delivered with NO trailer, exactly as the firmware sends them.
     const exempt: Array<[string, number[]]> = [
       ['data-rate test', [OPCODES.DATA_RATE_TEST_RESPONSE, 1, 0, 0, 0]],
-      ['SD free space', [SD_TRANSFER_OPCODES.FREE_SPACE_RESPONSE, 0, 0, 0, 0, 0, 0, 0, 0]],
+      // [0x8A][0xC6][sess][status][nextOffset u32][crc16] — a transfer frame,
+      // carrying its own CRC-16 and no link CRC.
+      [
+        'SD transfer status frame',
+        [0x8a, SD_TRANSFER_OPCODES.FILE_STATUS_RESPONSE, 1, 0, 0, 0, 0, 0, 0x9c, 0x2f],
+      ],
       ['SD sync', [OPCODES.SD_SYNC_RESPONSE, 0, 0]],
     ];
     for (const [, msg] of exempt) t.notify(msg);
