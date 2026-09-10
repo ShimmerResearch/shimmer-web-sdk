@@ -95,15 +95,19 @@ const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
  *    and calls `BtTransmit()` directly, bypassing the ring and the CRC both
  *    (`:2987`). It is a raw throughput flood by design.
  *  - **SD file transfer** writes its status frames and data blocks straight to
- *    the TX buffer (`Comms/shimmer_sd_file_transfer.c:342,637`). Those blocks
+ *    the TX buffer (`Comms/shimmer_sd_file_transfer.c:342,636`). Those blocks
  *    carry their own CRC-16 per block instead (`:160`). This covers the
  *    `0x8A`-prefixed FRAMES only, and not the four one-shot SD command
  *    responses — list-dir, stat, free-space and delete — which are built
  *    inside `ShimBt_sendRsp` and CRC'd with every other command response
- *    (`Comms/shimmer_bt_uart.c:2379-2399` then `:2421-2427`). Exempting those
- *    four is what stopped an SD download working on a link with a CRC: their
- *    trailer was left in the buffer, and the framer resynchronised through it
- *    into the reply behind it. `sdMessageSpan` still sizes them, which is a
+ *    (`Comms/shimmer_bt_uart.c:2379-2399` then `:2421-2427`). Those four were
+ *    exempt here and should not have been — though nothing in practice reached
+ *    the mistake, because the firmware stages an ACK into the front of the same
+ *    packet (`sendAck = 1`, `:1692-1698`) and the ACK branch of
+ *    `Shimmer3RClient`'s framer measures `[ACK][body][CRC]` as ONE packet
+ *    without consulting this set, so the CRC was verified anyway. The case it
+ *    did reach is a reply arriving on its own, which this firmware does not
+ *    send for these opcodes. `sdMessageSpan` still sizes them, which is a
  *    separate question from whether they are verified.
  *  - **SD sync** appends a CRC of its own at a FIXED width
  *    (`SDSync/shimmer_sd_sync.c:441`, `BT_SD_SYNC_CRC_MODE`) that has nothing

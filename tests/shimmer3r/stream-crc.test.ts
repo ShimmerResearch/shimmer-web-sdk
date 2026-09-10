@@ -304,11 +304,17 @@ describe('Shimmer3R link CRC', () => {
 
   it('DOES verify the one-shot SD replies, which the firmware CRCs like any response', async () => {
     /* The counterpart to the test below, and the reason it needed correcting.
-       List-dir, stat, free-space and delete were exempt in this client, so
-       their trailer was never stripped and never checked: a corrupt listing
-       would have been acted on, and on the demo page's mock the two spare
-       bytes desynchronised every download. Delivered here WITH a trailer, as
-       the firmware sends them. */
+       List-dir, stat, free-space and delete were exempt in this client, so a
+       reply arriving on its own was neither stripped nor checked.
+
+       Note the shape: a trailer, as the firmware sends, and NOTHING in front
+       of it. That is deliberate, and it is also why the exemption never bit in
+       practice — the firmware stages an ACK into the same packet for every one
+       of these commands (`Comms/shimmer_bt_uart.c:1692-1698`), and the ACK
+       branch of `_controlMessageLength` measures `[ACK][body][CRC]` as one
+       packet without consulting the exempt set, so the CRC was verified on the
+       real path either way. This test pins the set itself: it is the only one
+       here that goes red when the four are exempt again. */
     const t = new LoopbackTransport();
     let mode: 0 | 1 | 2 = 0;
     t.setOnWrite((bytes, tr) => {
