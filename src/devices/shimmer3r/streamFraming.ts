@@ -21,6 +21,7 @@
 import { PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD } from '../pressure/types.js';
 import { NEED_MORE, RESYNC } from '../../core/framing.js';
 import { OPCODES } from './constants.js';
+import { EXG_BANK_LENGTH } from '../exg/registers.js';
 import { sdMessageSpan, SD_TRANSFER_OPCODES, SD_INSTREAM_BYTE } from './sdTransfer/protocol.js';
 
 /**
@@ -172,6 +173,20 @@ export const DECLARED_LENGTH_RESPONSE_CAPS: Readonly<Partial<Record<number, numb
        block any part sends (the BMP280's 24). A BMP581 answers with the id
        alone, length 1, which this cap admits. */
     [OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE]: PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD,
+    /* [0x62][count][regs…]: the count is echoed from the request
+       (`Comms/shimmer_bt_uart.c:2223-2225`) and one ADS1292R bank is
+       `EXG_BANK_LENGTH` registers, which is the most this SDK ever asks for.
+
+       This entry was missing, and the gap only showed with a link CRC on. With
+       the CRC off a BLE notification is taken as one whole message and the
+       reply parses; with it on, every inbound chunk goes through this framer
+       (verifying a CRC means knowing where the message ends), and an opcode it
+       cannot size falls through to a resync. The ExG install then failed its
+       CRC check against a mis-sized chunk and timed out — so ExG could not be
+       configured at all on a link with a CRC, which is the default this page
+       connects with. `Shimmer3Client`'s framer has always known this reply
+       (`devices/shimmer3/protocol.ts`); this one did not. */
+    [OPCODES.EXG_REGS_RESPONSE]: EXG_BANK_LENGTH,
   });
 
 /**

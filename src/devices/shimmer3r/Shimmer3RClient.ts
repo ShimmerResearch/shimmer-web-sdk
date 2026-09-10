@@ -2885,7 +2885,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * stall for the whole ACK timeout on firmware that does not implement the
      * command at all, because its bare NACK would be missing the trailer this
      * client had just started expecting. Two ignorable bytes on the supported
-     * path beats a timeout on the unsupported one. */
+     * path beats a timeout on the unsupported one.
+     *
+     * "Ignorable" is load-bearing and was once wrong. A reader that takes RAW
+     * inbound bytes sees them — the factory-test capture is fed ahead of this
+     * client's CRC handling, on purpose, because a report is unframed ASCII
+     * that must not reach the framer. That reader now accounts for the trailer
+     * itself (`classifyLiteProtocolAck`); everything else on the control plane
+     * genuinely does ignore an unmatched byte. */
     await this._writeExpectingAck(new Uint8Array([OPCODES.SET_CRC_COMMAND, mode]), 1500);
     /* Both, and in this order: the wish is recorded only once the device has
      * agreed, so a mode it refused is not re-attempted on every reconnect. */
@@ -4160,7 +4167,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._rxBuf = new Uint8Array(0);
     this._ctrlBuf = new Uint8Array(0);
 
-    const capture = new FactoryTestCapture(classifyLiteProtocolAck, {
+    /* The classifier is told the CRC width because the capture sees the raw
+       notification, ahead of this client's CRC handling — so the ACK it
+       consumes carries its trailer with it. Bound at run time rather than at
+       construction: the mode cannot change during a run (`setCrcMode` refuses
+       while sensing, and a run holds the link), but reading it here keeps the
+       one source of truth. */
+    const crcBytes = crcTrailerBytes(this._crcMode);
+    const capture = new FactoryTestCapture((buf) => classifyLiteProtocolAck(buf, crcBytes), {
       ...opts,
       timeoutMs: opts.timeoutMs ?? info.defaultTimeoutMs,
       onStateChange: (state) => {
