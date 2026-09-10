@@ -2,6 +2,7 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { HandlerSet } from '../../core/handlerSet.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { drainByteStream } from '../../core/framing.js';
 import {
   FactoryTestCapture,
@@ -169,8 +170,19 @@ export class WiredShimmerClient extends BaseShimmerClient {
     if (this.debug) console.log('[WiredDock]', ...args);
   }
 
-  private _deviceLabel(): string {
-    return this._transport?.deviceName ?? 'Shimmer(dock)';
+  /**
+   * The name the link reported, or `null` when it reported none. Never invented.
+   *
+   * This client builds no `ObjectCluster` — the dock protocol has no streaming —
+   * so there is no second caller needing a non-null identifier. The old
+   * `?? 'Shimmer(dock)'` fired on every real connect (the wired link is a
+   * `WebSerialTransport`, which reports no name), and it named a dock that need
+   * not be there: this client also drives a Shimmer3R over a direct USB-C
+   * cable, which is the same protocol and no dock at all.
+   */
+  private _reportedDeviceName(): string | null {
+    const name = this._transport?.deviceName?.trim();
+    return name ? name : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -201,7 +213,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
     this._emitStatus('Opening dock UART connection…');
     await t.connect();
     this._rxBuf = new Uint8Array(0);
-    this._emitStatus(`Connected: ${this._deviceLabel()}`);
+    this._emitStatus(`Connected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
   }
 
   override async disconnect(): Promise<void> {

@@ -3,6 +3,7 @@ import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { drainByteStream, type DrainVerdict } from '../../core/framing.js';
 import { OPCODES, BT_FEATURE, SHIMMER3_DEFAULTS } from './constants.js';
 import type { TimestampFmt } from './constants.js';
@@ -265,9 +266,29 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (this.debug) console.log('[Shimmer3]', ...args);
   }
 
-  /** Best-effort label for `ObjectCluster`s and status messages. */
-  private _deviceLabel(): string {
-    return this._transport?.deviceName ?? 'Shimmer3';
+  /**
+   * The name the link reported, or `null` when it reported none. Never invented.
+   *
+   * An empty or whitespace name counts as none: a transport reporting `''` has
+   * told us nothing, and both callers below need to agree on that.
+   */
+  private _reportedDeviceName(): string | null {
+    const name = this._transport?.deviceName?.trim();
+    return name ? name : null;
+  }
+
+  /**
+   * Stable, non-null identifier for {@link ObjectCluster.deviceId}, which every
+   * streamed frame carries.
+   *
+   * The generation name is the fallback because a frame must always be
+   * attributable to something — and that is precisely why it must never be
+   * printed as though it were a name the link supplied. Status text uses
+   * {@link _reportedDeviceName} instead; keeping the two apart is the whole
+   * point of there being two methods.
+   */
+  private _deviceId(): string {
+    return this._reportedDeviceName() ?? 'Shimmer3';
   }
 
   /** The streaming timestamp width currently in effect. */
@@ -314,7 +335,11 @@ export class Shimmer3Client extends BaseShimmerClient {
 
     this._emitStatus('Opening RFCOMM connection…');
     await t.connect();
-    this._emitStatus(`Connected: ${this._deviceLabel()}`);
+    /* Same split as Shimmer3RClient: the name the link reported, and no
+     * invented one where it reported none. `t` rather than `this._transport`,
+     * so a disconnect() racing the await above cannot make this describe a
+     * link other than the one it just opened. */
+    this._emitStatus(`Connected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
 
     await this._handshake();
   }
@@ -1345,7 +1370,7 @@ export class Shimmer3Client extends BaseShimmerClient {
         try {
           const frame = buf.subarray(0, frameBytes);
           let cursor = 1;
-          const oc = new ObjectCluster(this._deviceLabel());
+          const oc = new ObjectCluster(this._deviceId());
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);
           cursor += tsBytes;
           oc.add('TIMESTAMP', ts, CHANNEL_UNITS.TICKS, 'raw');

@@ -77,6 +77,7 @@ import {
 import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
 import {
   shimmer3rControlMessageLength,
@@ -593,9 +594,35 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
   }
 
-  /** Best-effort label for `ObjectCluster`s and status messages. */
-  private _deviceLabel(): string {
-    return this.device?.name ?? this._transport?.deviceName ?? 'Shimmer3R';
+  /**
+   * The name the link reported, or `null` when it reported none. Never invented.
+   *
+   * Read off the transport rather than off `this.device`: for a
+   * {@link WebBluetoothTransport} the two are the same string (`device` returns
+   * the same `BluetoothDevice` whose `name` `deviceName` reads), so preferring
+   * the field buys nothing and costs correctness — it is the one source that can
+   * be left over from an earlier link.
+   *
+   * An empty or whitespace name counts as none. A transport that reports `''`
+   * has told us nothing, and both callers below need to agree on that.
+   */
+  private _reportedDeviceName(): string | null {
+    const name = this._transport?.deviceName?.trim();
+    return name ? name : null;
+  }
+
+  /**
+   * Stable, non-null identifier for {@link ObjectCluster.deviceId}, which every
+   * streamed frame carries.
+   *
+   * The generation name is the fallback because a frame must always be
+   * attributable to something — and that is precisely why it must never be
+   * printed as though it were a name the link supplied. Status text uses
+   * {@link _reportedDeviceName} instead; keeping the two apart is the whole
+   * point of there being two methods.
+   */
+  private _deviceId(): string {
+    return this._reportedDeviceName() ?? 'Shimmer3R';
   }
 
   /** Build the default Web Bluetooth transport over the configured UUIDs. */
@@ -660,6 +687,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
     this._statusPayloadBytes = 2;
+    /* `device` describes the far end exactly as the version caches do, so it
+     * belongs in this reset. It is only ever ASSIGNED for a Web Bluetooth
+     * transport (below) and only ever cleared in disconnect(), which a caller
+     * need not call after a drop - so without this, a BLE session followed by a
+     * serial reconnect left the previous peripheral here, and its name reached
+     * both the connect log and every frame's deviceId. Clearing it also makes
+     * the field's own docblock true for injected transports. */
+    this.device = null;
     this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
@@ -681,7 +716,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(overBle ? 'Requesting Bluetooth device…' : `Opening ${t.kind} link…`);
     await t.connect();
     if (t instanceof WebBluetoothTransport) this.device = t.device;
-    this._emitStatus(`Selected: ${this._deviceLabel()}`);
+    /* The name the link reported, and NO invented one where it reported none.
+     * `_deviceId()` is not usable here - its fallback is the generation string,
+     * which every frame needs and which read as a chooser name in this line. */
+    this._emitStatus(`Selected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
     if (overBle) {
       this._emitStatus('GATT connected');
       this._emitStatus('RX/TX obtained');
@@ -3560,7 +3598,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         if (crcOk === false) this._crcFailures++;
         try {
           let cursor = 1;
-          const oc = new ObjectCluster(this._deviceLabel());
+          const oc = new ObjectCluster(this._deviceId());
           oc.crcOk = crcOk;
 
           const ts = tsBytes === 2 ? u16le(frame, cursor) : u24le(frame, cursor);

@@ -87,6 +87,22 @@ export class WebSerialTransport implements ShimmerTransport {
   readonly kind: ShimmerTransportKind;
   readonly capabilities: TransportCapabilities = { framed: false };
 
+  /*
+   * No `deviceName`, and there is none to be had. `ShimmerTransport.deviceName`
+   * is optional precisely for this transport: Chrome's `SerialPort` exposes no
+   * name, label, address or id, and `getInfo()` answers with a Bluetooth
+   * service class or a USB vendor/product pair — the model, never the unit. The
+   * chooser renders a name but does not pass it to the page.
+   *
+   * So a client on this transport genuinely cannot identify the sensor at
+   * connect time, and must say so rather than fall back to a generation string:
+   * that produced `Selected: Shimmer3R` in a line that reads as the chooser's
+   * answer. See `unnamedLink()` in ./linkNoun.ts for the wording, and
+   * `_reportedDeviceName()` in the clients for the rule. The first real
+   * identification on this path is the sensor's own MAC, which a host has to
+   * ask for (`getMacAddress()`) - `connect()` does not.
+   */
+
   private readonly _debug: boolean;
   private readonly _openOptions: {
     baudRate: number;
