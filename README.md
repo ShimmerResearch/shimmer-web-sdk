@@ -6,7 +6,7 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 
 | Device                             | Class                | Radio / port                 | Links this SDK can drive                                       |
 | ---------------------------------- | -------------------- | ---------------------------- | -------------------------------------------------------------- |
-| Shimmer3R                          | `Shimmer3RClient`    | nRF52 (BLE) + RN4678 + USB-C | BLE, Classic Bluetooth (SPP)                                   |
+| Shimmer3R                          | `Shimmer3RClient`    | CYW20820 (BLE + SPP) + USB-C | BLE, Classic Bluetooth (SPP)                                   |
 | Shimmer3, RN4678 (SR31-6-0 onward) | `Shimmer3Client`     | RN4678 (dual-mode)           | Classic Bluetooth (SPP); BLE possible in principle — see below |
 | Shimmer3, RN42 (earlier boards)    | `Shimmer3Client`     | RN42 (classic only)          | Classic Bluetooth (SPP)                                        |
 | Shimmer3R over USB-C               | `WiredShimmerClient` | USB-C CDC                    | wired serial (dock protocol, not LiteProtocol)                 |
@@ -14,18 +14,27 @@ Web Bluetooth and Web Serial SDK for Shimmer sensor devices.
 | SmartDock multi-slot base          | `SmartDockClient`    | Dock FTDI UART               | wired serial                                                   |
 | Verisense (IMU, Pulse+)            | `VerisenseBleDevice` | nRF52 (BLE) + USB            | BLE, wired serial                                              |
 
-**Which radio a Shimmer3 has matters.** Boards up to expansion-board revision 5
-carry an **RN42**, which is Classic Bluetooth (BR/EDR) only — there is no BLE
-radio on them at all, so no browser can reach one except through a paired SPP
-port. Revision 6 and later carry an **RN4678**, which is dual-mode: the
-LogAndStream firmware picks the radio from two EEPROM bits at start-up
-(`ShimBt_startCommon`, log-and-stream-common `Comms/shimmer_bt_uart.c`), and a
-unit with no EEPROM at all is forced to Classic Bluetooth precisely because
+**Which radio a Shimmer3 has matters.** Early boards carry an **RN42**, which is
+Classic Bluetooth (BR/EDR) only — there is no BLE radio on them at all, so no
+browser can reach one except through a paired SPP port. Later boards carry an
+**RN4678**, which is dual-mode.
+
+Which of the two a given unit has is **not** a single revision cutoff. It tracks
+the sensor generation, and the revision gates differ per board ID — SR31, SR38,
+SR47, SR48 and SR49 each run their own major/minor scheme, and assembly variants
+of one PCB are encoded as a higher minor revision, so a bare revision number
+means nothing without its board ID. Check
+[`SHIMMER3_BOARD_REVISIONS.md`](https://github.com/ShimmerResearch/log-and-stream-common/blob/main/docs/SHIMMER3_BOARD_REVISIONS.md)
+rather than inferring capability from a model name or revision alone.
+
+At runtime the LogAndStream firmware picks the radio from two EEPROM bits at
+start-up (`ShimBt_startCommon`, log-and-stream-common `Comms/shimmer_bt_uart.c`),
+and a unit with no EEPROM at all is forced to Classic Bluetooth precisely because
 that is the RN42 fleet.
 
 BLE on an RN4678 is real but **slow** — the module carries the LiteProtocol
 over its transparent-UART service, and throughput is a small fraction of what
-SPP or a Shimmer3R's native nRF52 BLE gives, which is why Classic Bluetooth
+SPP or a Shimmer3R's CYW20820 BLE gives, which is why Classic Bluetooth
 stayed the streaming link for the Shimmer3. This SDK has **no built-in BLE
 transport for a Shimmer3**: `Shimmer3Client` requires an injected transport
 whichever radio is in play, so an RN4678 BLE link is a matter of writing a
