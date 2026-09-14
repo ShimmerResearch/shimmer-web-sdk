@@ -23,12 +23,24 @@ docs or firmware source but **never exercised against real hardware**. Treat the
 - Don't delete one without actually testing on the device it names.
 - Add one when you implement something you could not verify physically.
 
-## Device and radio matrix — get this right before changing transports
+## Device and radio matrix — check the reference, don't infer
 
-The README's device table is required reading. The distinction that catches people:
-Shimmer3 boards up to expansion-board rev 5 carry an **RN42** (Classic Bluetooth only, no BLE radio
-at all); rev 6+ carry an **RN4678** (dual-mode). `Shimmer3Client` has **no built-in BLE transport**
-and requires an injected transport either way. A Shimmer3R is different again — native nRF52 BLE.
+Which radio a board carries is **not** a single revision cutoff. It tracks the sensor generation, the
+gates differ per board ID (SR31 / SR38 / SR47 / SR48 / SR49 each run their own major/minor scheme),
+and assembly variants of the same PCB are distinguished by programming a higher minor revision — so
+a revision number only means something alongside its board ID.
+
+The reference is
+[`SHIMMER3_BOARD_REVISIONS.md`](https://github.com/ShimmerResearch/log-and-stream-common/blob/main/docs/SHIMMER3_BOARD_REVISIONS.md)
+in `log-and-stream-common`, itself derived from `Shimmer_PCBREV_INDEX.xlsx`. Read it before changing
+anything transport-related. In outline only: first and second generation boards carry an **RN42**
+(Classic Bluetooth, no BLE radio at all), third generation moved to the dual-mode **RN4678**, and
+fourth generation (Shimmer3R) uses a **Vela IF820**. Board identity is `SR<board id>-<major>-<minor>`,
+held in the expansion-board EEPROM and read at runtime via `ShimBrd_getDaughtCardId()`.
+
+What actually matters for this SDK: `Shimmer3Client` has **no built-in BLE transport** and needs an
+injected transport whichever radio is in play. Never infer a board's capability from its model name
+or from a revision number alone.
 
 ## Consumers vendor `dist/`, they don't npm-install it
 
