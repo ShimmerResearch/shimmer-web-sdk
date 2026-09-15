@@ -25,6 +25,7 @@ import {
   SC_GLOBAL_HEADER_BYTES,
   type CalibrationSet,
 } from './calibration.js';
+import { classifyPpgLedTestFailure, resolveHardwarePpgSupport } from './ppgLedTest.js';
 import {
   buildHeader,
   buildMessage,
@@ -1972,8 +1973,45 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     await this.sendDebugCommand(DEBUG_COMMAND_ID.LED_TEST, [ledIndex & 0xff]);
   }
 
+  /**
+   * Run the MAX86xxx PPG LED test — `start` lights the PPG LEDs, `!start`
+   * turns them back off.
+   *
+   * Since DEV-973 (firmware commit `b98c113c3`) the device NACKs this command
+   * when it cannot talk to the PPG chip, where it previously ACKed
+   * unconditionally. A rejection therefore no longer means "unsupported": on
+   * hardware known to carry a MAX86xxx it means the PPG bus is wedged, and the
+   * LEDs are unlit *because the test never ran*. Callers must not present that
+   * to an operator as a dead-LED fault — see {@link classifyPpgLedTestFailure}
+   * for why the NACK cannot be disambiguated from the reply alone.
+   *
+   * @throws {@link VerisensePpgLedTestError} tagged with a `reason` — every
+   *         failure of this command is re-thrown classified.
+   */
   async max86xxxLedTest(start: boolean): Promise<void> {
-    await this.sendDebugCommand(DEBUG_COMMAND_ID.MAX86XXX_LED_TEST, [start ? 0x01 : 0x00]);
+    try {
+      await this.sendDebugCommand(DEBUG_COMMAND_ID.MAX86XXX_LED_TEST, [start ? 0x01 : 0x00]);
+    } catch (e) {
+      throw classifyPpgLedTestFailure(e, {
+        hardwarePpgSupport: this._cachedHardwarePpgSupport(),
+      });
+    }
+  }
+
+  /**
+   * PPG support of the connected hardware, from the production config already
+   * cached on this client. Deliberately does not read from the device: this is
+   * called on a failure path where the unit may be in a bad state, and a
+   * second round-trip could turn one classified failure into a timeout.
+   */
+  private _cachedHardwarePpgSupport(): boolean | null {
+    const blob = this.productionConfig;
+    if (!blob?.length || this._isErasedBlob(blob)) return null;
+    try {
+      return resolveHardwarePpgSupport(parseProductionConfigPayload(blob));
+    } catch {
+      return null;
+    }
   }
 
   async startPowerProfilerTest(): Promise<void> {
