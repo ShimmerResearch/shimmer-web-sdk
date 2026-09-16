@@ -1377,6 +1377,7 @@ export class Shimmer3Client extends BaseShimmerClient {
           /* Unwrap the counter — every 2 s on older firmware, every 512 s on
              newer — and place it on a wall clock when anchored. */
           const stamped = this._timeline.stamp(ts, Date.now());
+          oc.timestampValid = !stamped.invalid;
           oc.add('TIMESTAMP', stamped.deviceMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
           if (stamped.unixMs !== null) {
             oc.add(UNIX_TIMESTAMP_NAME, stamped.unixMs, CHANNEL_UNITS.MILLISECONDS, 'cal');

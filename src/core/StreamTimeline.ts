@@ -55,6 +55,24 @@ export const TICKS_PER_SECOND = 32768;
 export const TICKS_PER_MS = TICKS_PER_SECOND / 1000;
 
 /**
+ * How close to the top of the 24-bit range the previous sample must have been
+ * for a drop to exactly zero to be believed as a roll-over.
+ *
+ * One second. Firmware stamps a packet when the sample tick starts it and does
+ * not publish a packet it never stamped, so `0x000000` in the counter field
+ * means the record is invalid rather than that the counter reached its origin.
+ * LogAndStream v1.00.x–v1.01.003 could emit one under SD write back-pressure.
+ * A genuine wrap onto zero means the counter advanced to its very last tick, so
+ * its predecessor is within a sample or two of the maximum — a second is a
+ * generous allowance for a gap in the data, and nine orders of magnitude away
+ * from the mid-range predecessors the invalid records have.
+ *
+ * Only the 24-bit counter is judged this way. The 16-bit one's whole range is
+ * 2 s, so a stall really can cross it, and it keeps its existing behaviour.
+ */
+export const INVALID_ZERO_WINDOW_TICKS = TICKS_PER_SECOND;
+
+/**
  * Relative drift assumed between the sensor's clock and the host's, in parts
  * per million, when an anchor is bound to a stream some time after the reading
  * that produced it.
@@ -97,6 +115,16 @@ export interface StreamStamp {
   unixMs: number | null;
   /** Which anchor produced `unixMs`; `null` when there is none. */
   source: TimelineSource | null;
+  /**
+   * True when the packet's counter field was an invalid `0x000000` rather than
+   * a real reading — see {@link INVALID_ZERO_WINDOW_TICKS}.
+   *
+   * The timeline is held where it was, so the other three fields repeat the
+   * previous sample's and say nothing about when this one was taken. The
+   * sensor values on the frame are real; only its time is missing. Consumers
+   * that need a true time axis should drop the sample.
+   */
+  invalid: boolean;
 }
 
 /** What a host should be told about a timeline's anchor. */
@@ -311,9 +339,23 @@ export class StreamTimeline {
    * @param hostMs The host clock when the packet arrived. Used only to recover
    *   wraps that went by unseen — see below — never to time the sample, which
    *   the device's own counter does far better.
+   * @returns the sample's place on the timeline, or, for a packet whose counter
+   *   field is an invalid `0x000000`, the previous sample's place with
+   *   {@link StreamStamp.invalid} set and the timeline untouched.
    */
   stamp(raw: number, hostMs?: number): StreamStamp {
     const unwrapped = this._unwrap(raw, hostMs);
+
+    /* An invalid record. Every piece of timeline state holds where it is —
+       `_lastRaw` above all, so the next sample is compared against the last
+       value the firmware actually stamped and reads as the ordinary step
+       forward it is, rather than as a second wrap. `_lastHostMs` holds for the
+       same reason: the elapsed time the missed-wrap recovery works from must
+       span from that sample, not from this one. Nothing about a packet with no
+       timestamp is allowed to move the timeline, including binding an anchor
+       to it. */
+    if (unwrapped === null) return this._describe(this._lastUnwrapped, true);
+
     this._lastRaw = ((raw % this._modulo) + this._modulo) % this._modulo;
     this._lastUnwrapped = unwrapped;
     /* How many counter boundaries this session has crossed. The unwrapped value
@@ -327,17 +369,39 @@ export class StreamTimeline {
 
     if (this._pending) this._resolveAnchor(unwrapped, hostMs);
 
-    const deviceMs = unwrapped / TICKS_PER_MS;
-    if (!this._anchor) {
-      return { unwrappedTicks: unwrapped, deviceMs, unixMs: null, source: null };
-    }
-    const unixMs = this._anchor.unixMs + (unwrapped - this._anchor.unwrappedTicks) / TICKS_PER_MS;
-    return { unwrappedTicks: unwrapped, deviceMs, unixMs, source: this._anchor.source };
+    return this._describe(unwrapped, false);
   }
 
-  private _unwrap(raw: number, hostMs?: number): number {
+  /** Places an unwrapped tick value on the wall clock, if there is one. */
+  private _describe(unwrapped: number, invalid: boolean): StreamStamp {
+    const deviceMs = unwrapped / TICKS_PER_MS;
+    if (!this._anchor) {
+      return { unwrappedTicks: unwrapped, deviceMs, unixMs: null, source: null, invalid };
+    }
+    const unixMs = this._anchor.unixMs + (unwrapped - this._anchor.unwrappedTicks) / TICKS_PER_MS;
+    return { unwrappedTicks: unwrapped, deviceMs, unixMs, source: this._anchor.source, invalid };
+  }
+
+  /** @returns the unwrapped tick value, or `null` when the sample is invalid. */
+  private _unwrap(raw: number, hostMs?: number): number | null {
     const value = ((raw % this._modulo) + this._modulo) % this._modulo;
     if (this._lastRaw === null) return value;
+
+    /* A counter of exactly zero arriving from mid-range is not a roll-over: it
+       is a record the firmware never stamped. Read as a wrap it would put every
+       later sample in the session a clean 512 s late, which is how a customer's
+       9 minute 30 second recording imported as 43 minutes 38. The test is
+       deliberately narrow — the 24-bit counter, an exact zero, and a
+       predecessor further than {@link INVALID_ZERO_WINDOW_TICKS} from the top
+       of the range — so a genuine wrap onto zero is still accepted and the
+       16-bit counter is untouched. See the constant for why. */
+    if (
+      this._bits === 24 &&
+      value === 0 &&
+      this._lastRaw < this._modulo - INVALID_ZERO_WINDOW_TICKS
+    ) {
+      return null;
+    }
 
     const half = this._modulo / 2;
     /* Forward distance from the last sample, and whether to read it as forward
