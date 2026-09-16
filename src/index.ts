@@ -193,6 +193,13 @@ export type {
   FactoryTestRunOptions,
   AckVerdict,
 } from './devices/factoryTest/capture.js';
+export {
+  VerisensePpgLedTestError,
+  isVerisensePpgLedTestError,
+  classifyPpgLedTestFailure,
+  resolveHardwarePpgSupport,
+} from './devices/verisense/ppgLedTest.js';
+export type { VerisensePpgLedTestFailureReason } from './devices/verisense/ppgLedTest.js';
 
 // EEPROM brand (advertising name) record — shared by Shimmer3/Shimmer3R over
 // BLE/BT (readDaughterCardMem) and the dock UART / USB-C (CARD_MEM)

@@ -102,6 +102,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`max86xxxLedTest()` now rejects with a classified `VerisensePpgLedTestError`** instead of the raw transport error, and `classifyPpgLedTestFailure`, `resolveHardwarePpgSupport`, `isVerisensePpgLedTestError` and the `VerisensePpgLedTestFailureReason` type are exported alongside it (DEV-1021).
+
+  Verisense firmware `b98c113c3` (DEV-973) made this debug command NACK when it cannot reach the PPG chip, where it previously ACKed unconditionally. That matters more than a routine error would, because **the LED test is judged by an operator looking at the board**: a unit whose PPG bus is wedged lights nothing, so an unclassified refusal reads as "PPG LEDs dead" and a good board gets scrapped.
+
+  **The NACK is ambiguous on the wire, and cannot be made otherwise.** The firmware's debug dispatch guards the MAX86xxx branch with `doesHwSupportPpg()`, and the `else` catching unrecognised debug commands calls the same `sendNackGeneric()` (`asm_payload_parse.c`) — so firmware too old to know command `0x0E`, hardware carrying no PPG front end, and a wedged PPG bus all produce a byte-identical `NACK_GENERIC` on property `0x09`. Nothing in the reply separates them. The only usable discriminator is the hardware revision the host already holds from the production config, and that is what `reason` is derived from: `'ppg-comms'` on hardware known to carry a MAX86xxx, `'not-supported'` on hardware known not to, plus `'no-response'` for a timeout and `'unknown'` for anything else.
+
+  An **unknown** revision resolves to `'ppg-comms'`, not `'not-supported'`. The two misreadings are not symmetric — calling a comms fault "unsupported" is what scraps a good board, while the reverse merely puzzles an operator holding one that has no PPG — so this fails loud and says in `operatorMessage` that the revision could not be established. For the same reason the lookup reads the client's cached production config and never reads from the device: it runs on a failure path, where a second round trip can turn a classified failure into a timeout.
+
 - **`'uSiemens'` is now `'uS'`**, matching Java's `U_SIEMENS`. It appears in the streamed GSR field's unit and in the SD-log channel table; the only consumer is a CSV units row, and none of the demos parsed it.
 
 - **Raw fields carry `'no_units'` rather than `null`.** A units row with an empty cell reads as "the unit was not recorded"; this reads as "there is no unit", and those are different facts about a column. Java makes the same distinction with the same word. `TIMESTAMP` keeps `'ticks'`.
