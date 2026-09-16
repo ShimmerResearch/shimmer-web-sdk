@@ -211,6 +211,18 @@ Shimmer3R — its packet timestamp is the low 24 bits of the same counter
 `GET_RWC` returns), `rwc-estimated` (Shimmer3, from the request round trip, with
 the uncertainty stated), or `host` (no device clock; the Consensys method).
 
+`oc.timestampValid` says whether a frame's timestamp means anything. Firmware
+stamps a packet when the sample tick starts it, so a counter field of exactly
+`0x000000` is a record it published without stamping — LogAndStream
+v1.00.x–1.01.003 could do that under SD write back-pressure. Read as a
+roll-over, one such packet puts every later sample a clean 512 s late. The
+timeline rejects it instead: the frame still arrives, with its real sensor
+values and `timestampValid` false, and its `TIMESTAMP` fields repeat the
+previous frame's. Drop those frames if you need a true time axis. A genuine wrap
+onto zero is unaffected — its predecessor is at the top of the range — and the
+16-bit counter older firmware uses, whose whole range is 2 s, keeps its existing
+behaviour.
+
 `devices/calibration/streamChannels.ts` is the single table behind all of it, so
 the two platforms cannot drift apart on a formula, and
 `devices/shimmer3/sensorRules.ts` answers the configuration-side question of

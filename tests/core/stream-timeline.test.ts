@@ -129,6 +129,178 @@ describe('unwrapping — cases an adversarial review found', () => {
   });
 });
 
+/**
+ * A record whose counter field is exactly zero is one the firmware published
+ * without stamping — LogAndStream v1.00.x–1.01.003 could do it under SD write
+ * back-pressure. Read as a roll-over it costs a clean 512 s, which is how a
+ * customer's 9 minute 30 second recording imported as 43 minutes 38.
+ *
+ * Mirrors API_00009_TimestampUnwrapTest in the Java driver and
+ * TimestampUnwrapTest in the C# API. All five host implementations read the
+ * same wire format, so they have to agree on it.
+ */
+describe('invalid zero timestamps', () => {
+  it('rejects an exact zero arriving from mid-range', () => {
+    const t = new StreamTimeline();
+    t.stamp(7406506);
+    const bad = t.stamp(0);
+
+    expect(bad.invalid).toBe(true);
+    expect(bad.unwrappedTicks).toBe(7406506); // the timeline holds where it was
+    expect(t.state.wraps).toBe(0); // and no wrap may be counted for it
+  });
+
+  it('accepts a wrap that genuinely lands on zero', () => {
+    // The counter simply reached its last tick. What separates this from an
+    // invalid record is where it came from.
+    const t = new StreamTimeline();
+    t.stamp(MOD24 - 100);
+    const after = t.stamp(0);
+
+    expect(after.invalid).toBe(false);
+    expect(after.unwrappedTicks).toBe(MOD24);
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('accepts a zero at the window boundary and rejects one just past it', () => {
+    const inside = new StreamTimeline();
+    inside.stamp(MOD24 - TICKS_PER_SECOND);
+    expect(inside.stamp(0).invalid).toBe(false);
+
+    const outside = new StreamTimeline();
+    outside.stamp(MOD24 - TICKS_PER_SECOND - 1);
+    expect(outside.stamp(0).invalid).toBe(true);
+  });
+
+  it('does not let a rejection cascade', () => {
+    const t = new StreamTimeline();
+    t.stamp(7406506);
+    t.stamp(0);
+    const next = t.stamp(7406571); // one sample period on, at 504.123 Hz
+
+    expect(next.invalid).toBe(false);
+    expect(next.unwrappedTicks).toBe(7406571);
+    expect(t.state.wraps).toBe(0);
+  });
+
+  it('spans the customer signature in 455 ticks, not 512 seconds', () => {
+    // The exact sequence recovered from their file, either side of one of its
+    // four bad records.
+    const t = new StreamTimeline();
+    const first = t.stamp(7406116).unwrappedTicks;
+    let rejected = 0;
+    let last = first;
+    for (const raw of [7406506, 0, 7406571]) {
+      const st = t.stamp(raw);
+      if (st.invalid) rejected += 1;
+      else last = st.unwrappedTicks;
+    }
+
+    expect(rejected).toBe(1);
+    expect(last - first).toBe(455);
+    expect((last - first) / TICKS_PER_SECOND).toBeCloseTo(0.0139, 4);
+  });
+
+  it('leaves a whole recording the length it was recorded at', () => {
+    const t = new StreamTimeline();
+    const period = 65; // 32768 / 65 = 504.123 Hz
+    const start = 1_000_000;
+    let ticks = start;
+    let samples = 0;
+    let last = start;
+
+    for (let i = 0; i < 800; i += 1) {
+      if (i > 0 && i % 200 === 0) {
+        expect(t.stamp(0).invalid).toBe(true); // a bad record every 200 samples
+      }
+      last = t.stamp(ticks).unwrappedTicks;
+      samples += 1;
+      ticks += period;
+    }
+
+    expect(t.state.wraps).toBe(0);
+    expect(last - start).toBe((samples - 1) * period);
+  });
+
+  it('holds the host clock too, so a missed wrap is still recovered', () => {
+    // Recovering a wrap that went by unseen means comparing elapsed host time
+    // against the counter, and the elapsed time has to run from the last
+    // sample the device actually stamped. Were a rejected packet to advance
+    // the host reference, the gap would be measured from it instead and this
+    // sample would land a whole modulo early.
+    const t = new StreamTimeline();
+    t.stamp(1_000_000, 0);
+    t.stamp(0, 599_000); // rejected, late in a 600 s gap
+
+    // 600 s on: past one whole modulo, so the counter alone cannot say so.
+    const after = t.stamp(3_883_584, 600_000);
+    expect(after.invalid).toBe(false);
+    expect(after.unwrappedTicks).toBe(1_000_000 + 600 * TICKS_PER_SECOND);
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('leaves the 16-bit counter alone', () => {
+    // Its whole range is 2 s, so a stall really can cross it and a drop to
+    // zero from anywhere is a wrap.
+    const t = new StreamTimeline({ timestampBits: 16 });
+    t.stamp(30000);
+    const after = t.stamp(0);
+
+    expect(after.invalid).toBe(false);
+    expect(after.unwrappedTicks).toBe(MOD16);
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('accepts a zero as the first sample of a stream', () => {
+    const t = new StreamTimeline();
+    const first = t.stamp(0);
+
+    expect(first.invalid).toBe(false); // nothing precedes it to contradict it
+    expect(first.unwrappedTicks).toBe(0);
+  });
+
+  it('still reads a non-zero backward step as a reorder or a wrap', () => {
+    // Only an exact zero is exempt.
+    const t = new StreamTimeline();
+    t.stamp(7406506);
+    const after = t.stamp(1);
+
+    expect(after.invalid).toBe(false);
+    expect(after.unwrappedTicks).toBe(MOD24 + 1);
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('will not bind a pending anchor to a packet with no timestamp', () => {
+    const t = new StreamTimeline();
+    t.stamp(7406506, 1_000_000);
+    t.anchorToHost(1_000_002);
+
+    const bad = t.stamp(0, 1_000_002);
+    expect(bad.invalid).toBe(true);
+    expect(bad.unixMs).toBeNull();
+    expect(t.anchored).toBe(false); // still waiting for a sample to bind to
+
+    // The next real sample takes it instead, and the anchor's origin is that
+    // sample's tick value rather than the held one.
+    const good = t.stamp(7406571, 1_000_004);
+    expect(good.invalid).toBe(false);
+    expect(t.anchored).toBe(true);
+    expect(good.unixMs).toBe(t.state.anchorUnixMs);
+    expect(t.state.source).toBe('host');
+  });
+
+  it('reports an anchored invalid sample at the held time, not at a new one', () => {
+    const t = new StreamTimeline();
+    t.anchorToHost(1_000_000);
+    const good = t.stamp(7406506, 1_000_000);
+    const bad = t.stamp(0, 1_000_002);
+
+    expect(bad.invalid).toBe(true);
+    expect(bad.unixMs).toBe(good.unixMs);
+    expect(bad.source).toBe('host');
+  });
+});
+
 describe('rwc-aligned anchoring (Shimmer3R)', () => {
   /** 2026-09-09T12:00:00Z as a tick count, the shape GET_RWC returns. */
   const unixMs = Date.UTC(2026, 8, 9, 12, 0, 0);

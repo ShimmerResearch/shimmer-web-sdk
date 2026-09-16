@@ -3608,6 +3608,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
              anchored, places it on a wall clock. Both go on the frame as
              calibrated fields so a plot and a CSV can use them like any other. */
           const stamped = this._timeline.stamp(ts, Date.now());
+          oc.timestampValid = !stamped.invalid;
           oc.add('TIMESTAMP', stamped.deviceMs, CHANNEL_UNITS.MILLISECONDS, 'cal');
           if (stamped.unixMs !== null) {
             oc.add(UNIX_TIMESTAMP_NAME, stamped.unixMs, CHANNEL_UNITS.MILLISECONDS, 'cal');

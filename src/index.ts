@@ -758,7 +758,12 @@ export type {
 
 // Unwrapping the sample counter, and placing samples on a wall clock. Usable on
 // its own by a host that decodes frames itself.
-export { StreamTimeline, TICKS_PER_SECOND, TICKS_PER_MS } from './core/StreamTimeline.js';
+export {
+  StreamTimeline,
+  TICKS_PER_SECOND,
+  TICKS_PER_MS,
+  INVALID_ZERO_WINDOW_TICKS,
+} from './core/StreamTimeline.js';
 export type {
   StreamStamp,
   TimelineState,
