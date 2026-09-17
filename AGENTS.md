@@ -48,3 +48,19 @@ or from a revision number alone.
 SDK, bump the version and run `../sync-all-vendors.ps1` from the workspace root — it builds here and
 delegates to each consumer's own `sync-local-sdk.ps1`. Never hand-copy `dist/` files into a consumer;
 the sync scripts also stamp `sdk-source.json`, which the consumer UIs display.
+
+## A vendored bump is not a release
+
+That bump is what the consoles see, and it is all they need — but it publishes nothing. A release is
+the **Cut Release** workflow (Actions → Cut Release → major/minor/patch): it tests, builds, runs
+`npm version` on top of whatever `package.json` already says, publishes to GitHub Packages, tags, and
+writes the GitHub release. Nothing else publishes, and it tags every time it does.
+
+The two drifted apart once already: `v0.1.7` (May 2026) is the last tag, while hand bumps for
+vendoring carried `package.json` to `0.3.0` — so a dozen versions the consoles ran exist nowhere in
+the release history. If you bump for vendoring, say in the pull request whether a release is meant to
+follow.
+
+Roll `CHANGELOG.md` in the pull request that precedes a release: `## [Unreleased]` becomes
+`## [x.y.z] - <date>` and a fresh empty `[Unreleased]` goes above it. Everything up to `0.3.0` went
+unrolled and had to be reconstructed from git history.
