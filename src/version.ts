@@ -7,4 +7,4 @@
  * from it by the Bump step in cut-release.yml — the release bumps this file
  * as well as package.json, so a published bundle reports its own version.
  */
-export const SDK_VERSION = '0.4.0';
+export const SDK_VERSION = '0.4.1';
