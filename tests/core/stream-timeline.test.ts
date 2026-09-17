@@ -127,6 +127,26 @@ describe('the reorder window', () => {
     expect(t.reorderWindowTicks).toBe(262144);
   });
 
+  it('clamps an explicit window too, so a wrap is always detectable', () => {
+    /* A window at or above the modulo leaves no backward step large enough to
+       be a wrap: the unwrap stops counting them and the recording quietly runs
+       short. The derivation has always been clamped; the explicit setter was
+       not, so a caller could express the one thing the clamp exists to make
+       impossible. */
+    const t = new StreamTimeline({ timestampBits: 16, reorderWindowTicks: 100000 });
+    expect(t.reorderWindowTicks).toBe(MOD16 / 8);
+
+    t.stamp(65000);
+    expect(t.stamp(100).unwrappedTicks).toBe(MOD16 + 100);
+    expect(t.state.wraps).toBe(1);
+
+    // And the clamp follows the modulo, not the moment the setter was called.
+    const wide = new StreamTimeline({ reorderWindowTicks: 1_000_000 });
+    expect(wide.reorderWindowTicks).toBe(1_000_000); // fits at 24 bits
+    wide.setTimestampBits(16);
+    expect(wide.reorderWindowTicks).toBe(MOD16 / 8);
+  });
+
   it('can be set outright, overriding the rate', () => {
     const t = new StreamTimeline({ samplingRateHz: 51.2, reorderWindowTicks: 0 });
     expect(t.reorderWindowTicks).toBe(0);

@@ -325,8 +325,9 @@ export class StreamTimeline {
    * outright when the rate is unknown. Pass the rate and the question does not
    * arise: the derived window is better in every case.
    *
-   * Cheap and idempotent — a client calls it whenever the rate changes, and the
-   * next sample is judged by the new window.
+   * Cheap and idempotent. Both clients call it once per stream, from the rate
+   * the inquiry reported; calling it mid-stream is allowed and the next sample
+   * is judged by the new window.
    */
   setSamplingRateHz(samplingRateHz: number | null): void {
     this._samplingRateHz =
@@ -339,6 +340,10 @@ export class StreamTimeline {
   /**
    * Set the reorder window outright, in ticks, or `null` to go back to deriving
    * it from the sampling rate. `0` disables the branch.
+   *
+   * Clamped to an eighth of the counter's range, as a derived window is — see
+   * {@link _recomputeReorderWindow}. {@link reorderWindowTicks} reports what is
+   * actually in force.
    */
   setReorderWindowTicks(ticks: number | null): void {
     this._reorderWindowOverride =
@@ -371,7 +376,16 @@ export class StreamTimeline {
   /** Explicit window, else the rate-derived one, else the legacy fallback. */
   private _recomputeReorderWindow(): void {
     if (this._reorderWindowOverride !== null) {
-      this._reorderWindow = this._reorderWindowOverride;
+      /* Clamped like a derived window, and for the same reason: a window at or
+         above the modulo leaves no backward step large enough to be a wrap, so
+         the unwrap stops counting them and a recording quietly runs short. That
+         must not be expressible, whether the number came from a rate or from a
+         caller. Clamped here rather than in the setter because
+         {@link setTimestampBits} can change the modulo afterwards. */
+      this._reorderWindow = Math.min(
+        this._reorderWindowOverride,
+        this._modulo / MAX_WINDOW_DIVISOR,
+      );
     } else if (this._samplingRateHz !== null) {
       this._reorderWindow = reorderWindowTicks(this._samplingRateHz, this._modulo);
     } else {

@@ -19,7 +19,7 @@ import {
  * `log-and-stream-common`, `Test/conformance/timestamp_unwrap.json`, beside the
  * prose it encodes and a reference implementation that regenerates and
  * re-checks it in CI. The copy here is byte-identical: git blob
- * `367efd9979634e8e6fdfbb60a7f7cc64df156721` in both repositories, which is
+ * `de91de25accc7c74c0422f7e279a535da92579d9` in both repositories, which is
  * what `git hash-object` on either file prints. Every other Shimmer host API
  * runs the same file.
  *
@@ -99,6 +99,7 @@ const EXPECTED_IDS = [
   'low-rate-clamp-16bit',
   'high-rate-reorder-24bit',
   'reorder-beyond-eight-periods-is-a-wrap-24bit',
+  'reorder-onto-origin-then-earlier-packet-24bit',
 ];
 
 describe('shared timestamp-unwrap vectors', () => {
