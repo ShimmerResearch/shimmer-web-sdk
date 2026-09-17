@@ -58,10 +58,12 @@ so the bundle reports its own version — then tests, builds, commits and tags t
 GitHub Packages and writes the GitHub release. Nothing else publishes, and it tags every time it
 does.
 
-The two drifted apart once already: `v0.1.7` (May 2026) is the last tag, while hand bumps for
-vendoring carried `package.json` to `0.3.0` — so a dozen versions the consoles ran exist nowhere in
-the release history. If you bump for vendoring, say in the pull request whether a release is meant to
-follow.
+The two drifted apart once already: tagging stopped at `v0.1.7` (May 2026) while hand bumps for
+vendoring carried `package.json` to `0.3.0`, so two dozen versions the consoles ran existed nowhere in
+the release history. They were backfilled on 2026-09-17 — a tag at each bump commit, a release page for
+each stable one — but a backfilled tag cannot conjure a package artifact, and there is none behind any of
+them. Don't let it happen again: if you bump for vendoring, say in the pull request whether a release is
+meant to follow.
 
 Roll `CHANGELOG.md` in the pull request that precedes a release: `## [Unreleased]` becomes
 `## [x.y.z] - <date>` and a fresh empty `[Unreleased]` goes above it. Everything up to `0.3.0` went
