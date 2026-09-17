@@ -861,7 +861,11 @@ export type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  ThroughputTestOptions,
+  ThroughputTestResult,
+  /** @deprecated Renamed to `ThroughputTestOptions`. */
   BleThroughputTestOptions,
+  /** @deprecated Renamed to `ThroughputTestResult`. */
   BleThroughputTestResult,
   VerisenseConnectWithRetryOptions,
   VerisenseConnectRetryInfo,

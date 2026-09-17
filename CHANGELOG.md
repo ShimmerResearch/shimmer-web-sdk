@@ -102,6 +102,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`runBleThroughputTest()` is now `runThroughputTest()`**, and `BleThroughputTestOptions` / `BleThroughputTestResult` are now `ThroughputTestOptions` / `ThroughputTestResult`. The old names remain as a forwarding method and two type aliases, all marked `@deprecated`, so vendored builds and existing callers keep working unchanged.
+
+  **Nothing about the measurement is BLE-specific.** It asks the device to blast a fixed dummy buffer (debug command `0x0B`) and counts what arrives on the attached transport, so it measures a Web Serial link exactly as it measures a Web Bluetooth one — `verisense-device-console` has been running it over USB serial all along, under a button labelled "BLE Throughput Test". The name was the only thing claiming otherwise, and a caller who believed it would skip the test on a serial connection for no reason.
+
+  The doc comment now separates what actually is link-specific: over BLE the rate is governed by the negotiated PHY, connection interval, MTU and packets per connection interval; over serial it is that link's own ceiling. `packetsReceived` is documented as chunks — BLE notifications, or serial reads — rather than notifications alone.
+
 - **`max86xxxLedTest()` now rejects with a classified `VerisensePpgLedTestError`** instead of the raw transport error, and `classifyPpgLedTestFailure`, `resolveHardwarePpgSupport`, `isVerisensePpgLedTestError` and the `VerisensePpgLedTestFailureReason` type are exported alongside it (DEV-1021).
 
   Verisense firmware `b98c113c3` (DEV-973) made this debug command NACK when it cannot reach the PPG chip, where it previously ACKed unconditionally. That matters more than a routine error would, because **the LED test is judged by an operator looking at the board**: a unit whose PPG bus is wedged lights nothing, so an unclassified refusal reads as "PPG LEDs dead" and a good board gets scrapped.

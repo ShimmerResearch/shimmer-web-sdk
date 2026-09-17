@@ -86,8 +86,8 @@ import {
 import type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
-  BleThroughputTestOptions,
-  BleThroughputTestResult,
+  ThroughputTestOptions,
+  ThroughputTestResult,
   DeviceMode,
   VerisenseConnectRetryInfo,
   VerisenseConnectWithRetryOptions,
@@ -107,6 +107,8 @@ export type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  ThroughputTestOptions,
+  ThroughputTestResult,
   BleThroughputTestOptions,
   BleThroughputTestResult,
   DeviceMode,
@@ -209,7 +211,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _loggedChain: Promise<void> = Promise.resolve();
   private _sync: SyncSession | null = null;
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
-  private _throughputTestMode = false; // Flag to count raw bytes during a BLE throughput test
+  private _throughputTestMode = false; // Flag to count raw bytes during a throughput test
   private _bootstrapRequestTimeoutOverrideMs: number | null = null;
   // Set by disconnect() so an in-flight connectWithRetry() loop stops instead
   // of treating the resulting GATT teardown as a transient link drop.
@@ -1813,12 +1815,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   /**
-   * Low-level: ask the device to saturate the BLE link with dummy data for
+   * Low-level: ask the device to saturate the link with dummy data for
    * `durationMs` milliseconds (debug command 0x0B). The device ACKs immediately
    * and then blasts a fixed 244-byte buffer as fast as the link will accept it.
    *
    * This only starts the blast; it does not measure anything. Prefer
-   * {@link runBleThroughputTest}, which sends this command and measures the
+   * {@link runThroughputTest}, which sends this command and measures the
    * throughput actually received at the host.
    *
    * @param durationMs Blast duration in milliseconds (clamped to the protocol's 0..65535 range).
@@ -1832,23 +1834,24 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   }
 
   /**
-   * Measure the maximum BLE link throughput, independent of sensor
+   * Measure the maximum throughput of the link in use, independent of sensor
    * configuration. Asks the device to blast dummy data for `durationMs`
    * (see {@link testDataTransferLoop}) and measures the goodput actually
    * received at the host.
    *
-   * The reported rate reflects device→host (notification) throughput and is
-   * governed by the negotiated PHY, connection interval, MTU and packets per
-   * connection interval — i.e. the real link, not any sensor's sample rate.
+   * Nothing here is BLE-specific: the blast is counted as it arrives on the
+   * attached transport, so this measures a Web Serial link as readily as a
+   * Web Bluetooth one. Over BLE the rate is governed by the negotiated PHY,
+   * connection interval, MTU and packets per connection interval; over serial
+   * by that link's own ceiling. Either way it is the real link that is
+   * measured, not any sensor's sample rate.
    *
    * The measurement finishes when the device falls silent for `idleMs` after
    * the blast (or when the overall safety timeout elapses).
    *
    * @returns received byte/packet counts and the computed throughput.
    */
-  async runBleThroughputTest(
-    opts: BleThroughputTestOptions = {},
-  ): Promise<BleThroughputTestResult> {
+  async runThroughputTest(opts: ThroughputTestOptions = {}): Promise<ThroughputTestResult> {
     const durationMs = Math.max(100, Math.min(60000, Math.trunc(opts.durationMs ?? 5000)));
     const idleMs = Math.max(100, Math.min(5000, Math.trunc(opts.idleMs ?? 600)));
     const overallTimeoutMs = Math.max(
@@ -1858,7 +1861,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const abortSignal = opts.signal ?? null;
     const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
 
-    return new Promise<BleThroughputTestResult>((resolve, reject) => {
+    return new Promise<ThroughputTestResult>((resolve, reject) => {
       let done = false;
       let bytes = 0;
       let packets = 0;
@@ -1869,7 +1872,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       let off: (() => void) | null = null;
       let onAbort: (() => void) | null = null;
 
-      const buildResult = (): BleThroughputTestResult => {
+      const buildResult = (): ThroughputTestResult => {
         const elapsedMs =
           packets > 1 && lastByteMs > firstByteMs ? lastByteMs - firstByteMs : durationMs;
         const bps = elapsedMs > 0 ? (bytes * 1000) / elapsedMs : 0;
@@ -1951,10 +1954,10 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       if (abortSignal) {
         if (abortSignal.aborted) {
-          finish(new Error('runBleThroughputTest aborted'));
+          finish(new Error('runThroughputTest aborted'));
           return;
         }
-        onAbort = () => finish(new Error('runBleThroughputTest aborted'));
+        onAbort = () => finish(new Error('runThroughputTest aborted'));
         abortSignal.addEventListener('abort', onAbort, { once: true });
       }
 
@@ -1964,9 +1967,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       this._throughputTestMode = true;
       void this.testDataTransferLoop(durationMs).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
-        finish(new Error(`runBleThroughputTest failed to start: ${msg}`));
+        finish(new Error(`runThroughputTest failed to start: ${msg}`));
       });
     });
+  }
+
+  /**
+   * @deprecated Renamed to {@link runThroughputTest}. The old name said BLE,
+   * but the measurement counts whatever arrives on the attached transport and
+   * is used over Web Serial too. Kept so existing callers — including the
+   * consoles running an older vendored build — keep working; it forwards
+   * unchanged.
+   */
+  async runBleThroughputTest(opts: ThroughputTestOptions = {}): Promise<ThroughputTestResult> {
+    return this.runThroughputTest(opts);
   }
 
   async ledTest(ledIndex: number): Promise<void> {
