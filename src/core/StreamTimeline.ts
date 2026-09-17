@@ -73,6 +73,59 @@ export const TICKS_PER_MS = TICKS_PER_SECOND / 1000;
 export const INVALID_ZERO_WINDOW_TICKS = TICKS_PER_SECOND;
 
 /**
+ * How many sample periods behind its predecessor a value may be and still be
+ * read as a reordered packet rather than as forward motion across a wrap.
+ *
+ * A reorder swaps packets that are adjacent in time, so it spans a handful of
+ * sample periods; a dropout spans whatever the link lost. Eight periods sits
+ * orders of magnitude clear of both at any rate the hardware offers.
+ */
+export const REORDER_PERIODS = 8;
+
+/**
+ * The largest fraction of the counter's range a reorder window may occupy.
+ *
+ * At 1 Hz on the 16-bit counter eight sample periods is four whole modulos, and
+ * a window at or above the modulo leaves no backward step large enough to be a
+ * wrap — the unwrap would stop counting them altogether.
+ */
+export const MAX_WINDOW_DIVISOR = 8;
+
+/**
+ * The reorder window for a stream at a known sampling rate, in counter ticks.
+ *
+ * Sized in **sample periods**, not as a fraction of the counter's range. The
+ * two are easy to confuse and behave very differently: a reorder swaps adjacent
+ * packets, whereas a dropout that happens to span the wrap point is most of a
+ * modulo. Sizing the window by the modulo puts the boundary between them in the
+ * middle of ordinary dropout territory — at 2^16 every gap between 1.75 s and
+ * 2.0 s reads as a reorder and the wrap is silently lost, and 1.75 s is a gap a
+ * Bluetooth link produces on a bad afternoon. Eight sample periods shrinks that
+ * misread band to about 16 ms.
+ *
+ * `0` — the branch disabled — when the rate is not a positive finite number.
+ * Never guess: an unknown rate must not become an infinite window, which would
+ * read every backward step as a reorder and lose every wrap. That is a worse
+ * failure than no reorder detection at all, and it is how a parallel fix for
+ * this same defect reverted itself whenever the rate happened to read zero.
+ *
+ * @param samplingRateHz Samples per second. **The counter's own 32768 Hz tick
+ *   domain is what the answer is in** — pass the rate in Hz, never a rate
+ *   expressed against a TCXO sampling clock.
+ * @param modulo The counter's range, `2 ** timestampBits`.
+ */
+export function reorderWindowTicks(
+  samplingRateHz: number | null | undefined,
+  modulo: number,
+): number {
+  if (samplingRateHz == null || !Number.isFinite(samplingRateHz) || samplingRateHz <= 0) return 0;
+  return Math.min(
+    (REORDER_PERIODS * TICKS_PER_SECOND) / samplingRateHz,
+    modulo / MAX_WINDOW_DIVISOR,
+  );
+}
+
+/**
  * Relative drift assumed between the sensor's clock and the host's, in parts
  * per million, when an anchor is bound to a stream some time after the reading
  * that produced it.
@@ -164,6 +217,16 @@ export interface TimelineState {
   wraps: number;
   /** The counter width in use. */
   timestampBits: TimestampBits;
+  /**
+   * The reorder window in force, in counter ticks — how far behind its
+   * predecessor a sample may be and still be placed where it was taken rather
+   * than read as a wrap.
+   *
+   * Reported so a host can see that its sampling rate reached the timeline.
+   * See {@link reorderWindowTicks} and
+   * {@link StreamTimeline.setSamplingRateHz}.
+   */
+  reorderWindowTicks: number;
 }
 
 interface PendingAnchor {
@@ -192,6 +255,19 @@ interface ResolvedAnchor {
 export interface StreamTimelineOptions {
   /** Counter width. Default 24. */
   timestampBits?: TimestampBits;
+  /**
+   * The stream's sampling rate, which sizes the reorder window. Omit, or pass
+   * `null`, when it is not known yet — a client normally learns it from an
+   * inquiry and calls {@link StreamTimeline.setSamplingRateHz} later.
+   */
+  samplingRateHz?: number | null;
+  /**
+   * The reorder window outright, in ticks, overriding the rate. For a caller
+   * that knows better than the derivation — and for the shared conformance
+   * vectors, which specify the window rather than the rate so that every host
+   * API runs them identically.
+   */
+  reorderWindowTicks?: number | null;
 }
 
 /**
@@ -211,10 +287,14 @@ export class StreamTimeline {
   private _wraps = 0;
   /**
    * How far behind the previous sample a value may be and still be read as a
-   * reordered packet rather than as forward motion across a wrap. An eighth of
-   * the modulo; see {@link _unwrap} for why not half.
+   * reordered packet rather than as forward motion across a wrap, in ticks.
+   * Derived — see {@link _recomputeReorderWindow}.
    */
-  private _reorderWindow: number;
+  private _reorderWindow = 0;
+  /** The stream's sampling rate, or `null` when it is not known. */
+  private _samplingRateHz: number | null = null;
+  /** A window set outright by the caller, overriding the derivation. */
+  private _reorderWindowOverride: number | null = null;
   private _pending: PendingAnchor | null = null;
   private _anchor: ResolvedAnchor | null = null;
   /**
@@ -228,7 +308,89 @@ export class StreamTimeline {
   constructor(opts: StreamTimelineOptions = {}) {
     this._bits = opts.timestampBits ?? 24;
     this._modulo = 2 ** this._bits;
-    this._reorderWindow = this._modulo / 8;
+    this.setSamplingRateHz(opts.samplingRateHz ?? null);
+    this.setReorderWindowTicks(opts.reorderWindowTicks ?? null);
+  }
+
+  /**
+   * Tell the timeline the stream's sampling rate, so that it can size the
+   * reorder window in sample periods.
+   *
+   * `null` — or anything that is not a positive finite number — means "not
+   * known", and the window falls back to an eighth of the modulo, which is what
+   * this class has always used. That fallback is a compromise this SDK can
+   * afford and a file importer cannot: on a live link the host-clock recovery
+   * in {@link _unwrap} is a second witness, whereas an SD file has no clock to
+   * appeal to and the other Shimmer host APIs therefore disable the branch
+   * outright when the rate is unknown. Pass the rate and the question does not
+   * arise: the derived window is better in every case.
+   *
+   * Cheap and idempotent. Both clients call it once per stream, from the rate
+   * the inquiry reported; calling it mid-stream is allowed and the next sample
+   * is judged by the new window.
+   */
+  setSamplingRateHz(samplingRateHz: number | null): void {
+    this._samplingRateHz =
+      samplingRateHz !== null && Number.isFinite(samplingRateHz) && samplingRateHz > 0
+        ? samplingRateHz
+        : null;
+    this._recomputeReorderWindow();
+  }
+
+  /**
+   * Set the reorder window outright, in ticks, or `null` to go back to deriving
+   * it from the sampling rate. `0` disables the branch.
+   *
+   * Clamped to an eighth of the counter's range, as a derived window is — see
+   * {@link _recomputeReorderWindow}. {@link reorderWindowTicks} reports what is
+   * actually in force.
+   */
+  setReorderWindowTicks(ticks: number | null): void {
+    this._reorderWindowOverride =
+      ticks !== null && Number.isFinite(ticks) && ticks >= 0 ? ticks : null;
+    this._recomputeReorderWindow();
+  }
+
+  /** The reorder window in force, in counter ticks. */
+  get reorderWindowTicks(): number {
+    return this._reorderWindow;
+  }
+
+  /**
+   * True when the window in force is a reorder-scale one — derived from a known
+   * rate, or set outright by the caller — rather than the rate-unknown
+   * fallback.
+   *
+   * It decides whether a reorder is allowed to overrule the invalid-zero test
+   * (see {@link _unwrap}). A window of a few sample periods can: a zero that
+   * close to an origin really is ambiguous, and the cost of choosing wrong is
+   * about 16 ms. An eighth of the modulo cannot: it is 64 s on the 24-bit
+   * counter, and reading an unstamped record as a packet 64 s late would place
+   * it 64 s early and call it valid, which is worse than either answer the rule
+   * is choosing between.
+   */
+  private get _windowIsReorderScale(): boolean {
+    return this._reorderWindowOverride !== null || this._samplingRateHz !== null;
+  }
+
+  /** Explicit window, else the rate-derived one, else the legacy fallback. */
+  private _recomputeReorderWindow(): void {
+    if (this._reorderWindowOverride !== null) {
+      /* Clamped like a derived window, and for the same reason: a window at or
+         above the modulo leaves no backward step large enough to be a wrap, so
+         the unwrap stops counting them and a recording quietly runs short. That
+         must not be expressible, whether the number came from a rate or from a
+         caller. Clamped here rather than in the setter because
+         {@link setTimestampBits} can change the modulo afterwards. */
+      this._reorderWindow = Math.min(
+        this._reorderWindowOverride,
+        this._modulo / MAX_WINDOW_DIVISOR,
+      );
+    } else if (this._samplingRateHz !== null) {
+      this._reorderWindow = reorderWindowTicks(this._samplingRateHz, this._modulo);
+    } else {
+      this._reorderWindow = this._modulo / MAX_WINDOW_DIVISOR;
+    }
   }
 
   /** The counter width this timeline is unwrapping. */
@@ -248,7 +410,10 @@ export class StreamTimeline {
     if (bits === this._bits) return;
     this._bits = bits;
     this._modulo = 2 ** bits;
-    this._reorderWindow = this._modulo / 8;
+    /* The window is clamped against the modulo and may be derived from it, so
+       it has to be recomputed here. The sampling rate is not a property of the
+       counter width and is deliberately kept. */
+    this._recomputeReorderWindow();
     this.reset();
   }
 
@@ -387,6 +552,26 @@ export class StreamTimeline {
     const value = ((raw % this._modulo) + this._modulo) % this._modulo;
     if (this._lastRaw === null) return value;
 
+    /* Everything below is decided on the MODULAR forward distance from the last
+       sample — never by comparing candidate unwrapped values, which looks
+       equivalent and is not. A packet arriving late from just before a wrap
+       boundary has an unwrapped candidate ABOVE its predecessor, so a
+       comparison accepts it as forward motion of nearly a whole modulo, and
+       then reads the next real sample as a second wrap: `[2^24 - 10, 5,
+       2^24 - 10, 70]` lands at 33554502, two modulos out, from one out-of-order
+       packet. The modular distance sees it for what it is.
+
+       A duplicate (`forward === 0`) holds the timeline exactly where it is, and
+       falls out of the arithmetic below without a branch of its own.
+
+       Forward motion is the DEFAULT. That is what keeps a wrap preceded by a
+       long dropout classified as a wrap: however much was lost, the counter
+       still rolled over. A rule that defaults the other way — "a backward step
+       is corrupt unless it clears some threshold" — fails exactly there. */
+    const forward = (value - this._lastRaw + this._modulo) % this._modulo;
+    const backwards = this._modulo - forward;
+    const reordered = forward !== 0 && backwards <= this._reorderWindow;
+
     /* A counter of exactly zero arriving from mid-range is not a roll-over: it
        is a record the firmware never stamped. Read as a wrap it would put every
        later sample in the session a clean 512 s late, which is how a customer's
@@ -394,8 +579,14 @@ export class StreamTimeline {
        deliberately narrow — the 24-bit counter, an exact zero, and a
        predecessor further than {@link INVALID_ZERO_WINDOW_TICKS} from the top
        of the range — so a genuine wrap onto zero is still accepted and the
-       16-bit counter is untouched. See the constant for why. */
+       16-bit counter is untouched. See the constant for why.
+
+       A reorder comes first, so a zero within a window of an origin is placed
+       rather than rejected: that is the order every Shimmer host API uses. It
+       only applies to a reorder-scale window — see
+       {@link _windowIsReorderScale}. */
     if (
+      !(reordered && this._windowIsReorderScale) &&
       this._bits === 24 &&
       value === 0 &&
       this._lastRaw < this._modulo - INVALID_ZERO_WINDOW_TICKS
@@ -404,29 +595,7 @@ export class StreamTimeline {
     }
 
     const half = this._modulo / 2;
-    /* Forward distance from the last sample, and whether to read it as forward
-       motion (crossing a wrap if it has to) or as a small step BACKWARDS —
-       a duplicated or reordered packet. Without the backwards case one
-       out-of-order packet adds a whole modulo, 512 s on a Shimmer3R, for the
-       rest of the session.
-
-       The threshold is the REORDER WINDOW, not half the modulo. Half looks
-       like the natural split and is wrong on the 16-bit counter: its whole
-       modulo is 2 s, so a genuine forward gap of more than a second — which a
-       single missed Bluetooth window produces — reads as a step backwards, and
-       the sample lands almost a modulo early. What actually distinguishes the
-       two is magnitude: a reorder swaps packets that are adjacent in time, so
-       it is a handful of sample periods, while a gap is whatever the link
-       dropped. An eighth of the modulo is 64 s on the 24-bit counter and
-       0.25 s on the 16-bit one — far larger than any reorder, far smaller than
-       a gap worth recovering. A duplicate (`forward === 0`) is unaffected
-       either way. */
-    const forward = (value - this._lastRaw + this._modulo) % this._modulo;
-    const backwards = this._modulo - forward;
-    let unwrapped =
-      backwards <= this._reorderWindow && forward !== 0
-        ? this._lastUnwrapped - backwards
-        : this._lastUnwrapped + forward;
+    let unwrapped = reordered ? this._lastUnwrapped - backwards : this._lastUnwrapped + forward;
 
     /* The rule above cannot see a wrap that went by entirely — more than a
        whole modulo of samples missed, which is 512 s on a 24-bit counter but
@@ -562,6 +731,7 @@ export class StreamTimeline {
       skewMs: this._anchor?.skewMs ?? null,
       wraps: this._wraps,
       timestampBits: this._bits,
+      reorderWindowTicks: this._reorderWindow,
     };
   }
 
