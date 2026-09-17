@@ -52,9 +52,11 @@ the sync scripts also stamp `sdk-source.json`, which the consumer UIs display.
 ## A vendored bump is not a release
 
 That bump is what the consoles see, and it is all they need — but it publishes nothing. A release is
-the **Cut Release** workflow (Actions → Cut Release → major/minor/patch): it tests, builds, runs
-`npm version` on top of whatever `package.json` already says, publishes to GitHub Packages, tags, and
-writes the GitHub release. Nothing else publishes, and it tags every time it does.
+the **Cut Release** workflow (Actions → Cut Release → major/minor/patch): it runs `npm version` on top
+of whatever `package.json` already says — carrying `package-lock.json` and `src/version.ts` with it,
+so the bundle reports its own version — then tests, builds, commits and tags that tree, publishes to
+GitHub Packages and writes the GitHub release. Nothing else publishes, and it tags every time it
+does.
 
 The two drifted apart once already: `v0.1.7` (May 2026) is the last tag, while hand bumps for
 vendoring carried `package.json` to `0.3.0` — so a dozen versions the consoles ran exist nowhere in
