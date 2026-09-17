@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { StreamTimeline, TICKS_PER_MS, TICKS_PER_SECOND } from '../../src/core/StreamTimeline.js';
+import {
+  StreamTimeline,
+  TICKS_PER_MS,
+  TICKS_PER_SECOND,
+  reorderWindowTicks,
+} from '../../src/core/StreamTimeline.js';
 
 const MOD24 = 2 ** 24;
 const MOD16 = 2 ** 16;
@@ -83,6 +88,123 @@ describe('unwrapping', () => {
     expect(t.timestampBits).toBe(16);
     expect(t.state.wraps).toBe(0);
     expect(t.stamp(50).unwrappedTicks).toBe(50);
+  });
+});
+
+describe('the reorder window', () => {
+  it('is eight sample periods once the rate is known', () => {
+    const t = new StreamTimeline();
+    // The fallback, for a timeline nobody has told the rate to.
+    expect(t.reorderWindowTicks).toBe(MOD24 / 8);
+
+    t.setSamplingRateHz(51.2);
+    expect(t.reorderWindowTicks).toBe(5120); // 8 x 640 ticks
+    t.setSamplingRateHz(32768 / 65); // 504.123 Hz, the customer's rate
+    expect(t.reorderWindowTicks).toBe(520);
+
+    // And back, so a client that loses its rate does not keep a stale window.
+    t.setSamplingRateHz(null);
+    expect(t.reorderWindowTicks).toBe(MOD24 / 8);
+  });
+
+  it('is clamped, so a very low rate still leaves wraps detectable', () => {
+    /* At 1 Hz eight periods is 262144 ticks — four whole 16-bit modulos. A
+       window at or above the modulo leaves no backward step large enough to be
+       a wrap, and the unwrap would stop counting them entirely. */
+    const t = new StreamTimeline({ timestampBits: 16, samplingRateHz: 1 });
+    expect(t.reorderWindowTicks).toBe(MOD16 / 8);
+    expect(reorderWindowTicks(1, MOD24)).toBe(262144); // unclamped at 24 bits
+  });
+
+  it('is recomputed when the counter width changes', () => {
+    // The clamp is against the modulo, so the width moves the answer.
+    const t = new StreamTimeline({ samplingRateHz: 1 });
+    expect(t.reorderWindowTicks).toBe(262144);
+    t.setTimestampBits(16);
+    expect(t.reorderWindowTicks).toBe(MOD16 / 8);
+    // The rate is not a property of the counter width, and is kept.
+    t.setTimestampBits(24);
+    expect(t.reorderWindowTicks).toBe(262144);
+  });
+
+  it('can be set outright, overriding the rate', () => {
+    const t = new StreamTimeline({ samplingRateHz: 51.2, reorderWindowTicks: 0 });
+    expect(t.reorderWindowTicks).toBe(0);
+    t.setReorderWindowTicks(null);
+    expect(t.reorderWindowTicks).toBe(5120);
+  });
+
+  it('reads a 0.3 s backward step as a wrap, which the fallback does not', () => {
+    /* The discriminator between sizing the window in sample periods and sizing
+       it as a fraction of the modulo. Sixteen samples late is not a reorder —
+       reordering swaps packets that are adjacent in time — so the honest
+       reading is the other one: the counter rolled over during a long dropout.
+       An eighth of the modulo is 64 s wide and calls it a reorder, placing the
+       sample 0.3 s back and losing the wrap for the rest of the session. */
+    const rated = new StreamTimeline({ samplingRateHz: 51.2 });
+    rated.stamp(16700000);
+    expect(rated.stamp(16690000).unwrappedTicks).toBe(16700000 + (MOD24 - 10000));
+    expect(rated.state.wraps).toBe(1);
+
+    const unrated = new StreamTimeline();
+    unrated.stamp(16700000);
+    expect(unrated.stamp(16690000).unwrappedTicks).toBe(16690000);
+    expect(unrated.state.wraps).toBe(0);
+  });
+
+  it('does not misread a 1.8 s dropout across the 16-bit counter', () => {
+    /* The same defect where it actually bites: the 16-bit modulo is 2 s, so an
+       eighth of it is 0.25 s, and every dropout between 1.75 s and 2.0 s reads
+       as a reorder. A 1.75 s Bluetooth gap is an ordinary afternoon. */
+    const t = new StreamTimeline({ timestampBits: 16, samplingRateHz: 51.2 });
+    const lost = Math.round(1.8 * TICKS_PER_SECOND);
+    t.stamp(60000);
+    expect(t.stamp((60000 + lost) % MOD16).unwrappedTicks).toBe(60000 + lost);
+    expect(t.state.wraps).toBe(1);
+  });
+
+  it('still reads a wrap after heavy loss as a wrap', () => {
+    // Forward motion is the DEFAULT. However much was lost, the counter still
+    // rolled over — a rule that defaults to "corrupt" fails exactly here.
+    const t = new StreamTimeline({ samplingRateHz: 51.2 });
+    t.stamp(16000000);
+    expect(t.stamp(100).unwrappedTicks).toBe(MOD24 + 100);
+  });
+
+  it('places a zero inside the window rather than rejecting it, but only a real window', () => {
+    /* Order of the two tests: a reorder is judged first, so a zero within a
+       window of an origin is placed where it was taken. That is the order
+       every Shimmer host API uses, and at 520 ticks the cost of choosing
+       wrongly is 16 ms.
+
+       It does not extend to the rate-unknown fallback. At an eighth of the
+       modulo the same rule would read an unstamped record up to 64 s past an
+       origin as a packet 64 s late, place it 64 s early and call it valid —
+       worse than either answer it is choosing between. */
+    const rated = new StreamTimeline({ samplingRateHz: 32768 / 65 });
+    rated.stamp(300);
+    rated.stamp(365);
+    const placed = rated.stamp(0);
+    expect(placed.invalid).toBe(false);
+    expect(placed.unwrappedTicks).toBe(0);
+
+    const unrated = new StreamTimeline();
+    unrated.stamp(300);
+    unrated.stamp(365);
+    const rejected = unrated.stamp(0);
+    expect(rejected.invalid).toBe(true);
+    expect(rejected.unwrappedTicks).toBe(365);
+  });
+
+  it('does not let a packet late from before a wrap boundary cost two modulos', () => {
+    /* Why the rule is stated on the MODULAR forward distance and not on a
+       comparison of unwrapped values. This packet's candidate is ABOVE its
+       predecessor, so a comparison accepts it as forward motion of nearly a
+       whole modulo — and then reads the next real sample as a second wrap. */
+    const t = new StreamTimeline({ samplingRateHz: 32768 / 65 });
+    const got = [MOD24 - 10, 5, MOD24 - 10, 70].map((r) => t.stamp(r).unwrappedTicks);
+    expect(got).toEqual([MOD24 - 10, MOD24 + 5, MOD24 - 10, MOD24 + 70]);
+    expect(t.state.wraps).toBe(1);
   });
 });
 
@@ -551,6 +673,9 @@ describe('anchor lifecycle', () => {
       skewMs: null,
       wraps: 0,
       timestampBits: 24,
+      // No rate has been given, so the window is the fallback: an eighth of
+      // the modulo. `setSamplingRateHz` replaces it with eight sample periods.
+      reorderWindowTicks: 2 ** 24 / 8,
     });
   });
 });

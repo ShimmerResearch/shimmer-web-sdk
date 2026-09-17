@@ -3299,6 +3299,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
        sawtooths for its whole length. `Shimmer3Client` has always done this;
        this client had the same option and did not. */
     this._timeline.setTimestampBits(this.forceTimestampFmt === 'u16' ? 16 : 24);
+    /* And the rate, which sizes the reorder window: eight sample periods is
+       what separates a pair of packets delivered out of order from a dropout
+       that happens to span the counter's wrap point. Without it the window
+       falls back to an eighth of the modulo, which on the 16-bit counter is
+       0.25 s and reads an ordinary 1.8 s gap as a reorder. Zero means the
+       inquiry has not run, and `null` says so rather than passing it on. */
+    this._timeline.setSamplingRateHz(this.samplingRateHz > 0 ? this.samplingRateHz : null);
     this._timeline.reset();
     if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
     /* Nobody has read the sensor's clock, so fall back to this host's — the

@@ -247,6 +247,26 @@ describe('Shimmer3Client streaming', () => {
     expect(frames[0].deviceId).toBe('Shimmer3-TEST');
   });
 
+  it('sizes the reorder window from the rate the inquiry reported', async () => {
+    /* The same wiring as `Shimmer3RClient`, and the same reason to pin it: the
+       two clients are parallel implementations of one wire format, so a
+       one-line omission in either is invisible until a recording is 512 s
+       long. 0x80 0x02 in INQUIRY_MSG is a divider of 640 — 51.2 Hz. */
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+      else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.inquiry();
+    client.anchorStreamClock = false;
+    await client.startStreaming();
+
+    expect(client.samplingRateHz).toBeCloseTo(51.2, 5);
+    // Eight sample periods of 640 ticks — not the 2097152-tick fallback.
+    expect(client.timelineState.reorderWindowTicks).toBe(5120);
+  });
+
   it('labels frames from an anonymous link with the generation name', async () => {
     /* The fallback that must survive: an ObjectCluster needs an attributable
        deviceId even when the link supplies no name, which is precisely why the
