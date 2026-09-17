@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-17
+
+### Fixed
+
+- **A release published a bundle that reported the version before it.** `cut-release.yml` ran the tests and the build, and only then `npm version`, so the published artifact was built from the pre-bump tree: `v0.4.0` shipped with `package.json` saying `0.4.0` and `SDK_VERSION` — the string a `webBLEDemos` page logs at startup to say which build it is running, and the only way to tell a stale vendored copy from a firmware fault — still saying `0.3.0`. It also left `main` red, because `src/version.ts` never moved.
+
+  The one test that exists to catch exactly this, `tests/core/version.test.ts` ("bump both together"), could not: it ran against the tree as it was before the bump. The bump now comes first and stamps `src/version.ts` from `package.json`, so the tests and the build both see the version being released, and the commit and tag are made afterwards from the tested tree. **The published `v0.4.0` artifact still self-reports `0.3.0` and cannot be corrected in place — use `v0.4.1`.**
+
 ## [0.4.0] - 2026-09-17
 
 ### Changed

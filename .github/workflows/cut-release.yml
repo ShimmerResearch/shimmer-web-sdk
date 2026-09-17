@@ -38,26 +38,42 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # The bump comes FIRST, and carries src/version.ts with it. It used to run
+      # after the tests and the build, which meant the one test that exists to
+      # catch this - tests/core/version.test.ts, "bump both together" - ran
+      # against the pre-bump tree and could never see the drift it guards. v0.4.0
+      # shipped that way: package.json said 0.4.0 and the bundle it published
+      # said SDK_VERSION 0.3.0, which is the string webBLEDemos logs at startup
+      # to say which build a page is running.
+      - name: Bump package version
+        id: bump
+        run: |
+          set -euo pipefail
+          npm version "${{ inputs.increment }}" --no-git-tag-version
+          VERSION="$(node -p "require('./package.json').version")"
+          sed -i -E "s/export const SDK_VERSION = '[^']*';/export const SDK_VERSION = '${VERSION}';/" src/version.ts
+          grep -q "export const SDK_VERSION = '${VERSION}';" src/version.ts || { echo "::error::failed to stamp ${VERSION} into src/version.ts"; exit 1; }
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Now the tests see the version the release will actually publish.
       - name: Run tests
         run: npm run test
 
       - name: Build package
         run: npm run build
 
-      - name: Configure Git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump package version
-        id: bump
+      - name: Commit and tag the release
         run: |
           set -euo pipefail
-          npm version "${{ inputs.increment }}" -m "chore(release): v%s"
-          VERSION="$(node -p "require('./package.json').version")"
-          TAG="v${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          git add package.json package-lock.json src/version.ts
+          git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "${{ steps.bump.outputs.tag }}"
 
       - name: Publish package
         run: npm publish
