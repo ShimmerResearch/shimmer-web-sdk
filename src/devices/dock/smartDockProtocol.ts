@@ -86,8 +86,49 @@ export const SMARTDOCK_BASE_CMD = Object.freeze({
 export const SMARTDOCK_DEFAULTS = Object.freeze({
   RESPONSE_TIMEOUT_MS: 1000,
   SLOT_CHANGE_TIMEOUT_MS: 10000,
+  /**
+   * Settle after a WITHOUT-SD slot change, before the per-Shimmer UART is
+   * usable (`SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD`, AbstractDock.java:96).
+   *
+   * The unqualified name is kept for compatibility; the qualified aliases
+   * below say which of the Java's three delays this actually is.
+   */
   SLOT_CHANGEOVER_DELAY_MS: 1500,
+  /** The same value, named for what it is. */
+  SLOT_CHANGEOVER_DELAY_WITHOUT_SD_MS: 1500,
+  /**
+   * Settle after a WITH-SD slot change, which has to wait for the host to
+   * mount the card as well as for the dock to re-route
+   * (`SLOT_CHANGEOVER_DELAY_WITH_SD_CARD_WIN`, AbstractDock.java:94).
+   *
+   * More than three times the without-SD delay, and the Java carries the note
+   * "2017-05-17 was 3000" against it — it had to be raised in the field.
+   */
+  SLOT_CHANGEOVER_DELAY_WITH_SD_WIN_MS: 5000,
+  /** As above on macOS/Linux (AbstractDock.java:95, selected by `getSDMountDelay()`). */
+  SLOT_CHANGEOVER_DELAY_WITH_SD_UNIX_MS: 6000,
   CMD_RETRY_ATTEMPTS: 2,
+  /**
+   * Attempts at the FIRST per-Shimmer read after a slot change
+   * (`READ_MAC_RETRY_ATTEMPTS`, AbstractDock.java:92, used by
+   * `readMacId()` at :1151-1165, which throws only on the last attempt).
+   *
+   * The settle delay above is **not** treated as sufficient on its own by the
+   * Java driver: it expects the first read after a re-route to fail sometimes
+   * and retries it. Observed here too — a Base 6 slot answered `BAD_CMD` to a
+   * `READ VER` immediately after a slot change and answered correctly on the
+   * next attempt.
+   */
+  READ_RETRY_ATTEMPTS: 2,
+  /**
+   * Wait between writing a docked Shimmer's configuration and reading it back
+   * (`SHIMMER_CONFIG_WRITE_READ_DELAY`, AbstractDock.java:90, applied at
+   * BasicDock.java:1039 between an InfoMem write and the re-read).
+   *
+   * A read-back issued immediately after a config write is not guaranteed to
+   * see the write.
+   */
+  CONFIG_WRITE_READ_DELAY_MS: 500,
 });
 
 /**
