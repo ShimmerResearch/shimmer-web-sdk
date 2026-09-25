@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An open circuit on gen-2 GSR range 3 read as 125 µS, the highest conductance the device can report** (DEV-1067). With the electrodes open, the amplifier output sits on its reference and the ADC reads a few codes either side of it. `SensorADC` raises every range-3 code below `GSR_UNCAL_LIMIT_RANGE3_SR68` to that limit so the sample decodes as open. But the limit was 1134, which is below the 0.4986 V reference this decode divides by (code 1134.3). So the clamped code decoded to a negative resistance, which the nudge floored at 8 kΩ in auto-range and pinned to 680 kΩ, the bottom of the range, on fixed range 3.
+
+  An SR68-9 with its electrodes open (DEV-793 dataset B6) reads range-3 codes peaking at 1126–1136, so most of such a recording was affected. The limit is now 1138, the first code above 0.5 V at the 1.8 V full scale. That clears this decode's 0.4986 V and the Java driver's 0.5 V alike — the same rule as the Shimmer3's 683 at 3.0 V. The same value went into the Java driver and the C# API, both of which had 1134.
+
+  Not changed here: in auto-range the nudge also caps resistance at 4.7 MΩ, so an open circuit now reads 0.213 µS. That is above the 0.03 µS `connectivity` threshold, so `connectivity` still says `'Connected'`.
+
 ## [0.4.1] - 2026-09-17
 
 ### Fixed

@@ -239,14 +239,48 @@ describe('SensorADC', () => {
       expect(decodeGsr(gsrPlus, 1, adc12Sr62).uS).toBeCloseTo(10.0, 1);
     });
 
-    it('applies the gen-2 range-3 uncal clamp limit (1134) on SR61-5', () => {
+    it('applies the gen-2 range-3 uncal clamp limit (1138) on SR61-5', () => {
       const sensor = new SensorADC();
       sensor.setHardwareRevision(61, 5, 0);
-      // Below the gen-2 limit the ADC count is clamped to 1134 before calibration.
+      // Below the gen-2 limit the ADC count is clamped to 1138 before calibration.
       const clamped = decodeGsr(sensor, 3, 700);
-      const atLimit = decodeGsr(sensor, 3, 1134);
-      expect(clamped.adc12).toBe(1134);
+      const atLimit = decodeGsr(sensor, 3, 1138);
+      expect(clamped.adc12).toBe(1138);
       expect(clamped.kOhms).toBe(atLimit.kOhms);
+    });
+
+    // DEV-1067: with the electrodes open the amplifier output sits on its
+    // reference, so the ADC reads a few codes either side of it: an SR68-9
+    // open-circuit recording (DEV-793 B6) peaks at codes 1126-1136. The limit
+    // was 1134, itself below the 0.4986 V reference (code 1134.3), so every
+    // clamped sample decoded to a negative resistance and was nudged to 8 kΩ.
+    // An open circuit read 125 µS, the highest conductance there is.
+    it.each([
+      [61, 5],
+      [68, 9],
+    ])('decodes an open circuit on range 3 as open on SR%i-%i (DEV-1067)', (major, minor) => {
+      for (const rangeSetting of [4, 3]) {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, minor, 0);
+        sensor.setGsrRangeSetting(rangeSetting);
+        for (let adc12 = 1134; adc12 <= 1138; adc12++) {
+          const gsr = decodeGsr(sensor, 3, adc12);
+          const where = `range setting ${rangeSetting}, code ${adc12}`;
+          expect(gsr.kOhms, where).toBeGreaterThanOrEqual(4700);
+          expect(gsr.uS, where).toBeGreaterThan(0);
+          expect(gsr.uS, where).toBeLessThanOrEqual(1000 / 4700);
+        }
+      }
+    });
+
+    // The Java driver divides by 0.5 V where this decode uses 0.4986 V, so the
+    // limit is the first code above 0.5 V: correct under both references.
+    it('puts the gen-2 limit on the first code above 0.5 V (DEV-1067)', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(68, 9, 0);
+      const limit = sensor.GSR_UNCAL_LIMIT_RANGE3_SR68;
+      expect(sensor.calibrateAdcToVolts(limit)).toBeGreaterThan(0.5);
+      expect(sensor.calibrateAdcToVolts(limit - 1)).toBeLessThan(0.5);
     });
   });
 

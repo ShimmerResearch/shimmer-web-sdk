@@ -44,7 +44,17 @@ type HardwareIdentifier = 'VERISENSE_PULSE_PLUS' | 'VERISENSE_GSR_PLUS' | string
  */
 export class SensorADC extends SensorBase {
   readonly LIMIT_MIN_VALID_USIEMENS = 0.03;
-  readonly GSR_UNCAL_LIMIT_RANGE3_SR68 = 1134;
+  /**
+   * Range-3 codes below this are raised to it before calibration so that an
+   * open circuit reads as open, which only works if the limit is above the
+   * amplifier reference. 1138 is the first code above 0.5 V at the gen-2 1.8 V
+   * full scale (0.5 V = code 1137.5), so it also clears the 0.4986 V this decode
+   * divides by (code 1134.3). The Java driver divides by 0.5 V, and 1138 is
+   * correct under both. It was 1134, the last code below 0.4986 V: that decoded
+   * to a negative resistance, nudged to 8 kΩ, so an open circuit read 125 µS
+   * (DEV-1067).
+   */
+  readonly GSR_UNCAL_LIMIT_RANGE3_SR68 = 1138;
   readonly GSR_UNCAL_LIMIT_RANGE3_SR62 = 683;
 
   private readonly SHIMMER3_REF_KOHMS = [40.2, 287.0, 1000.0, 3300.0];
@@ -115,7 +125,7 @@ export class SensorADC extends SensorBase {
    * resistors, 0.5 V GSR reference and range-3 uncal limit 683. Every other
    * GSR-capable board (SR61 >= 5, SR68 >= 5 — firmware
    * `ShimBrd_isGsrSupportedForHwVersion`) carries the second-generation DC
-   * front end: 1.8 V reference, 21/150/562/1740 kΩ, 0.4986 V, limit 1134.
+   * front end: 1.8 V reference, 21/150/562/1740 kΩ, 0.4986 V, limit 1138.
    *
    * Mirrors the firmware's `selectFeedbackResistorsFromHwVersion` (hal_gsr.c),
    * which keys the choice on the major revision alone (SR62 vs everything
