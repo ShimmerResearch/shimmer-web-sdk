@@ -93,6 +93,18 @@ describe('SensorADC', () => {
     expect(gsr.nudgeGsrResistance(30)).toBe(30);
   });
 
+  // DEV-1068: auto-range is floored at 8 kΩ and nothing more, as in the Java
+  // driver and the C# API, while a fixed range still clamps both ends. 535606 kΩ
+  // is what an open circuit decodes to on gen-2 range 3.
+  it('nudgeGsrResistance floors auto-range at 8 kΩ only (DEV-1068)', () => {
+    gsr.setGsrRangeSetting(4);
+    expect(gsr.nudgeGsrResistance(1)).toBe(8.0);
+    expect(gsr.nudgeGsrResistance(535606)).toBe(535606);
+    gsr.setGsrRangeSetting(3);
+    expect(gsr.nudgeGsrResistance(1)).toBe(680.0);
+    expect(gsr.nudgeGsrResistance(535606)).toBe(4700.0);
+  });
+
   it('parsePayload returns one sample per 2 bytes (GSR-only mode)', () => {
     gsr.gsrEnabled = true;
     gsr.battEnabled = false;
@@ -281,6 +293,50 @@ describe('SensorADC', () => {
       const limit = sensor.GSR_UNCAL_LIMIT_RANGE3_SR68;
       expect(sensor.calibrateAdcToVolts(limit)).toBeGreaterThan(0.5);
       expect(sensor.calibrateAdcToVolts(limit - 1)).toBeLessThan(0.5);
+    });
+
+    // DEV-1068: connectivity says 'Disconnected' at or below 0.03 µS, which
+    // auto-range could not reach while the nudge capped it at 4.7 MΩ
+    // (0.213 µS). From the limit, an open circuit decodes to about 536 MΩ
+    // (0.0019 µS). The codes span the peak of the DEV-793 B6 open-circuit
+    // recording (SR68-9, auto-range) up to the limit.
+    it.each([
+      [61, 5],
+      [68, 9],
+    ])(
+      'reports an open circuit on range 3 in auto-range as Disconnected on SR%i-%i (DEV-1068)',
+      (major, minor) => {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, minor, 0);
+        sensor.setGsrRangeSetting(4);
+        for (let adc12 = 1126; adc12 <= 1138; adc12++) {
+          const gsr = decodeGsr(sensor, 3, adc12);
+          const where = `code ${adc12}`;
+          expect(gsr.connectivity, where).toBe('Disconnected');
+          expect(gsr.kOhms, where).toBeGreaterThan(4700);
+          expect(gsr.uS, where).toBeGreaterThan(0);
+          expect(gsr.uS, where).toBeLessThanOrEqual(sensor.LIMIT_MIN_VALID_USIEMENS);
+        }
+      },
+    );
+
+    // DEV-793 B4d (ASM_PC Test_051): an SR61-5 on range 3 bridged by a 2.7 MΩ
+    // resistor. The Java parser's reference output reads 0.336-0.366 µS, median
+    // 0.360, which is ADC code ~1850 at that parser's 0.5 V reference. Lifting
+    // the cap must leave a real load inside the range alone, in auto-range and
+    // on fixed range 3 alike. This decode's 0.4986 V reads the code as 2758 kΩ,
+    // 2% high, so 0.36 µS rather than the nominal 0.37.
+    it('still reports a real 2.7 MΩ load as Connected, at ~0.36 µS (DEV-793 B4d, DEV-1068)', () => {
+      for (const rangeSetting of [4, 3]) {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(61, 5, 0);
+        sensor.setGsrRangeSetting(rangeSetting);
+        const gsr = decodeGsr(sensor, 3, 1850);
+        const where = `range setting ${rangeSetting}`;
+        expect(gsr.connectivity, where).toBe('Connected');
+        expect(Math.abs(gsr.kOhms - 2700) / 2700, where).toBeLessThan(0.05);
+        expect(gsr.uS, where).toBeCloseTo(0.36, 2);
+      }
     });
   });
 
