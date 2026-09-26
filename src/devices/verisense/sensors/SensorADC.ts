@@ -6,13 +6,16 @@ import { getVerisenseStreamingBatteryVoltageMultiplier } from '../hardwareModels
 
 export interface ADCGSRSample {
   raw: number;
+  /** The 12-bit code. On range 3 a code below the open-circuit limit is raised to it. */
   adc12: number;
+  /** The resistor in circuit when the sample was taken, 0-3. */
   range: number;
   volts: number;
   /**
    * Skin resistance. A fixed range clamps it to that range's window; auto-range
    * only floors it at 8 kΩ, so it can exceed 4.7 MΩ: an open circuit reads
-   * hundreds of MΩ or more (DEV-1068).
+   * hundreds of MΩ or more (DEV-1068). A code below the open-circuit limit
+   * decodes as range 3 at the limit whatever `range` says (DEV-1070).
    */
   kOhms: number;
   uS: number;
@@ -232,6 +235,45 @@ export class SensorADC extends SensorBase {
     return rFeedback / (volts / gsrRefVoltage - 1.0);
   }
 
+  /** The front end's range-3 open-circuit limit: the first code above its amplifier reference. */
+  private gsrUncalLimitRange3(): number {
+    return this.usesSr62GsrFrontEnd()
+      ? this.GSR_UNCAL_LIMIT_RANGE3_SR62
+      : this.GSR_UNCAL_LIMIT_RANGE3_SR68;
+  }
+
+  /**
+   * `calibrateGsrToKOhmsUsingAmplifierEq`, reading an open circuit as open on
+   * every range (DEV-1070).
+   *
+   * The equation has no positive solution at or below the amplifier's
+   * reference: no skin resistance can pull the output under it, so a code there
+   * means the electrodes are open. Range 3 has long raised such a code to its
+   * open-circuit limit, so that an open circuit decodes as hundreds of MΩ.
+   * Ranges 0-2 did not, and in auto-range they see these codes too: when the
+   * electrodes come off, the device climbs one range at a time and repeats the
+   * sample that triggered each switch through the 80 ms settling time, tagged
+   * with the range it was measured on. The equation gave those samples a
+   * negative resistance, which the nudge floored at 8 kΩ: 125 µS and
+   * `'Connected'` for an open circuit.
+   *
+   * So a code below the limit decodes as range 3 at the limit, whatever range
+   * it was measured on, and an open circuit reads the same on every range as the
+   * settled range 3 does. Codes at or above the limit decode on their own range,
+   * as before. The test compares codes, so it holds under both this decode's
+   * 0.4986 V and the Java driver's 0.5 V.
+   *
+   * @param adc12 The 12-bit code.
+   * @param range The resistor in circuit, 0-3.
+   */
+  calibrateGsrToKOhmsWithOpenCircuitLimit(adc12: number, range: number): number {
+    const limit = this.gsrUncalLimitRange3();
+    if (adc12 < limit) {
+      return this.calibrateGsrToKOhmsUsingAmplifierEq(this.calibrateAdcToVolts(limit), 3);
+    }
+    return this.calibrateGsrToKOhmsUsingAmplifierEq(this.calibrateAdcToVolts(adc12), range);
+  }
+
   /**
    * Clamp a decoded resistance to what the circuit can measure. A fixed range
    * clamps both ends, to that range's window. Auto-range only floors it at
@@ -292,14 +334,12 @@ export class SensorADC extends SensorBase {
         if (currentRange === 4) currentRange = (gsrraw >> 14) & 0x03;
 
         if (currentRange === 3) {
-          const limit = this.usesSr62GsrFrontEnd()
-            ? this.GSR_UNCAL_LIMIT_RANGE3_SR62
-            : this.GSR_UNCAL_LIMIT_RANGE3_SR68;
+          const limit = this.gsrUncalLimitRange3();
           if (adc12 < limit) adc12 = limit;
         }
 
         const volts = this.calibrateAdcToVolts(adc12);
-        let kOhms = this.calibrateGsrToKOhmsUsingAmplifierEq(volts, currentRange);
+        let kOhms = this.calibrateGsrToKOhmsWithOpenCircuitLimit(adc12, currentRange);
         kOhms = this.nudgeGsrResistance(kOhms);
         const uS = this.kOhmToUSiemens(kOhms);
         const connectivity = uS > this.LIMIT_MIN_VALID_USIEMENS ? 'Connected' : 'Disconnected';

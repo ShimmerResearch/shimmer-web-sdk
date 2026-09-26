@@ -41,6 +41,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   **For callers: in auto-range, `kOhms` can now exceed 4.7 MΩ and `uS` can fall below 0.213 µS.** An open circuit on range 3 now reads about 536 MΩ (0.0019 µS) on gen-2 hardware, given the previous entry, and about 4.5 GΩ on an SR62. Code that treats 4.7 MΩ as a ceiling, such as a fixed plot scale, will see values above it. Fixed ranges are unchanged and still clamp to their own window, so on a fixed range `connectivity` still cannot say `'Disconnected'`, as in the Java driver and the C# API.
 
+- **An open circuit still read 125 µS, and `'Connected'`, while auto-range climbed through ranges 0–2** (DEV-1070). A code below the amplifier's reference has no positive solution in the amplifier equation: no skin resistance can pull the output under the reference, so the electrodes are open. Range 3 has long raised such a code to its open-circuit limit, but ranges 0–2 did not, and in auto-range they see these codes too. When the electrodes come off, the device climbs one range at a time and repeats the sample that triggered each switch through the 80 ms settling time, tagged with the range it was measured on. The equation gave those samples a negative resistance, which the nudge floored at 8 kΩ, the highest conductance the device can report. DEV-793 dataset B6 (an SR68-9) holds 50 such samples.
+
+  Every range now decodes a code below the limit (683, or 1138 on gen-2) as range 3 at the limit. That applies in `SensorADC` for Verisense and in `calibrateGsrSample` for Shimmer3/3R streaming and SD logs, and the same rule goes into the Java driver, the C# API and ASM_BaseStation. An open circuit then reads the same on every range as the settled range 3 does: about 536 MΩ (0.0019 µS, `'Disconnected'`) on gen-2 hardware, and 4.5 GΩ on an SR62 or a Shimmer3.
+
+  **For callers:** only `kOhms`, `uS` and `connectivity` change, and only for codes below the limit. `range` still reports the resistor in circuit, and on ranges 0–2 `adc12` still reports the sample's own code. On a fixed range an open circuit now pins to the top of the window (63, 220 or 680 kΩ) instead of the bottom. Every code at or above the limit decodes exactly as before, and none of them decodes below 8 kΩ, so the auto-range floor is now only a backstop.
+
 ## [0.4.1] - 2026-09-17
 
 ### Fixed

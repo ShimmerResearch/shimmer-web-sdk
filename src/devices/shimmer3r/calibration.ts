@@ -66,9 +66,14 @@ export function calibrateGsrDataToResistanceFromAmplifierEq(
  * any range can measure — the circuit cannot report below it whatever range it
  * switched to, but the upper end depends on which range that was, and the
  * per-sample range bits have already been used to pick the resistor. This
- * matches `SensorGSR.nudgeGsrResistance` (:415-421); an earlier version of this
- * function returned an auto-range value unclamped, which let the amplifier
- * equation report a few hundred ohms of skin resistance near full scale.
+ * matches `SensorGSR.nudgeGsrResistance` (:415-421).
+ *
+ * The auto-range floor never changes a real reading: range 0 at full scale
+ * already decodes to 8.04 kΩ. The only values under 8 kΩ are the negative ones
+ * that a code below the amplifier's reference produces, which is an open
+ * circuit, and the floor used to report those as 125 µS. `calibrateGsrSample`
+ * now decodes such a code as open before it gets here (DEV-1070), so the floor
+ * is only a backstop.
  *
  * @param gsrResistanceKOhms Calibrated resistance in kΩ.
  * @param gsrRangeSetting    Range 0–3 (fixed) or 4 (auto).
