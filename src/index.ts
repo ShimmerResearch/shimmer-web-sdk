@@ -770,6 +770,9 @@ export {
   TICKS_PER_SECOND,
   TICKS_PER_MS,
   INVALID_ZERO_WINDOW_TICKS,
+  REORDER_PERIODS,
+  MAX_WINDOW_DIVISOR,
+  reorderWindowTicks,
 } from './core/StreamTimeline.js';
 export type {
   StreamStamp,

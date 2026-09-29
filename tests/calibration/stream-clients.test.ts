@@ -576,6 +576,49 @@ describe('Shimmer3RClient — real-world time on the stream', () => {
     expect(client.timelineState.wraps).toBe(1);
   });
 
+  it('sizes the reorder window from the rate the inquiry reported', async () => {
+    /* The wiring that is easy to drop and impossible to notice: without it the
+       timeline falls back to an eighth of the modulo — 2097152 ticks, 409x
+       wider than the window this rate asks for — and every backward step up to
+       64 s reads as a reordered packet instead of a roll-over. Nothing about
+       the stream looks wrong until a recording comes out 512 s short. */
+    const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
+    const client = new Shimmer3RClient({ transport: t });
+    await client.connect();
+    await client.inquiry();
+    client.anchorStreamClock = false;
+    await client.startStreaming();
+
+    expect(client.samplingRateHz).toBeCloseTo(51.2, 9);
+    expect(client.timelineState.reorderWindowTicks).toBe(5120); // 8 x 640 ticks
+  });
+
+  it('places a swapped pair of frames where they were taken, not a modulo later', async () => {
+    const t = scriptedDevice({ channelIds: [0x0a, 0x0b, 0x0c] });
+    const payload = [...u16le(0), ...u16le(0), ...u16le(0)];
+    const client = new Shimmer3RClient({ transport: t });
+    const received: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => received.push(oc);
+    await client.connect();
+    await client.inquiry();
+    client.anchorStreamClock = false;
+    await client.startStreaming();
+
+    // Two adjacent frames delivered the wrong way round. The fifth is only
+    // there to close the fourth: double-preamble sync needs a following frame.
+    for (const ts of [10000, 11280, 10640, 11920, 12560]) t.notify(frame(ts, payload));
+    await tick();
+
+    expect(received.length).toBeGreaterThanOrEqual(4);
+    const ms = received.map((oc) => oc.get('TIMESTAMP', 'cal')!.value);
+    // Each frame is placed when it was taken — so the series dips, honestly,
+    // rather than gaining 512 s.
+    for (const [i, ticks] of [10000, 11280, 10640, 11920].entries()) {
+      expect(ms[i], `frame ${i}`).toBeCloseTo(ticks / 32.768, 9);
+    }
+    expect(client.timelineState.wraps).toBe(0);
+  });
+
   it('unwraps the 16-bit counter too, when the client was asked for one', () => {
     /* `timestampFmt: 'u16'` is a public option and the packet parser honours
        it, but the timeline was constructed at 24 bits and never told — so a
