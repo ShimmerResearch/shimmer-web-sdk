@@ -22,10 +22,15 @@
  * Counter domain: apply this before adding the RTC difference, which on
  * Shimmer3 is an arbitrary offset to real time.
  *
- * HARDWARE-VERIFY: derived from LogAndStream source and a Consensys CSV export
- * of a Shimmer3R recording, not from raw SD files. Confirm on a session's raw
- * 000/001 files that each header's initial timestamp and first packet differ
- * by the lead this assumes, and that the 000 → 001 step disappears.
+ * Verified on Shimmer3R: the raw 000/001 files of a 1024 Hz recording put each
+ * first packet 162.72 ms and 3.94 ms before its header, and anchored this way
+ * the 000 → 001 split is exactly one sample period (tests/sdlog/anchor.test.ts).
+ *
+ * HARDWARE-VERIFY: Shimmer3 (MSP430) is not yet verified. Its RTC difference
+ * is an offset from the free-running counter to real time rather than the
+ * counter's high bytes, so confirm on a Shimmer3 session's raw 000/001 files
+ * that the first packet's low 24 bits share the header's counter domain and
+ * that its splits close to one sample period.
  */
 
 /** 2^24: modulo of the 3-byte tick counter (512 s at 32768 Hz). */
