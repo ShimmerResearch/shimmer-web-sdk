@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`writeOperationalConfig()` no longer turns Bluetooth off on a Verisense whose firmware would lose USB with it** (DEV-1096). Before V2.01.003, ASM_Production handles USB only while its SoftDevice is on, and it starts the SoftDevice only for Bluetooth. So `BLUETOOTH_EN = 0` with `USB_EN = 1` left the sensor reachable over neither, with no way back in short of SWD. `enforceVerisenseCommsChannelInterlock()` allows that combination, because USB is still enabled in the config. A write that made the change over USB stopped USB at once.
+
+  The client now keeps Bluetooth on in any write bound for firmware older than `VERISENSE_BLUETOOTH_OFF_MIN_FW` (2.1.3), or whose version it cannot tell. The version is unknown when the production config is erased or blank, when it holds the 0xFF sentinel, or when it cannot be read. The rule includes firmware older than V2.00.007, which ignores the flag but keeps it in EEPROM for a later update to act on. The version comes from the production config the client reads at connect, and is looked up only for a write that turns Bluetooth off. As with the interlock, the caller's buffer is left untouched.
+
+  For consumers that want to tell their users why, these are exported: `VERISENSE_BLUETOOTH_OFF_MIN_FW`, `supportsVerisenseBluetoothOff()`, `isVerisenseBluetoothEnabled()`, `enforceVerisenseBluetoothOffFirmwareGuard()`, and the client's `getReportedFirmwareVersion()`.
+
 ## [0.4.1] - 2026-09-17
 
 ### Fixed
