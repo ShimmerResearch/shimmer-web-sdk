@@ -54,8 +54,11 @@ import {
   normalizeOperationalConfig,
   parseProductionConfigPayload,
   enforceVerisenseCommsChannelInterlock,
+  enforceVerisenseBluetoothOffFirmwareGuard,
+  isVerisenseBluetoothEnabled,
   VERISENSE_OP_CONFIG_BYTE_SIZE,
   type ProductionConfig,
+  type VerisenseFirmwareVersion,
   type VerisenseBleLinkDebugPayload,
   type VerisenseEventLogEntry,
   type VerisenseRecordBufferDetails,
@@ -1081,6 +1084,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     // (normalizeBytePayload returns the input reference for a Uint8Array).
     const corrected = new Uint8Array(payload);
     enforceVerisenseCommsChannelInterlock(corrected);
+    // Nor Bluetooth off on firmware that loses USB with it (DEV-1096). The
+    // version is looked up only for a write that turns Bluetooth off.
+    if (!isVerisenseBluetoothEnabled(corrected)) {
+      enforceVerisenseBluetoothOffFirmwareGuard(corrected, await this._reportedFirmwareVersion());
+    }
     await this.writeProperty(ASM_PROPERTY.OPERATIONAL_CONFIGURATION, corrected);
   }
 
@@ -2355,6 +2363,41 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   private _isUninitializedBlob(payload: Uint8Array | null | undefined): boolean {
     return this._isErasedBlob(payload) || this._isZeroBlob(payload);
+  }
+
+  /**
+   * The firmware version the sensor reported in the production config last read,
+   * or null when that holds none: nothing read yet, a config that is erased or
+   * blank, or a major version of 0xFF. No release has one: it is the erased
+   * EEPROM value, and the sentinel a production config is written with before
+   * the firmware fills its own version in.
+   */
+  getReportedFirmwareVersion(): VerisenseFirmwareVersion | null {
+    const blob = this.productionConfig;
+    if (!blob?.length || this._isUninitializedBlob(blob)) return null;
+    const parsed = parseProductionConfigPayload(blob);
+    const fw = {
+      major: Number(parsed.revFwMajor),
+      minor: Number(parsed.revFwMinor),
+      internal: Number(parsed.revFwInternal),
+    };
+    if (!Number.isFinite(fw.major) || !Number.isFinite(fw.minor) || !Number.isFinite(fw.internal)) {
+      return null;
+    }
+    return fw.major === 0xff ? null : fw;
+  }
+
+  /** {@link getReportedFirmwareVersion}, reading the production config from the
+   * sensor first if none is cached. Null, too, when that read fails. */
+  private async _reportedFirmwareVersion(): Promise<VerisenseFirmwareVersion | null> {
+    if (!this.productionConfig?.length) {
+      try {
+        await this.readProductionConfigFromDevice();
+      } catch {
+        return null;
+      }
+    }
+    return this.getReportedFirmwareVersion();
   }
 
   async readProductionConfigFromDevice(): Promise<ProductionConfig> {
