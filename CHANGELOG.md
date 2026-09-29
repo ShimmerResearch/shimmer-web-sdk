@@ -7,6 +7,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **SD-log timestamps stepped at file splits** (DEV-1095). `decodeSdLogFile` pinned each data file's first packet to its header's initial timestamp. The firmware writes the RTC at the moment the file was _created_ there, not the first packet's time, and packets already buffered when the file opened were sampled before that moment. The lead differs from file to file, so every split left a permanent step: on a Shimmer3R recording, **−158.8 ms at the 000 → 001 split**, because file 000 is created after sampling has started. `timestampMs` and `wallClockMs` now place each packet at its own counter time. The first packet's full value is rebuilt from the header's high bits and its own 24-bit timestamp; that is exact within ±256 s, and it does not depend on which moment the firmware records. 2-byte timestamps, a zero initial timestamp, and a header more than 10 s from the first packet keep the old behaviour. Mirrors the same fix in the Java driver.
+
 ## [0.4.1] - 2026-09-17
 
 ### Fixed

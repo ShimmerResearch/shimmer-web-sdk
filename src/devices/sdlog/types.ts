@@ -176,11 +176,12 @@ export class SdLogFormatError extends Error {
 /** One decoded sample. `values` aligns 1:1 with `SdLogHeader.channels`. */
 export interface SdLogRecord {
   /**
-   * Device-clock time in milliseconds:
-   * (initialTimestampTicks + unwrapped ticks - first packet's raw ticks)
-   * / 32768 * 1000, exactly as the Java driver computes the SD calibrated
-   * timestamp (parseTimestampShimmer3 with mFirstTsOffsetFromInitialTsTicks).
-   * On modern firmware this equals the device's full 40-bit clock in ms.
+   * Device-clock time in milliseconds: the record's own 40-bit counter value
+   * / 32768 * 1000. The first packet's full value is rebuilt from the header's
+   * initial timestamp (the RTC at file creation) and the packet's 24-bit raw
+   * timestamp, and later packets advance by their unwrapped ticks — as the
+   * Java driver computes the SD calibrated timestamp (parseTimestampShimmer3
+   * with mFirstTsOffsetFromInitialTsTicks; DEV-1095).
    */
   timestampMs: number;
   /**

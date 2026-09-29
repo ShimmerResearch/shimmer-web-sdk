@@ -79,7 +79,10 @@ describe('decodeSdLogValue — every datatype', () => {
 
 describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
   const enabled = BM.ACCEL_LN | BM.GSR;
+  // The header's initial timestamp is the RTC when the file was created: here
+  // 900 ticks after the first packet (raw 100) was sampled (DEV-1095).
   const initialTs = 1000;
+  const firstTs = 100;
 
   const makeFile = (rtc: bigint): Uint8Array => {
     const header = buildSdLogHeader({
@@ -139,21 +142,22 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
     expect(records[0].values[3]).toBeCloseTo(expectedGsr, 10);
   });
 
-  it('computes timestampMs as initialTs + (unwrapped - first raw ts), Java-style', () => {
+  it('places the first packet at its own counter time, not the header time', () => {
     const { records } = decodeSdLogFile(makeFile(0n));
-    // First packet lands exactly on the header's initial timestamp; later
-    // packets advance by the elapsed ticks since the first packet.
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(initialTs), 10);
-    expect(records[1].timestampMs).toBeCloseTo(ticksToMs(initialTs + 512), 10);
-    expect(records[2].timestampMs).toBeCloseTo(ticksToMs(initialTs + 1024), 10);
+    // The first packet's full counter value is rebuilt from the header's high
+    // bits and its own 24-bit timestamp; later packets advance by the elapsed
+    // ticks since the first packet.
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(firstTs), 10);
+    expect(records[1].timestampMs).toBeCloseTo(ticksToMs(firstTs + 512), 10);
+    expect(records[2].timestampMs).toBeCloseTo(ticksToMs(firstTs + 1024), 10);
     expect(records[0].wallClockMs).toBeNull(); // RTC difference unset
   });
 
   it('emits wallClockMs when the RTC difference is set', () => {
     const rtc = 55605813443136n; // ~2023 in ticks
     const { records } = decodeSdLogFile(makeFile(rtc));
-    expect(records[0].wallClockMs).toBeCloseTo(ticksToMs(initialTs + Number(rtc)), 6);
-    expect(records[1].wallClockMs).toBeCloseTo(ticksToMs(initialTs + 512 + Number(rtc)), 6);
+    expect(records[0].wallClockMs).toBeCloseTo(ticksToMs(firstTs + Number(rtc)), 6);
+    expect(records[1].wallClockMs).toBeCloseTo(ticksToMs(firstTs + 512 + Number(rtc)), 6);
   });
 
   it('uses the TCXO sampling clock for wallClockMs but 32768 for timestampMs', () => {
@@ -182,11 +186,11 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
     const { header: h, records } = decodeSdLogFile(file);
     expect(h.tcxo).toBe(true);
     // Device clock still divides by 32768 (getRtcClockFreq).
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(initialTs), 10);
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(firstTs), 10);
     // Wall clock divides by the TCXO frequency.
-    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / tcxoFreq) * 1000, 3);
+    expect(records[0].wallClockMs).toBeCloseTo(((firstTs + Number(rtc)) / tcxoFreq) * 1000, 3);
     expect(records[1].wallClockMs).toBeCloseTo(
-      ((initialTs + 512 + Number(rtc)) / tcxoFreq) * 1000,
+      ((firstTs + 512 + Number(rtc)) / tcxoFreq) * 1000,
       3,
     );
   });
@@ -214,7 +218,7 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
       ]),
     );
     const { records } = decodeSdLogFile(file);
-    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / 312500.0) * 1000, 3);
+    expect(records[0].wallClockMs).toBeCloseTo(((firstTs + Number(rtc)) / 312500.0) * 1000, 3);
   });
 
   it('drops a trailing partial packet', () => {
@@ -400,8 +404,9 @@ describe('decodeSdLogFile — Shimmer3R end-to-end', () => {
     const expectedGsr =
       (1.0 / nudgeGsrResistance(calibrateGsrDataToResistanceFromAmplifierEq(1500, 2), 4)) * 1000;
     expect(records[0].values[4]).toBeCloseTo(expectedGsr, 10);
-    // First packet lands on the header's initial timestamp (Java-exact math).
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(42), 10);
+    // Header written at tick 42, first packet sampled at tick 7: the packet
+    // keeps its own counter time (DEV-1095).
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(7), 10);
   });
 });
 
@@ -423,9 +428,9 @@ describe('decodeSdSession — multi-file continuation', () => {
   };
 
   it('concatenates files in numeric order with per-file absolute time', () => {
-    // Modern firmware writes each file's full clock at its first packet into
-    // that file's header (initialTs), so absolute time is continuous across
-    // the boundary: file 000 covers ticks 100..1124, file 001 starts at 1636.
+    // Each file is self-contained: its header's initial timestamp and its
+    // records' own counter give absolute time, so it is continuous across the
+    // boundary: file 000 covers ticks 100..1124, file 001 starts at 1636.
     const f0 = sessionFile(100, 100, 3);
     const f1 = sessionFile(1636, 1636, 2);
     const { records, truncated } = decodeSdSession([
@@ -438,6 +443,23 @@ describe('decodeSdSession — multi-file continuation', () => {
     expect(ticks).toEqual([100, 612, 1124, 1636, 2148]);
     // Strictly increasing across the file boundary.
     for (let i = 1; i < ticks.length; i++) expect(ticks[i]).toBeGreaterThan(ticks[i - 1]);
+  });
+
+  it('does not step at a split when each header is written after its first packet (DEV-1095)', () => {
+    // The firmware writes the RTC at file creation. File 000 is created after
+    // sampling starts, so its header is 5800 ticks (177 ms) after its first
+    // packet; file 001's is only 577 ticks (17.6 ms) after the split's first
+    // buffered packet. Pinning each file to its header stepped back 5223 ticks.
+    const base = 0x12_3456_7000;
+    const low = (t: number): number => t % 2 ** 24;
+    const f0 = sessionFile(base + 5800, low(base), 3);
+    const f1 = sessionFile(base + 3 * 512 + 577, low(base + 3 * 512), 2);
+    const { records } = decodeSdSession([
+      { name: '000', bytes: f0 },
+      { name: '001', bytes: f1 },
+    ]);
+    const ticks = records.map((r) => Math.round((r.timestampMs / 1000) * SDLOG_CLOCK_FREQ) - base);
+    expect(ticks).toEqual([0, 512, 1024, 1536, 2048]);
   });
 
   it('ignores files whose names contain a dot', () => {
