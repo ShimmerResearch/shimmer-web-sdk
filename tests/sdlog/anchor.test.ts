@@ -41,36 +41,53 @@ describe('firstTsOffsetFromInitialTsTicks', () => {
     expect(placed(initialTs, raw, off)).toBe(initialTs - 150);
   });
 
-  it('splits a real Shimmer3R recording by exactly one sample period', () => {
-    // Header and packet values from the raw 000 and 001 files of the recording
-    // DEV-1095 was raised on (CE2F, 1024 Hz). File 000's first packet predates
-    // its header by 5332 ticks (162.72 ms), file 001's by 129 (3.94 ms); pinned
-    // to their headers, the files stepped back 5203 ticks (158.78 ms).
-    const header000 = 391630116578;
-    const firstRaw000 = 16335374;
-    const firstCounter000 = 391630111246;
-    const lastCounter000 = 391748082222; // 3,675,280 records later
-    const header001 = 391748082383;
-    const firstRaw001 = 88654;
-    const firstCounter001 = 391748082254;
-    const period = 32; // 1024 Hz
+  // Real splits from the raw files of the recording DEV-1095 was raised on
+  // (Shimmer3R CE2F, 1024 Hz). Each: [header, first raw ts, first counter,
+  // last counter] of file A, [header, first raw ts, first counter] of file B,
+  // and the previous rule's step beyond one period (the lead difference).
+  const realSplits: Array<[string, number[], number[], number]> = [
+    // File 000's first packet predates its header by 5332 ticks (162.72 ms),
+    // 001's by 129 (3.94 ms): the export stepped back 158.78 ms.
+    [
+      '000 -> 001',
+      [391630116578, 16335374, 391630111246, 391748082222],
+      [391748082383, 88654, 391748082254],
+      -5203,
+    ],
+    // Leads of 214 and 131 ticks: the export went back 1.556 ms.
+    [
+      '041 -> 042',
+      [396466711492, 4319982, 396466711278, 396584676654],
+      [396584676817, 4844878, 396584676686],
+      -83,
+    ],
+  ];
+  const period = 32; // 1024 Hz
 
-    const off000 = firstTsOffsetFromInitialTsTicks(header000, firstRaw000, MAX_3_BYTE);
-    const off001 = firstTsOffsetFromInitialTsTicks(header001, firstRaw001, MAX_3_BYTE);
-    expect(placed(header000, firstRaw000, off000)).toBe(firstCounter000);
-    expect(placed(header001, firstRaw001, off001)).toBe(firstCounter001);
+  it.each(realSplits)(
+    'splits real Shimmer3R files %s by exactly one sample period',
+    (
+      _name,
+      [headerA, firstRawA, firstCounterA, lastCounterA],
+      [headerB, firstRawB, firstCounterB],
+      oldStepTicks,
+    ) => {
+      const offA = firstTsOffsetFromInitialTsTicks(headerA, firstRawA, MAX_3_BYTE);
+      const offB = firstTsOffsetFromInitialTsTicks(headerB, firstRawB, MAX_3_BYTE);
+      expect(placed(headerA, firstRawA, offA)).toBe(firstCounterA);
+      expect(placed(headerB, firstRawB, offB)).toBe(firstCounterB);
 
-    const unwrappedLast000 = firstRaw000 + (lastCounter000 - firstCounter000);
-    const end000 = placed(header000, unwrappedLast000, off000);
-    expect(end000).toBe(lastCounter000);
-    expect(placed(header001, firstRaw001, off001) - end000).toBe(period);
+      const unwrappedLastA = firstRawA + (lastCounterA - firstCounterA);
+      const endA = placed(headerA, unwrappedLastA, offA);
+      expect(endA).toBe(lastCounterA);
+      expect(placed(headerB, firstRawB, offB) - endA).toBe(period);
 
-    // The previous rule reproduced the export's step.
-    const oldStep =
-      placed(header001, firstRaw001, firstRaw001) -
-      placed(header000, unwrappedLast000, firstRaw000);
-    expect(oldStep).toBe(period - 5203);
-  });
+      // The previous rule reproduced the export's step.
+      const oldStep =
+        placed(headerB, firstRawB, firstRawB) - placed(headerA, unwrappedLastA, firstRawA);
+      expect(oldStep).toBe(period + oldStepTicks);
+    },
+  );
 
   it('keeps the previous behaviour for a 2-byte counter', () => {
     expect(firstTsOffsetFromInitialTsTicks(INITIAL_TS, 1234, MAX_2_BYTE)).toBe(1234);
