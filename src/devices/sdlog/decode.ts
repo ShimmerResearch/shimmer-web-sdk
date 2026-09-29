@@ -15,6 +15,7 @@
  *     scope — carried rollover state across files)
  */
 
+import { firstTsOffsetFromInitialTsTicks } from './anchor.js';
 import { SDLOG_CLOCK_FREQ, SDLOG_SYNC_OFFSET_LENGTH } from './constants.js';
 import { decodeSdLogValue } from './channels.js';
 import { parseSdLog, type ParsedSdLog } from './header.js';
@@ -77,13 +78,12 @@ function decodeRecordsFromFile(
   // restart from cycle 0 with their own header initial timestamp.
   let cycle = 0;
   let lastUnwrapped = 0;
-  // ShimmerObject#parseTimestampShimmer3 subtracts the FIRST packet's raw
-  // timestamp before adding the header's initial timestamp: on modern
-  // firmware the 5-byte initial timestamp is the full clock at the first
-  // packet, whose low bytes are that packet's raw timestamp — without the
-  // subtraction those low bytes would be double-counted
-  // (mFirstTsOffsetFromInitialTsTicks in the Java driver).
-  let firstRawTicks: number | null = null;
+  // Subtracted, with the header's initial timestamp added, from each unwrapped
+  // timestamp (mFirstTsOffsetFromInitialTsTicks in the Java driver). The header
+  // holds the RTC when the file was created, not the first packet's time, so
+  // the offset re-anchors the file on the first packet's own counter value —
+  // see ./anchor.ts (DEV-1095).
+  let firstTsOffsetTicks: number | null = null;
 
   let pos = header.headerLengthBytes;
   let samplesInBlock = 0;
@@ -112,7 +112,9 @@ function decodeRecordsFromFile(
       unwrapped = rawTs + maxTicks * cycle;
     }
     lastUnwrapped = unwrapped;
-    if (firstRawTicks === null) firstRawTicks = rawTs;
+    if (firstTsOffsetTicks === null) {
+      firstTsOffsetTicks = firstTsOffsetFromInitialTsTicks(initialTicks, rawTs, maxTicks);
+    }
 
     const values = new Array<number>(channels.length);
     for (let c = 0; c < channels.length; c++) {
@@ -126,7 +128,7 @@ function decodeRecordsFromFile(
     }
     if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
 
-    const absoluteTicks = initialTicks + unwrapped - firstRawTicks;
+    const absoluteTicks = initialTicks + unwrapped - firstTsOffsetTicks;
     out.push({
       // Device-clock timestamp always divides by the 32768 Hz RTC clock
       // (ShimmerObject#getRtcClockFreq); only the wall-clock (RTC) conversion
