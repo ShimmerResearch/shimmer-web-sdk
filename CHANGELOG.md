@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **CSV recording of a live stream moved into the SDK** (DEV-1116). `createCsvRecorder` is shimmer-capture-web's `common/csv-recorder.js`, ported unchanged in behaviour and API. Rows stream to a file the user picks through the File System Access API. When the picker is unavailable, it falls back to an in-memory download. A write that fails mid-recording ends the recording there, commits the rows that already landed, and says so through `onError` and in what `stop()` returns. It does not quietly carry on into a second, partial file. There is one new option, `download`, which chooses how an in-memory file is handed over. The recorder is built on `createCsvTableWriter`, which writes one file and can be given a sink that is still opening; rows queue until it resolves.
+
+- **`createVerisenseStreamRecorder`: one CSV per Verisense sensor stream.** It writes into a session folder the user picks: ADC (GSR and battery), Accel1, LSM6DS3 accel/gyro, PPG (1st gen and hub), the three LSM6DSV sub-streams (`Accel2`, `Gyro`, `Mag`), light, algorithm hub and skin temperature. Each file opens on its stream's first sample, and its columns come from that sample, so channels that are disabled are left out. `verisenseStreamCsvLayout` and `verisenseStreamCsvKey` expose the column tables.
+
+  A Verisense packet carries one measured time: the header tick is the time of its last sample, and the decoder places the others back from it at the configured rate. Every row therefore has `HostTime_ms` and an interpolated `DeviceTime_ms`, and `PacketTick` carries the raw tick only on the row it measured.
+
 ### Fixed
 
 - **SD-log files from a BMP581 Shimmer3R labelled its pressure channels BMP390, and left them raw** (DEV-1111). The Shimmer3R channel table mapped signal ids `0x1A`/`0x1B` to `TEMPERATURE_BMP390`/`PRESSURE_BMP390` on every board. A caller that took the label at its word and ran BMP390 compensation over them was working from a trim block that is not there: for a BMP581 the firmware leaves the header's calibration region unwritten (`0xFF`). The header names no pressure part, so the decoder now decides from the board's SR number, using the rule the firmware falls back on itself. A file is taken as BMP581 when all three of these hold: it is a Shimmer3R, running LogAndStream v1.01.006 or later, on a board at SR31 ≥ 11-2, SR38 ≥ 4-2, SR47 ≥ 8-2, SR48 7-2 to 7-x, SR48 ≥ 8-2 or SR49 ≥ 4-2. SR48-8-0 and 8-1 went back to the BMP390, and SR38 is missing from the Java driver's copy of the rule. The pair is then named `TEMPERATURE_BMP581`/`PRESSURE_BMP581` and **emitted calibrated**, in °C and kPa, through the same `compensateBmp581` that streaming uses. It follows GSR and the inertial channels: the record carries the calibrated value, and the channel is marked `calibrated: true` with its unit. BMP390 files decode exactly as before, labelled BMP390 and raw.

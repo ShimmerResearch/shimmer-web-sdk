@@ -65,6 +65,38 @@ export type {
 // per-frame column set shifts cells the moment a frame's field list differs.
 export { csvCell, csvRow, objectClusterColumns, objectClusterRow } from './core/csv.js';
 export type { ObjectClusterColumn, ObjectClusterColumnOptions } from './core/csv.js';
+// CSV recording of a live stream to a file the user picks (DEV-1116): the
+// ObjectCluster recorder, and the one-file writer every recorder is built on.
+export { createCsvRecorder, createCsvTableWriter, downloadCsvBlob } from './core/csvRecorder.js';
+export type {
+  CsvByteSink,
+  CsvDownload,
+  CsvFileResult,
+  CsvRecorder,
+  CsvRecorderColumn,
+  CsvRecorderFrame,
+  CsvRecorderLog,
+  CsvRecorderOptions,
+  CsvTableWriter,
+  CsvTableWriterOptions,
+} from './core/csvRecorder.js';
+// Verisense streams record one CSV per sensor stream, in a picked folder.
+export {
+  VERISENSE_STREAM_CSV_TIME_COLUMNS,
+  createVerisenseStreamRecorder,
+  verisenseStreamCsvKey,
+  verisenseStreamCsvLayout,
+} from './devices/verisense/streamCsv.js';
+export type {
+  VerisenseStreamCsvColumn,
+  VerisenseStreamCsvFile,
+  VerisenseStreamCsvLayout,
+  VerisenseStreamFileProgress,
+  VerisenseStreamFileResult,
+  VerisenseStreamRecorder,
+  VerisenseStreamRecorderOptions,
+  VerisenseStreamRecordingResult,
+} from './devices/verisense/streamCsv.js';
 export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
 export type {
   RtcDriftSampleInput,
