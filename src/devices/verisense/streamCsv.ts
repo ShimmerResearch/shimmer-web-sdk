@@ -471,6 +471,8 @@ export interface VerisenseStreamRecorder {
   progress(): VerisenseStreamFileProgress[];
   readonly active: boolean;
   readonly sessionName: string;
+  /** True once `start()` has a folder to write into; false while buffering in memory. */
+  readonly toFolder: boolean;
 }
 
 type DirectoryPicker = (opts?: {
@@ -672,6 +674,9 @@ export function createVerisenseStreamRecorder(
       })),
     get active() {
       return active;
+    },
+    get toFolder() {
+      return dir !== null;
     },
     get sessionName() {
       return sessionName;

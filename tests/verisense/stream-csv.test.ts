@@ -214,6 +214,7 @@ describe('createVerisenseStreamRecorder', () => {
     const rec = createVerisenseStreamRecorder({ sessionNameFn: () => 'Verisense_B10F_test' });
     expect(await rec.start()).toBe(true);
     expect(rec.active).toBe(true);
+    expect(rec.toFolder).toBe(true);
 
     const acc = new SensorLIS2DW12();
     acc.samplingRateHz = 50;
@@ -352,6 +353,7 @@ describe('createVerisenseStreamRecorder', () => {
     rec.push(packet(new SensorMLX90632(), 9, new Uint8Array(4), 2));
     const r = await rec.stop();
     expect(r.toFolder).toBe(false);
+    expect(rec.toFolder).toBe(false);
     expect(r.complete).toBe(true);
     expect(downloadFiles).toHaveBeenCalledTimes(1);
     const files = downloadFiles.mock.calls[0][0] as { fileName: string; blob: Blob }[];
