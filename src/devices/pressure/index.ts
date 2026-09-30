@@ -14,6 +14,8 @@ export { parseBmp390Coefficients, compensateBmp390 } from './bmp390.js';
 export { compensateBmp581 } from './bmp581.js';
 export { parsePressureCalibrationResponse } from './response.js';
 export { compensatePressure } from './compensate.js';
+export { isBmp581PresentPerSrNumber, BMP581_MIN_FIRMWARE } from './detect.js';
+export type { Bmp581DetectionContext } from './detect.js';
 export {
   PRESSURE_SENSOR_ID,
   PRESSURE_SENSOR_ID_BY_KIND,

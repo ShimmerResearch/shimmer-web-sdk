@@ -86,6 +86,28 @@ export function isShimmerSrBoardValid(
   return true;
 }
 
+/**
+ * True when `board` is `SR<boardId>` at revision `rev`-`specialRev` or later:
+ * the rev is compared first, and the special rev only breaks a tie. Port of
+ * the firmware's `ShimBrd_isBoardSrNumberGte()`
+ * (`Boards/shimmer_boards.c:325-335`).
+ *
+ * A board with a different id is never "at least" anything, whatever its
+ * revision — revision numbers are per board id and mean nothing across them.
+ * Nor is an unprogrammed page: the firmware refuses an id of 0x00 or 0xFF
+ * before comparing, because all-0xFF would pass every `>=`.
+ */
+export function isShimmerSrBoardAtLeast(
+  board: ShimmerSrBoard | null | undefined,
+  boardId: number,
+  rev: number,
+  specialRev: number,
+): boolean {
+  if (!board || board.boardId === 0x00 || board.boardId === 0xff) return false;
+  if (board.boardId !== boardId) return false;
+  return board.boardRev > rev || (board.boardRev === rev && board.specialRev >= specialRev);
+}
+
 /** A sensor's board identity, ready to render. */
 export interface ShimmerHardwareDescription {
   /** `'Shimmer3'` / `'Shimmer3R'`, or null when the hardware id is unknown. */

@@ -748,6 +748,8 @@ export {
   compensateBmp581,
   parsePressureCalibrationResponse,
   compensatePressure,
+  isBmp581PresentPerSrNumber,
+  BMP581_MIN_FIRMWARE,
   PRESSURE_SENSOR_ID,
   PRESSURE_SENSOR_ID_BY_KIND,
   PRESSURE_COEFFICIENT_BYTES,
@@ -761,6 +763,7 @@ export type {
   Bmp180Coefficients,
   Bmp280Coefficients,
   Bmp390Coefficients,
+  Bmp581DetectionContext,
 } from './devices/pressure/index.js';
 
 // Unwrapping the sample counter, and placing samples on a wall clock. Usable on
@@ -1179,6 +1182,7 @@ export {
   SHIMMER_SR_BOARD_NAMES,
   formatShimmerSrCode,
   isShimmerSrBoardValid,
+  isShimmerSrBoardAtLeast,
   describeShimmerHardware,
   BLUETOOTH_MODULE_VERSIONS,
   parseBluetoothModuleVersion,
