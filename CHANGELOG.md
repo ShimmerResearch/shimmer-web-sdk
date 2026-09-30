@@ -13,7 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   An SR68-9 with its electrodes open (DEV-793 dataset B6) reads range-3 codes peaking at 1126–1136, so most of such a recording was affected. The limit is now 1138, the first code above 0.5 V at the 1.8 V full scale. That clears this decode's 0.4986 V and the Java driver's 0.5 V alike — the same rule as the Shimmer3's 683 at 3.0 V. The same value went into the Java driver and the C# API, both of which had 1134.
 
-  Not changed here: in auto-range the nudge also caps resistance at 4.7 MΩ, so an open circuit now reads 0.213 µS. That is above the 0.03 µS `connectivity` threshold, so `connectivity` still says `'Connected'`.
+  On its own this still left an open circuit reading 0.213 µS in auto-range, because the nudge capped resistance at 4.7 MΩ there too. The next entry removes that cap (DEV-1068).
+
+- **GSR `connectivity` could never say `'Disconnected'`, so an open circuit read as `'Connected'`** (DEV-1068). `SensorADC` reports `'Disconnected'` at or below 0.03 µS, but `nudgeGsrResistance()` clamped auto-range to 8 kΩ–4.7 MΩ, and 4.7 MΩ is 0.213 µS. Auto-range is now floored at 8 kΩ only, as it already was in the Java driver and the C# API. The 4.7 MΩ cap was the first fix proposed under ASM-2156, and it was withdrawn there because it breaks exactly this check.
+
+  **For callers: in auto-range, `kOhms` can now exceed 4.7 MΩ and `uS` can fall below 0.213 µS.** An open circuit on range 3 now reads about 536 MΩ (0.0019 µS) on gen-2 hardware, given the previous entry, and about 4.5 GΩ on an SR62. Code that treats 4.7 MΩ as a ceiling, such as a fixed plot scale, will see values above it. Fixed ranges are unchanged and still clamp to their own window, so on a fixed range `connectivity` still cannot say `'Disconnected'`, as in the Java driver and the C# API.
 
 ## [0.4.1] - 2026-09-17
 

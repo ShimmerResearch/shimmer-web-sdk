@@ -9,8 +9,19 @@ export interface ADCGSRSample {
   adc12: number;
   range: number;
   volts: number;
+  /**
+   * Skin resistance. A fixed range clamps it to that range's window; auto-range
+   * only floors it at 8 kΩ, so it can exceed 4.7 MΩ: an open circuit reads
+   * hundreds of MΩ or more (DEV-1068).
+   */
   kOhms: number;
   uS: number;
+  /**
+   * `'Disconnected'` at or below `LIMIT_MIN_VALID_USIEMENS` (0.03 µS). Only
+   * auto-range can get there: a fixed range pins the resistance to its own
+   * window, and the top of range 3, 4.7 MΩ, is 0.213 µS. The Java driver and
+   * the C# API behave the same way.
+   */
   connectivity: 'Connected' | 'Disconnected';
 }
 
@@ -221,14 +232,28 @@ export class SensorADC extends SensorBase {
     return rFeedback / (volts / gsrRefVoltage - 1.0);
   }
 
+  /**
+   * Clamp a decoded resistance to what the circuit can measure. A fixed range
+   * clamps both ends, to that range's window. Auto-range only floors it at
+   * 8 kΩ, the smallest resistance any range can measure, and leaves the top
+   * open, as the Java driver's `SensorGSR.nudgeGsrResistance` and the C#
+   * `SensorGSR.NudgeGSRResistance` do (ASM-2156).
+   *
+   * `connectivity` depends on that open top. An open circuit on range 3
+   * decodes to about 536 MΩ on gen-2 hardware (0.0019 µS), far below the
+   * 0.03 µS threshold, but auto-range used to be capped at 4.7 MΩ too, which is
+   * 0.213 µS, so `connectivity` could never say `'Disconnected'` (DEV-1068).
+   * That cap was the first fix proposed under ASM-2156, withdrawn there for
+   * this reason.
+   */
   nudgeGsrResistance(kOhms: number): number {
     const limitsByRange: Record<number, [number, number]> = {
       0: [8.0, 63.0],
       1: [63.0, 220.0],
       2: [220.0, 680.0],
       3: [680.0, 4700.0],
-      4: [8.0, 4700.0],
     };
+    if (this.gsrRangeSetting === 4) return Math.max(kOhms, limitsByRange[0][0]);
     const lim = limitsByRange[this.gsrRangeSetting] ?? [8.0, 4700.0];
     return Math.min(Math.max(kOhms, lim[0]), lim[1]);
   }
