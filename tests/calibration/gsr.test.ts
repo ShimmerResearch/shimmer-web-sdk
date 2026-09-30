@@ -7,6 +7,8 @@ import {
   calibrateGsrSample,
   gsrRangeForSample,
 } from '../../src/devices/calibration/gsr.js';
+import { calibrateGsrDataToResistanceFromAmplifierEq } from '../../src/devices/shimmer3r/calibration.js';
+import { GSR_UNCAL_LIMIT_RANGE3 } from '../../src/devices/shimmer3r/constants.js';
 
 /** A raw GSR word: 12-bit ADC value with auto-range's resistor in bits 14-15. */
 const word = (adc12: number, rangeBits = 0): number => (adc12 & 0x0fff) | (rangeBits << 14);
@@ -51,10 +53,10 @@ describe('calibrateGsrSample', () => {
   });
 
   it('clamps both ends of the window on a fixed range', () => {
-    // Resistance falls as the count rises: R = Rf / ((V/0.5) - 1). So a low
-    // count computes a negative resistance and hits the floor, and range 3's
-    // floored count computes above its ceiling.
-    expect(calibrateGsrSample(word(1), 0).resistanceKOhms).toBe(8);
+    // Resistance falls as the count rises: R = Rf / ((V/0.5) - 1). So full scale
+    // on range 1 computes 57.4 kΩ and hits that range's 63 kΩ floor, and range
+    // 3's floored count computes above its ceiling.
+    expect(calibrateGsrSample(word(4095), 1).resistanceKOhms).toBe(63);
     expect(calibrateGsrSample(word(683), 3).resistanceKOhms).toBe(4700);
   });
 
@@ -70,8 +72,55 @@ describe('calibrateGsrSample', () => {
     // have applied to this same sample.
     expect(calibrateGsrSample(word(683, 3), 4).resistanceKOhms).toBeGreaterThan(4700);
     expect(calibrateGsrSample(word(683), 3).resistanceKOhms).toBe(4700);
-    // The floor still applies, whichever resistor was in circuit.
-    expect(calibrateGsrSample(word(1, 0), 4).resistanceKOhms).toBe(8);
+    // Every count now decodes above the 8 kΩ floor, so it no longer shows here:
+    // the nudge's own tests cover it.
+    expect(calibrateGsrSample(word(4095, 0), 4).resistanceKOhms).toBeCloseTo(8.04, 9);
+  });
+
+  // DEV-1070: a count below the 0.5 V reference, which is every count below
+  // the range-3 limit, means the electrodes are open, on any range. In
+  // auto-range the lower ranges see them as the device climbs after the
+  // electrodes come off. They decoded to a negative resistance, which the floor
+  // turned into 8 kΩ: 125 µS, the highest conductance there is.
+  it('decodes a count below the range-3 limit as open on every range (DEV-1070)', () => {
+    const open = calibrateGsrSample(word(GSR_UNCAL_LIMIT_RANGE3, 3), 4).resistanceKOhms;
+    expect(open).toBeCloseTo(4504500, 0);
+    for (const rangeBits of [0, 1, 2, 3]) {
+      for (const count of [0, 1, 500, GSR_UNCAL_LIMIT_RANGE3 - 1]) {
+        const out = calibrateGsrSample(word(count, rangeBits), 4);
+        const where = `range ${rangeBits}, count ${count}`;
+        // The equation alone gives these a negative resistance.
+        const equation = calibrateGsrDataToResistanceFromAmplifierEq(count, rangeBits);
+        expect(equation, where).toBeLessThan(0);
+        expect(out.resistanceKOhms, where).toBe(open);
+        expect(out.conductanceUSiemens, where).toBeGreaterThan(0);
+        expect(out.conductanceUSiemens, where).toBeLessThan(0.03);
+        // Only the resistance changes: the range is still the resistor in circuit.
+        expect(out.range, where).toBe(rangeBits);
+      }
+    }
+  });
+
+  it('pins an open circuit on a fixed range to the top of its window (DEV-1070)', () => {
+    // It used to pin to the bottom, which on range 0 is 125 µS.
+    const top = [63, 220, 680, 4700];
+    for (const range of [0, 1, 2, 3]) {
+      for (const count of [0, GSR_UNCAL_LIMIT_RANGE3 - 1]) {
+        expect(calibrateGsrSample(word(count), range).resistanceKOhms, `range ${range}`).toBe(
+          top[range],
+        );
+      }
+    }
+  });
+
+  it('decodes every count from the range-3 limit up exactly as before (DEV-1070)', () => {
+    for (const rangeBits of [0, 1, 2, 3]) {
+      for (let count = GSR_UNCAL_LIMIT_RANGE3; count <= 4095; count++) {
+        expect(calibrateGsrSample(word(count, rangeBits), 4).resistanceKOhms).toBe(
+          calibrateGsrDataToResistanceFromAmplifierEq(count, rangeBits),
+        );
+      }
+    }
   });
 
   it('reports a larger resistance on a larger feedback resistor', () => {

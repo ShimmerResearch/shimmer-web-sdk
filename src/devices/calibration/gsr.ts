@@ -37,7 +37,11 @@ export const GSR_RANGE_NAME = 'GSR_RANGE';
 export interface CalibratedGsr {
   /** The resistor actually in circuit for this sample, 0-3. */
   range: number;
-  /** Skin resistance in kΩ, clamped to what the range can measure. */
+  /**
+   * Skin resistance in kΩ, clamped to what the range can measure. An open
+   * circuit decodes as range 3 at its limit on every range, about 4.5 GΩ before
+   * a fixed range clamps it to the top of its window.
+   */
   resistanceKOhms: number;
   /** Skin conductance in µS. */
   conductanceUSiemens: number;
@@ -63,12 +67,17 @@ export function gsrRangeForSample(rawSample: number, gsrRangeSetting: number): n
  */
 export function calibrateGsrSample(rawSample: number, gsrRangeSetting: number): CalibratedGsr {
   const range = gsrRangeForSample(rawSample, gsrRangeSetting);
-  let adc12 = rawSample & 0x0fff;
-  // On the largest range the amplifier is non-linear below this count, and the
-  // firmware's own conversion floors it rather than extrapolating.
-  if (range === 3 && adc12 < GSR_UNCAL_LIMIT_RANGE3) adc12 = GSR_UNCAL_LIMIT_RANGE3;
+  const adc12 = rawSample & 0x0fff;
+  // Below this count the amplifier output is at or under its 0.5 V reference,
+  // which no skin resistance can produce, so the electrodes are open. Range 3
+  // has long decoded such a count at the limit. The lower ranges see them too,
+  // as auto-range climbs through them after the electrodes come off, and now
+  // decode them the same way, as range 3 at the limit (DEV-1070). `range` still
+  // reports the resistor that was in circuit.
   const resistanceKOhms = nudgeGsrResistance(
-    calibrateGsrDataToResistanceFromAmplifierEq(adc12, range),
+    adc12 < GSR_UNCAL_LIMIT_RANGE3
+      ? calibrateGsrDataToResistanceFromAmplifierEq(GSR_UNCAL_LIMIT_RANGE3, 3)
+      : calibrateGsrDataToResistanceFromAmplifierEq(adc12, range),
     gsrRangeSetting,
   );
   return {
