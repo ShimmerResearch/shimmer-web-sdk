@@ -65,6 +65,38 @@ export type {
 // per-frame column set shifts cells the moment a frame's field list differs.
 export { csvCell, csvRow, objectClusterColumns, objectClusterRow } from './core/csv.js';
 export type { ObjectClusterColumn, ObjectClusterColumnOptions } from './core/csv.js';
+// CSV recording of a live stream to a file the user picks (DEV-1116): the
+// ObjectCluster recorder, and the one-file writer every recorder is built on.
+export { createCsvRecorder, createCsvTableWriter, downloadCsvBlob } from './core/csvRecorder.js';
+export type {
+  CsvByteSink,
+  CsvDownload,
+  CsvFileResult,
+  CsvRecorder,
+  CsvRecorderColumn,
+  CsvRecorderFrame,
+  CsvRecorderLog,
+  CsvRecorderOptions,
+  CsvTableWriter,
+  CsvTableWriterOptions,
+} from './core/csvRecorder.js';
+// Verisense streams record one CSV per sensor stream, in a picked folder.
+export {
+  VERISENSE_STREAM_CSV_TIME_COLUMNS,
+  createVerisenseStreamRecorder,
+  verisenseStreamCsvKey,
+  verisenseStreamCsvLayout,
+} from './devices/verisense/streamCsv.js';
+export type {
+  VerisenseStreamCsvColumn,
+  VerisenseStreamCsvFile,
+  VerisenseStreamCsvLayout,
+  VerisenseStreamFileProgress,
+  VerisenseStreamFileResult,
+  VerisenseStreamRecorder,
+  VerisenseStreamRecorderOptions,
+  VerisenseStreamRecordingResult,
+} from './devices/verisense/streamCsv.js';
 export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
 export type {
   RtcDriftSampleInput,
@@ -748,6 +780,8 @@ export {
   compensateBmp581,
   parsePressureCalibrationResponse,
   compensatePressure,
+  isBmp581PresentPerSrNumber,
+  BMP581_MIN_FIRMWARE,
   PRESSURE_SENSOR_ID,
   PRESSURE_SENSOR_ID_BY_KIND,
   PRESSURE_COEFFICIENT_BYTES,
@@ -761,6 +795,7 @@ export type {
   Bmp180Coefficients,
   Bmp280Coefficients,
   Bmp390Coefficients,
+  Bmp581DetectionContext,
 } from './devices/pressure/index.js';
 
 // Unwrapping the sample counter, and placing samples on a wall clock. Usable on
@@ -770,6 +805,9 @@ export {
   TICKS_PER_SECOND,
   TICKS_PER_MS,
   INVALID_ZERO_WINDOW_TICKS,
+  REORDER_PERIODS,
+  MAX_WINDOW_DIVISOR,
+  reorderWindowTicks,
 } from './core/StreamTimeline.js';
 export type {
   StreamStamp,
@@ -941,6 +979,10 @@ export {
   writeVerisenseOperationalFieldValue,
   setVerisenseOperationalBitRange,
   enforceVerisenseCommsChannelInterlock,
+  VERISENSE_BLUETOOTH_OFF_MIN_FW,
+  supportsVerisenseBluetoothOff,
+  isVerisenseBluetoothEnabled,
+  enforceVerisenseBluetoothOffFirmwareGuard,
   VERISENSE_SENSOR_ENABLE_FIELDS,
   VERISENSE_OPERATIONAL_FIELD_GROUPS,
   VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID,
@@ -1172,6 +1214,7 @@ export {
   SHIMMER_SR_BOARD_NAMES,
   formatShimmerSrCode,
   isShimmerSrBoardValid,
+  isShimmerSrBoardAtLeast,
   describeShimmerHardware,
   BLUETOOTH_MODULE_VERSIONS,
   parseBluetoothModuleVersion,

@@ -10,6 +10,7 @@ import {
   parseBmp390Coefficients,
 } from '../../src/devices/pressure/index.js';
 import type { PressureCalibration } from '../../src/devices/pressure/index.js';
+import { s24 } from '../../src/devices/pressure/bytes.js';
 
 /**
  * Where each vector comes from, and how far that goes:
@@ -260,6 +261,32 @@ describe('BMP581', () => {
     // The Bosch driver sign-extends temperature only (bmp5.c:684-700).
     expect(compensateBmp581(0, 0xffffff).temperatureC).toBeCloseTo(-1 / 65536, 12);
     expect(compensateBmp581(0xffffff, 0).pressureKPa).toBeCloseTo(0xffffff / 64000, 9);
+  });
+
+  it('carries the shared cross-API vectors', () => {
+    // The table every host API's BMP581 port carries (DEV-1111 plan).
+    expect(compensateBmp581(0xffffff, 0).pressureKPa).toBeCloseTo(262.143984375, 9);
+    expect(compensateBmp581(0, 1600000).temperatureC).toBe(24.4140625);
+    expect(compensateBmp581(0, 0x7fffff).temperatureC).toBeCloseTo(127.9999847, 7);
+    expect(compensateBmp581(0, 0x800000).temperatureC).toBe(-128);
+    // DEV-1102: wire 56 55 FE, a fridge reading, once read as ~254 °C.
+    expect(compensateBmp581(0, 0xfe5556).temperatureC).toBeCloseTo(-1.6666565, 7);
+  });
+});
+
+describe('s24', () => {
+  it('sign-extends an unsigned 24-bit value', () => {
+    expect(s24(0xffffff)).toBe(-1);
+    expect(s24(0x800000)).toBe(-0x800000);
+    expect(s24(0x7fffff)).toBe(0x7fffff);
+    expect(s24(0)).toBe(0);
+  });
+
+  it('masks to 24 bits first, so an already-signed value is unchanged', () => {
+    expect(s24(-1)).toBe(-1);
+    expect(s24(-0x800000)).toBe(-0x800000);
+    expect(s24(-109226)).toBe(-109226); // 0xFE5556, already extended
+    expect(s24(0x1fe5556)).toBe(-109226); // a stray bit above bit 23 is dropped
   });
 });
 

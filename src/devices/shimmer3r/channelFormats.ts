@@ -165,10 +165,11 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
  *
  * Names follow the SD-log channel tables in `devices/sdlog/channels.ts` so the
  * streamed and logged copies of the same signal carry the same label. The one
- * exception is the BMP pair: the SD-log header names the exact part
- * (`TEMPERATURE_BMP390`, `PRESSURE_BMP280`) because it records it, whereas the
- * inquiry response does not say which sensor is fitted, so the streaming names
- * stay unqualified.
+ * exception is the BMP pair: the SD-log decoder names the exact part
+ * (`TEMPERATURE_BMP390`, `PRESSURE_BMP581`), inferred from the board identity
+ * the header records — the header itself names no part — whereas the inquiry
+ * response does not say which sensor is fitted, so the streaming names stay
+ * unqualified.
  *
  * The ADC block's Shimmer3R names are the firmware's logical indices
  * (`EXTERNAL_ADC_0`…), which is what `devices/sdlog/channels.ts` already uses.

@@ -15,12 +15,19 @@
  *     scope — carried rollover state across files)
  */
 
+import { firstTsOffsetFromInitialTsTicks } from './anchor.js';
 import { SDLOG_CLOCK_FREQ, SDLOG_SYNC_OFFSET_LENGTH } from './constants.js';
-import { decodeSdLogValue } from './channels.js';
+import {
+  decodeSdLogValue,
+  SDLOG_BMP581_PRESSURE_NAME,
+  SDLOG_BMP581_TEMPERATURE_NAME,
+  type SdLogChannelSpec,
+} from './channels.js';
 import { parseSdLog, type ParsedSdLog } from './header.js';
 import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js';
 import { calibrateGsrSample } from '../calibration/gsr.js';
 import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
+import { compensateBmp581 } from '../pressure/bmp581.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
 export interface SdLogDecodeOptions {
@@ -48,6 +55,38 @@ function calibrateGsr(raw: number, gsrRangeSetting: number): number {
   return calibrateGsrSample(raw, gsrRangeSetting).conductanceUSiemens;
 }
 
+/** Where a file's BMP581 pair sits in each record, -1 for a channel it lacks. */
+interface Bmp581Indices {
+  pressure: number;
+  temperature: number;
+}
+
+/**
+ * Locate the BMP581 pair, or null when the file has neither channel — which is
+ * every file whose board the SR rule gives a BMP390, because only
+ * `buildShimmer3RSdLogChannels` names these.
+ */
+function findBmp581(channels: SdLogChannelSpec[]): Bmp581Indices | null {
+  const pressure = channels.findIndex((c) => c.name === SDLOG_BMP581_PRESSURE_NAME);
+  const temperature = channels.findIndex((c) => c.name === SDLOG_BMP581_TEMPERATURE_NAME);
+  return pressure < 0 && temperature < 0 ? null : { pressure, temperature };
+}
+
+/**
+ * Replace the BMP581 pair's raw values in place with kPa and °C, through the
+ * same `compensateBmp581` the streaming path dispatches to. Each output is a
+ * fixed scale of its own register, so a file that somehow carries only one of
+ * the two still converts it correctly.
+ */
+function applyBmp581(values: number[], idx: Bmp581Indices): void {
+  const out = compensateBmp581(
+    idx.pressure < 0 ? 0 : values[idx.pressure],
+    idx.temperature < 0 ? 0 : values[idx.temperature],
+  );
+  if (idx.pressure >= 0) values[idx.pressure] = out.pressureKPa;
+  if (idx.temperature >= 0) values[idx.temperature] = out.temperatureC;
+}
+
 interface DecodeBudget {
   remaining: number;
   truncated: boolean;
@@ -66,6 +105,7 @@ function decodeRecordsFromFile(
   // calibrated. LN accel, WR accel, gyro, mag (+ Shimmer3R alt accel/mag).
   const calibPlan = buildSdLogCalibPlan(header, channels);
   header.calibration = calibPlan.info;
+  const bmp581 = findBmp581(channels);
   const packetSize = header.packetSizeBytes;
   const tsBytes = header.timestampBytes;
   const maxTicks = 2 ** (8 * tsBytes);
@@ -77,13 +117,12 @@ function decodeRecordsFromFile(
   // restart from cycle 0 with their own header initial timestamp.
   let cycle = 0;
   let lastUnwrapped = 0;
-  // ShimmerObject#parseTimestampShimmer3 subtracts the FIRST packet's raw
-  // timestamp before adding the header's initial timestamp: on modern
-  // firmware the 5-byte initial timestamp is the full clock at the first
-  // packet, whose low bytes are that packet's raw timestamp — without the
-  // subtraction those low bytes would be double-counted
-  // (mFirstTsOffsetFromInitialTsTicks in the Java driver).
-  let firstRawTicks: number | null = null;
+  // Subtracted, with the header's initial timestamp added, from each unwrapped
+  // timestamp (mFirstTsOffsetFromInitialTsTicks in the Java driver). The header
+  // holds the RTC when the file was created, not the first packet's time, so
+  // the offset re-anchors the file on the first packet's own counter value —
+  // see ./anchor.ts (DEV-1095).
+  let firstTsOffsetTicks: number | null = null;
 
   let pos = header.headerLengthBytes;
   let samplesInBlock = 0;
@@ -112,7 +151,9 @@ function decodeRecordsFromFile(
       unwrapped = rawTs + maxTicks * cycle;
     }
     lastUnwrapped = unwrapped;
-    if (firstRawTicks === null) firstRawTicks = rawTs;
+    if (firstTsOffsetTicks === null) {
+      firstTsOffsetTicks = firstTsOffsetFromInitialTsTicks(initialTicks, rawTs, maxTicks);
+    }
 
     const values = new Array<number>(channels.length);
     for (let c = 0; c < channels.length; c++) {
@@ -120,13 +161,15 @@ function decodeRecordsFromFile(
       const raw = decodeSdLogValue(bytes, p, spec.dataType);
       // GSR is calibrated inline (amplifier equation). Inertial channels are
       // marked calibrated by the plan but keep their raw value here and are
-      // calibrated together (per triple) by applyCalibPlan below.
+      // calibrated together (per triple) by applyCalibPlan below, and the
+      // BMP581 pair likewise by applyBmp581.
       values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
       p += spec.sizeBytes;
     }
     if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
+    if (bmp581) applyBmp581(values, bmp581);
 
-    const absoluteTicks = initialTicks + unwrapped - firstRawTicks;
+    const absoluteTicks = initialTicks + unwrapped - firstTsOffsetTicks;
     out.push({
       // Device-clock timestamp always divides by the 32768 Hz RTC clock
       // (ShimmerObject#getRtcClockFreq); only the wall-clock (RTC) conversion

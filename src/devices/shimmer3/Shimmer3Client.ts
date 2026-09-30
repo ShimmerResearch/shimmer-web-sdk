@@ -794,6 +794,13 @@ export class Shimmer3Client extends BaseShimmerClient {
     // The width is a firmware property the handshake has established by now:
     // 16 bits, wrapping every 2 s, on anything older than LogAndStream 0.5.4.
     this._timeline.setTimestampBits(this._timestampFmt === 'u16' ? 16 : 24);
+    /* And the rate, which sizes the reorder window: eight sample periods is
+       what separates a pair of packets delivered out of order from a dropout
+       that happens to span the counter's wrap point. Without it the window
+       falls back to an eighth of the modulo, which on the 16-bit counter is
+       0.25 s and reads an ordinary 1.8 s gap as a reorder. Zero means the
+       inquiry has not run, and `null` says so rather than passing it on. */
+    this._timeline.setSamplingRateHz(this.samplingRateHz > 0 ? this.samplingRateHz : null);
     this._timeline.reset();
     if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
     /* This host's clock, the Consensys method. No round trip is spent here —

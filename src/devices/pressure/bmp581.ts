@@ -9,8 +9,9 @@
  * Scale factors and signedness are the Bosch driver's
  * (`Shimmer_Driver/BMP5/BMP5_SensorAPI/bmp5.c:682-720`): pressure is an
  * **unsigned** 24-bit value over 64 for pascals, temperature a **signed**
- * 24-bit value over 65536 for degrees Celsius. The Java driver agrees
- * (`CalibDetailsBmp581.java:26-31`).
+ * 24-bit value over 65536 for degrees Celsius. The Java driver used the
+ * temperature unsigned until DEV-1102, so Consensys exports read ~255 °C for
+ * anything below 0 °C; it now sign-extends in `CalibDetailsBmp581.signExtend24`.
  */
 
 import { s24 } from './bytes.js';

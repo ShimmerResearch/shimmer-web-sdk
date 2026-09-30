@@ -211,6 +211,17 @@ Shimmer3R — its packet timestamp is the low 24 bits of the same counter
 `GET_RWC` returns), `rwc-estimated` (Shimmer3, from the request round trip, with
 the uncertainty stated), or `host` (no device clock; the Consensys method).
 
+The same unwrap also has to tell a pair of packets delivered out of order from
+a genuine roll-over, and the two look identical in the counter alone — a step
+backwards. What separates them is size, so the timeline is told the sampling
+rate at stream start and sizes its **reorder window** at eight sample periods.
+A packet that late is placed where it was taken; anything further back is a
+roll-over. `timelineState.reorderWindowTicks` reports the window in force. A
+host driving `StreamTimeline` itself passes `samplingRateHz`, or calls
+`setSamplingRateHz`, to get the same treatment; without a rate the window falls
+back to an eighth of the counter's range, which catches reorders but misreads a
+dropout of 1.75–2.0 s on the 16-bit counter as one.
+
 `oc.timestampValid` says whether a frame's timestamp means anything. Firmware
 stamps a packet when the sample tick starts it, so a counter field of exactly
 `0x000000` is a record it published without stamping — LogAndStream

@@ -32,5 +32,12 @@ export const i16le = (b: Uint8Array, o: number): number => s16(u16le(b, o));
  * The BMP581 streams its temperature as 24-bit two's complement — the Bosch
  * driver does this same extension before scaling
  * (`Shimmer_Driver/BMP5/BMP5_SensorAPI/bmp5.c:684-693`).
+ *
+ * Masks to 24 bits first, as the Java driver's `CalibDetailsBmp581.signExtend24`
+ * does, so a value that is already signed — `-1` from a decoder that extended
+ * it itself — comes back unchanged rather than shifted down by 2^24.
  */
-export const s24 = (v: number): number => (v & 0x800000 ? v - 0x1000000 : v);
+export const s24 = (v: number): number => {
+  const u = v & 0xffffff;
+  return u & 0x800000 ? u - 0x1000000 : u;
+};

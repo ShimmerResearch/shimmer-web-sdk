@@ -118,6 +118,27 @@ const gsrChannel = (): SdLogChannelSpec => ({
   sizeBytes: 2,
 });
 
+/** `'TEMPERATURE_BMP581'` — emitted calibrated, in °C. */
+export const SDLOG_BMP581_TEMPERATURE_NAME = 'TEMPERATURE_BMP581';
+/** `'PRESSURE_BMP581'` — emitted calibrated, in kPa. */
+export const SDLOG_BMP581_PRESSURE_NAME = 'PRESSURE_BMP581';
+
+/**
+ * The BMP581 pair, on the wire exactly as the BMP390's (`0x1A`/`0x1B`, 3 bytes
+ * each, little-endian) but emitted calibrated: the part compensates on-chip,
+ * so a fixed scale is all that stands between its registers and kPa / °C, and
+ * there is no coefficient block to be missing. The BMP390 pair stays raw — its
+ * compensation needs the header's 21-byte trim block, which this decoder does
+ * not yet apply.
+ */
+const bmp581Channel = (name: string, unit: string): SdLogChannelSpec => ({
+  name,
+  unit,
+  calibrated: true,
+  dataType: 'u24',
+  sizeBytes: 3,
+});
+
 /**
  * Build the Shimmer3 (256-byte header) channel list from the enabled-sensors
  * value. The order and datatypes replicate the "modern Shimmer3" branch of
@@ -318,6 +339,7 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
   0x17: uncal('ALT_MAG_X', 'i16'),
   0x18: uncal('ALT_MAG_Y', 'i16'),
   0x19: uncal('ALT_MAG_Z', 'i16'),
+  // BMP390. A BMP581 board gets bmp581Channel instead (buildShimmer3RSdLogChannels).
   0x1a: uncal('TEMPERATURE_BMP390', 'u24'),
   0x1b: uncal('PRESSURE_BMP390', 'u24'),
   0x1c: gsrChannel(),
@@ -340,11 +362,27 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
  * channel table stored in the header (byte 314 = nChannels, bytes 315.. =
  * signal IDs). Unknown IDs fall back to a `u12` channel named after the ID,
  * matching the Java catch-all (ShimmerObject.java:3579-3583).
+ *
+ * @param bmp581 True when `0x1A`/`0x1B` are a BMP581 rather than a BMP390. The
+ *   header carries no sensor id, so the caller decides from the board's SR
+ *   number (`isBmp581PresentPerSrNumber`), as the Java driver does
+ *   (ShimmerObject.java:3470-3497, `isSupportedBmp581()`).
  */
-export function buildShimmer3RSdLogChannels(signalIds: ArrayLike<number>): SdLogChannelSpec[] {
+export function buildShimmer3RSdLogChannels(
+  signalIds: ArrayLike<number>,
+  bmp581 = false,
+): SdLogChannelSpec[] {
   const ch: SdLogChannelSpec[] = [];
   for (let i = 0; i < signalIds.length; i++) {
     const id = signalIds[i];
+    if (bmp581 && id === 0x1a) {
+      ch.push(bmp581Channel(SDLOG_BMP581_TEMPERATURE_NAME, CHANNEL_UNITS.DEGREES_CELSIUS));
+      continue;
+    }
+    if (bmp581 && id === 0x1b) {
+      ch.push(bmp581Channel(SDLOG_BMP581_PRESSURE_NAME, CHANNEL_UNITS.KPASCAL));
+      continue;
+    }
     const spec = SHIMMER3R_SIGNAL_ID_TABLE[id];
     ch.push(spec ? { ...spec } : uncal(String(id), 'u12'));
   }
