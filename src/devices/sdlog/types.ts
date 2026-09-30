@@ -25,7 +25,8 @@ export interface SdLogCalibrationBytes {
   /**
    * Pressure/temperature block — header offset 160, 22 bytes, plus header
    * bytes 222-223 appended (24 bytes total) when the device carries a
-   * BMP280/BMP390 (new-IMU boards and every Shimmer3R).
+   * BMP280/BMP390 (new-IMU boards and every Shimmer3R). A BMP581 has no trim
+   * block and the firmware leaves this region unwritten (0xFF) for one.
    */
   pressure: Uint8Array;
   /** Shimmer3R alternative (high-g) accel block — header offset 256, 21 bytes. */

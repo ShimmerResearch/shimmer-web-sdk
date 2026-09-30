@@ -410,6 +410,83 @@ describe('decodeSdLogFile — Shimmer3R end-to-end', () => {
   });
 });
 
+describe('decodeSdLogFile — Shimmer3R pressure part (DEV-1111)', () => {
+  /*
+   * The header names no pressure part, so the board's SR number decides. The
+   * firmware writes the channel table in its own order; pressure-first is the
+   * order the shared vectors use (`[0x1B, 0x1A]`). The trim region is all 0xFF,
+   * as a BMP581 unit leaves it (SDCard/shimmer_sd_header.c:209-215).
+   */
+  const pressureFile = (
+    expansionBoard: [number, number, number],
+    fwVersion: [number, number, number] = [1, 1, 6],
+  ): Uint8Array =>
+    buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion,
+        expansionBoard,
+        signalIds: [0x1b, 0x1a],
+        calibFill: () => 0xff,
+      }),
+      // Shared frame `00 A8 61 00 00 19`: P 6400000, T 1638400.
+      buildPacket(1, 3, [0x00, 0xa8, 0x61, 0x00, 0x00, 0x19]),
+      // P 0xFFFFFF; T wire `56 55 FE`, the DEV-1102 sub-zero regression.
+      buildPacket(2, 3, [0xff, 0xff, 0xff, 0x56, 0x55, 0xfe]),
+    );
+
+  it('labels and calibrates a BMP581 board (SR48-8-2)', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 2]));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE_BMP581', unit: 'kPa', calibrated: true, dataType: 'u24', sizeBytes: 3 },
+      {
+        name: 'TEMPERATURE_BMP581',
+        unit: 'Degrees Celsius',
+        calibrated: true,
+        dataType: 'u24',
+        sizeBytes: 3,
+      },
+    ]);
+    expect(header.packetSizeBytes).toBe(3 + 3 + 3);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(records[1].values[0]).toBeCloseTo(262.143984375, 9);
+    expect(records[1].values[1]).toBeCloseTo(-1.6666565, 7);
+  });
+
+  it('keeps the channel table order the header gives', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        expansionBoard: [38, 4, 2], // SR38, the board the Java rule misses
+        signalIds: [0x1a, 0x1b],
+      }),
+      buildPacket(1, 3, [0x00, 0x00, 0x19, 0x00, 0xa8, 0x61]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP581', 'PRESSURE_BMP581']);
+    expect(records[0].values).toEqual([25, 100]);
+  });
+
+  it('decodes a BMP390 board (SR48-8-1) exactly as before: labelled BMP390, raw', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 1]));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE_BMP390', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+      { name: 'TEMPERATURE_BMP390', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(records[1].values).toEqual([0xffffff, 0xfe5556]);
+  });
+
+  it('treats a BMP581 board on pre-BMP581 firmware (v1.01.005) as a BMP390', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 2], [1, 1, 5]));
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP390', 'TEMPERATURE_BMP390']);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+});
+
 describe('decodeSdSession — multi-file continuation', () => {
   const enabled = BM.GSR;
 

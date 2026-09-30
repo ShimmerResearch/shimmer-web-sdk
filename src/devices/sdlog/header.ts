@@ -24,6 +24,7 @@ import {
   buildShimmer3SdLogChannels,
   type SdLogChannelSpec,
 } from './channels.js';
+import { isBmp581PresentPerSrNumber } from '../pressure/detect.js';
 import {
   SdLogFormatError,
   type SdLogCalibrationBytes,
@@ -410,7 +411,22 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
         `Shimmer3R channel table overruns the header (nChannels=${nChannels}).`,
       );
     }
-    channels = buildShimmer3RSdLogChannels(bytes.subarray(315, 315 + nChannels));
+    // The header names no pressure part, and a BMP581 leaves the calibration
+    // region unwritten rather than marking it (SDCard/shimmer_sd_header.c:209-215),
+    // so the board's SR number decides, as the firmware's own fallback does.
+    // HARDWARE-VERIFY: pinned by synthetic headers only; no SD file from a
+    // BMP581 unit has been decoded and checked against a Consensys export yet.
+    const bmp581 = isBmp581PresentPerSrNumber({
+      hardwareVersion,
+      firmwareId,
+      firmwareVersion: fwVersion,
+      board: expansionBoard && {
+        boardId: expansionBoard.id,
+        boardRev: expansionBoard.rev,
+        specialRev: expansionBoard.revSpecial,
+      },
+    });
+    channels = buildShimmer3RSdLogChannels(bytes.subarray(315, 315 + nChannels), bmp581);
   } else {
     channels = buildShimmer3SdLogChannels(enabledSensors, newImu);
   }
