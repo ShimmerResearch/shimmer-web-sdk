@@ -31,6 +31,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   For consumers that want to tell their users why, these are exported: `VERISENSE_BLUETOOTH_OFF_MIN_FW`, `supportsVerisenseBluetoothOff()`, `isVerisenseBluetoothEnabled()`, `enforceVerisenseBluetoothOffFirmwareGuard()`, and the client's `getReportedFirmwareVersion()`.
 
+- **An open circuit on gen-2 GSR range 3 read as 125 µS, the highest conductance the device can report** (DEV-1067). With the electrodes open, the amplifier output sits on its reference and the ADC reads a few codes either side of it. `SensorADC` raises every range-3 code below `GSR_UNCAL_LIMIT_RANGE3_SR68` to that limit so the sample decodes as open. But the limit was 1134, which is below the 0.4986 V reference this decode divides by (code 1134.3). So the clamped code decoded to a negative resistance, which the nudge floored at 8 kΩ in auto-range and pinned to 680 kΩ, the bottom of the range, on fixed range 3.
+
+  An SR68-9 with its electrodes open (DEV-793 dataset B6) reads range-3 codes peaking at 1126–1136, so most of such a recording was affected. The limit is now 1138, the first code above 0.5 V at the 1.8 V full scale. That clears this decode's 0.4986 V and the Java driver's 0.5 V alike — the same rule as the Shimmer3's 683 at 3.0 V. The same value went into the Java driver and the C# API, both of which had 1134.
+
+  On its own this still left an open circuit reading 0.213 µS in auto-range, because the nudge capped resistance at 4.7 MΩ there too. The next entry removes that cap (DEV-1068).
+
+- **GSR `connectivity` could never say `'Disconnected'`, so an open circuit read as `'Connected'`** (DEV-1068). `SensorADC` reports `'Disconnected'` at or below 0.03 µS, but `nudgeGsrResistance()` clamped auto-range to 8 kΩ–4.7 MΩ, and 4.7 MΩ is 0.213 µS. Auto-range is now floored at 8 kΩ only, as it already was in the Java driver and the C# API. The 4.7 MΩ cap was the first fix proposed under ASM-2156, and it was withdrawn there because it breaks exactly this check.
+
+  **For callers: in auto-range, `kOhms` can now exceed 4.7 MΩ and `uS` can fall below 0.213 µS.** An open circuit on range 3 now reads about 536 MΩ (0.0019 µS) on gen-2 hardware, given the previous entry, and about 4.5 GΩ on an SR62. Code that treats 4.7 MΩ as a ceiling, such as a fixed plot scale, will see values above it. Fixed ranges are unchanged and still clamp to their own window, so on a fixed range `connectivity` still cannot say `'Disconnected'`, as in the Java driver and the C# API.
+
+- **An open circuit still read 125 µS, and `'Connected'`, while auto-range climbed through ranges 0–2** (DEV-1070). A code below the amplifier's reference has no positive solution in the amplifier equation: no skin resistance can pull the output under the reference, so the electrodes are open. Range 3 has long raised such a code to its open-circuit limit, but ranges 0–2 did not, and in auto-range they see these codes too. When the electrodes come off, the device climbs one range at a time and repeats the sample that triggered each switch through the 80 ms settling time, tagged with the range it was measured on. The equation gave those samples a negative resistance, which the nudge floored at 8 kΩ, the highest conductance the device can report. DEV-793 dataset B6 (an SR68-9) holds 50 such samples.
+
+  Every range now decodes a code below the limit (683, or 1138 on gen-2) as range 3 at the limit. That applies in `SensorADC` for Verisense and in `calibrateGsrSample` for Shimmer3/3R streaming and SD logs, and the same rule goes into the Java driver, the C# API and ASM_BaseStation. An open circuit then reads the same on every range as the settled range 3 does: about 536 MΩ (0.0019 µS, `'Disconnected'`) on gen-2 hardware, and 4.5 GΩ on an SR62 or a Shimmer3.
+
+  **For callers:** only `kOhms`, `uS` and `connectivity` change, and only for codes below the limit. `range` still reports the resistor in circuit, and on ranges 0–2 `adc12` still reports the sample's own code. On a fixed range an open circuit now pins to the top of the window (63, 220 or 680 kΩ) instead of the bottom. Every code at or above the limit decodes exactly as before, and none of them decodes below 8 kΩ, so the auto-range floor is now only a backstop.
+
 ## [0.4.1] - 2026-09-17
 
 ### Fixed
