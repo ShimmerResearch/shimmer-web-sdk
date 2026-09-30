@@ -28,6 +28,7 @@
     "build": "rollup -c rollup.config.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:dist": "node tools/check-dist.mjs",
     "lint": "eslint src tests",
     "typecheck": "tsc -p tsconfig.eslint.json --noEmit",
     "docs": "typedoc --out docs src/index.ts",

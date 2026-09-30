@@ -8,12 +8,13 @@ TypeScript, bundled by rollup to ESM + CJS + `.d.ts`. Published to GitHub Packag
 ```
 npm run build       # rollup -> dist/  (what consumers vendor)
 npm test            # vitest run
+npm run test:dist   # load the built dist/ bundles (after build): versions, exports, .d.ts
 npm run typecheck   # tsc --noEmit
 npm run lint        # eslint src tests
 npm run format      # prettier --write .
 ```
 
-CI is `ci.yml`; `format-on-commit.yml` applies prettier automatically, `cut-release.yml` handles releases.
+CI is `ci.yml`, on every pull request whatever its base, laid out like neurolynq-web-sdk and neurolynq-web; `format-on-commit.yml` applies prettier automatically, `cut-release.yml` handles releases.
 
 ## The `HARDWARE-VERIFY:` convention
 
