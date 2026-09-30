@@ -51,10 +51,23 @@ function scriptBase(
 }
 
 /** Script the per-Shimmer binary channel; MAC encodes the active slot. */
-function scriptShimmer(t: LoopbackTransport, state: BaseState): void {
+function scriptShimmer(
+  t: LoopbackTransport,
+  state: BaseState,
+  opts: { dropFirstReads?: number } = {},
+): void {
+  let dropped = 0;
   t.setOnWrite((bytes, tr) => {
     const req = parseUartPacket(bytes);
     if (req.command !== UART_PACKET_CMD.READ) return;
+    // A slot that has been re-routed but is not answering yet. The Java driver
+    // expects this and retries (READ_MAC_RETRY_ATTEMPTS, AbstractDock.java:92);
+    // observed on a Base 6, where a READ VER straight after a slot change came
+    // back BAD_CMD and succeeded on the next attempt.
+    if (opts.dropFirstReads && dropped < opts.dropFirstReads) {
+      dropped++;
+      return;
+    }
     const c = req.component;
     const p = req.property;
     let payload: Uint8Array | null = null;
@@ -78,6 +91,7 @@ async function connectedDock(
     hwVersion?: number;
     occupancy?: string;
     baseScript?: Parameters<typeof scriptBase>[2];
+    shimmerScript?: Parameters<typeof scriptShimmer>[2];
   } = {},
 ): Promise<{
   dock: SmartDockClient;
@@ -93,7 +107,7 @@ async function connectedDock(
   const base = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'SmartDock' });
   const shimmer = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'Shimmer' });
   scriptBase(base, state, opts.baseScript);
-  scriptShimmer(shimmer, state);
+  scriptShimmer(shimmer, state, opts.shimmerScript);
   const dock = new SmartDockClient({
     debug: false,
     transport: base,
@@ -321,5 +335,27 @@ describe('SmartDockClient serialization (atomic slot-select + read)', () => {
     // its battery payload is intact.
     expect(dock.activeSlot).toBe(5);
     expect(st.chargingStatus).toBe('FULLY_CHARGED');
+  });
+});
+
+describe('the first read after a slot change', () => {
+  it('is already retried, by the wired client rather than by this one', async () => {
+    // A slot that has been re-routed but is not answering yet. The Java driver
+    // expects this and retries (READ_MAC_RETRY_ATTEMPTS, AbstractDock.java:92);
+    // observed on a Base 6, where a READ VER straight after a slot change came
+    // back BAD_CMD and succeeded on the next attempt.
+    //
+    // The retry lives in WiredShimmerClient._readMacImpl, which is where the
+    // Java has it. Adding a second one here was tried and reverted: it caught
+    // nothing a mutation check could detect, and it would have retried the
+    // whole identify - MAC, VER and expansion board - on a genuine failure.
+    const { dock } = await connectedDock({ shimmerScript: { dropFirstReads: 1 } });
+    const identity = await dock.identifyDockedShimmer(1);
+    expect(identity.mac).toBe('000666668001');
+  });
+
+  it('gives up rather than retrying forever', async () => {
+    const { dock } = await connectedDock({ shimmerScript: { dropFirstReads: 99 } });
+    await expect(dock.identifyDockedShimmer(1)).rejects.toThrow();
   });
 });
