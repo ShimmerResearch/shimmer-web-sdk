@@ -2,6 +2,15 @@
  * Public types for the Shimmer3 / Shimmer3R binary SD-log decoder.
  */
 
+import type { PressureSensorKind } from '../pressure/types.js';
+
+/**
+ * The pressure part an SD-log header records (byte 224, DEV-1123): a known
+ * part, `'unknown'` for an id this SDK does not recognise, or `'none'` when
+ * the firmware found no pressure sensor fitted.
+ */
+export type SdLogPressureSensor = PressureSensorKind | 'unknown' | 'none';
+
 /** One decoded channel within an SD-log data packet. */
 export interface SdLogChannel {
   /** Signal name, following the SDK's streaming channel naming where a streaming equivalent exists. */
@@ -122,6 +131,36 @@ export interface SdLogHeader {
    * files) yield an empty array.
    */
   calibration: SdLogChannelCalibrationInfo[];
+  /**
+   * The pressure part header byte 224 records, or null when the header does
+   * not record one: SDLog firmware, LogAndStream older than v1.01.006 on a
+   * Shimmer3 or v1.01.018 on a Shimmer3R, or the byte left at 0xFF. When null,
+   * the part is inferred from the expansion-board revision (Shimmer3) or SR
+   * number (Shimmer3R), as before the field existed.
+   *
+   * When set it decides the pressure channels, even against that inference:
+   * a BMP581 pair on a Shimmer3R is emitted calibrated (kPa, °C), every other
+   * part's pair raw. `'unknown'`, and `'none'` with pressure channels
+   * nonetheless enabled, yield raw, part-neutral `PRESSURE`/`TEMPERATURE`
+   * channels and an entry in {@link warnings}.
+   */
+  pressureSensor: SdLogPressureSensor | null;
+  /**
+   * The sensor id from byte 224 (its low 7 bits) when the byte names a part,
+   * known or not; null when {@link pressureSensor} is null or `'none'`.
+   */
+  pressureSensorId: number | null;
+  /**
+   * True when byte 224 has bit 7 set: the firmware could not confirm the part
+   * by chip id and inferred it from the board's SR number. Always comes with
+   * an entry in {@link warnings}.
+   */
+  pressureSensorInferred: boolean;
+  /**
+   * Human-readable notes on anything the decoder had to work around or could
+   * not confirm in this header. Empty when there is nothing to report.
+   */
+  warnings: string[];
 }
 
 /** Inertial-sensor hardware ranges from the SD config setup bytes. */

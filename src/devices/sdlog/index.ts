@@ -28,6 +28,7 @@ export type {
   SdLogExpansionBoard,
   SdLogImuRanges,
   SdLogChannelCalibrationInfo,
+  SdLogPressureSensor,
 } from './types.js';
 export { isNewImuSensors } from './header.js';
 export { decodeSdLogValue, SDLOG_DATA_TYPE_BYTES } from './channels.js';

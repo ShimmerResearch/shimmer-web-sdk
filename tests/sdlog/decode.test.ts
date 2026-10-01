@@ -487,6 +487,199 @@ describe('decodeSdLogFile — Shimmer3R pressure part (DEV-1111)', () => {
   });
 });
 
+describe('decodeSdLogFile — Shimmer3R header pressure sensor id (DEV-1123)', () => {
+  /*
+   * Header byte 224 names the pressure part from LogAndStream_Shimmer3R
+   * v1.01.018. The same pressure-first table and frames as DEV-1111 above:
+   * frame 1 is P 6400000 / T 1638400 raw, 100 kPa / 25 °C as a BMP581.
+   */
+  const NEW_FW: [number, number, number] = [1, 1, 18];
+  const idFile = (
+    pressureSensorId: number,
+    expansionBoard: [number, number, number],
+    fwVersion: [number, number, number] = NEW_FW,
+  ): Uint8Array =>
+    buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion,
+        expansionBoard,
+        signalIds: [0x1b, 0x1a],
+        calibFill: () => 0xff,
+        pressureSensorId,
+      }),
+      buildPacket(1, 3, [0x00, 0xa8, 0x61, 0x00, 0x00, 0x19]),
+    );
+  const BMP390_BOARD: [number, number, number] = [48, 8, 1];
+  const BMP581_BOARD: [number, number, number] = [48, 8, 2];
+
+  it('0x03 on a board the SR rule gives a BMP390: the byte wins, BMP581 calibrated', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x03, BMP390_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE_BMP581', true],
+      ['TEMPERATURE_BMP581', true],
+    ]);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.pressureSensorId).toBe(3);
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/BMP581.*SR48-8-1.*BMP390/);
+  });
+
+  it('0x02 on a board the SR rule gives a BMP581: the byte wins, BMP390 raw', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x02, BMP581_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE_BMP390', false],
+      ['TEMPERATURE_BMP390', false],
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('bmp390');
+    expect(header.pressureSensorId).toBe(2);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/BMP390.*SR48-8-2.*BMP581/);
+  });
+
+  it('a byte that agrees with the SR rule decodes without a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x03, BMP581_BOARD));
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.warnings).toEqual([]);
+  });
+
+  it.each<[string, [number, number, number]]>([
+    ['v1.01.006', [1, 1, 6]],
+    ['v1.01.017', [1, 1, 17]],
+  ])(
+    'ignores the byte on Shimmer3R firmware below v1.01.018 (%s): the SR rule decides',
+    (_, fw) => {
+      const { header, records } = decodeSdLogFile(idFile(0x03, BMP390_BOARD, fw));
+      expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP390', 'TEMPERATURE_BMP390']);
+      expect(records[0].values).toEqual([6400000, 1638400]);
+      expect(header.pressureSensor).toBeNull();
+      expect(header.pressureSensorId).toBeNull();
+      expect(header.warnings).toEqual([]);
+    },
+  );
+
+  it('falls back to the SR rule when new firmware leaves the byte at 0xFF', () => {
+    const bmp581 = decodeSdLogFile(idFile(0xff, BMP581_BOARD));
+    expect(bmp581.header.channels.map((c) => c.name)).toEqual([
+      'PRESSURE_BMP581',
+      'TEMPERATURE_BMP581',
+    ]);
+    expect(bmp581.records[0].values).toEqual([100, 25]);
+    expect(bmp581.header.pressureSensor).toBeNull();
+    expect(bmp581.header.warnings).toEqual([]);
+
+    const bmp390 = decodeSdLogFile(idFile(0xff, BMP390_BOARD));
+    expect(bmp390.header.channels.map((c) => c.name)).toEqual([
+      'PRESSURE_BMP390',
+      'TEMPERATURE_BMP390',
+    ]);
+    expect(bmp390.records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0x83: BMP581, flagged as inferred from the SR number, with a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x83, BMP581_BOARD));
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP581', 'TEMPERATURE_BMP581']);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.pressureSensorId).toBe(3);
+    expect(header.pressureSensorInferred).toBe(true);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/not confirmed by chip id/);
+  });
+
+  it('0x04 (unknown): raw part-neutral channels and a warning, with no SR fallback', () => {
+    // SR48-8-2 would give a BMP581 under the SR rule; an unknown id must not.
+    const { header, records } = decodeSdLogFile(idFile(0x04, BMP581_BOARD));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+      { name: 'TEMPERATURE', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(4);
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/unrecognised pressure sensor \(id 0x04\)/);
+  });
+
+  it.each([0x7d, 0x7e, 0x7f])('treats reserved or unallocated id %i as unknown', (byte) => {
+    const { header, records } = decodeSdLogFile(idFile(byte, BMP581_BOARD));
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(byte);
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE', 'TEMPERATURE']);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0x84 (unknown, inferred): raw, with both warnings', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x84, BMP581_BOARD));
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(4);
+    expect(header.pressureSensorInferred).toBe(true);
+    expect(header.warnings).toHaveLength(2);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0xFE (none) with pressure channels enabled: raw part-neutral channels and a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0xfe, BMP581_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE', false],
+      ['TEMPERATURE', false],
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('none');
+    expect(header.pressureSensorId).toBeNull();
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/no pressure sensor is fitted/);
+  });
+});
+
+describe('decodeSdLogFile — Shimmer3 header pressure sensor id (DEV-1123)', () => {
+  it('a Shimmer3 header naming a BMP581 keeps the pair raw: no BMP581 conversion on that layout', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        enabledSensors: BM.BMPX80,
+        expansionBoard: [31, 6, 0],
+        pressureSensorId: 0x03,
+      }),
+      buildPacket(1, 3, [...encodeValue('u16r', 0x1900), ...encodeValue('u24r', 0x61a800)]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['TEMPERATURE_BMP581', false],
+      ['PRESSURE_BMP581', false],
+    ]);
+    expect(records[0].values).toEqual([0x1900, 0x61a800]);
+  });
+
+  it('0xFE with pressure enabled decodes the pair raw', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        enabledSensors: BM.BMPX80,
+        expansionBoard: [31, 6, 0],
+        pressureSensorId: 0xfe,
+      }),
+      buildPacket(1, 3, [...encodeValue('u16r', 0x1234), ...encodeValue('u24r', 0x56789a)]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.channels.map((c) => c.name)).toEqual(['TEMPERATURE', 'PRESSURE']);
+    expect(records[0].values).toEqual([0x1234, 0x56789a]);
+    expect(header.warnings).toHaveLength(1);
+  });
+});
+
 describe('decodeSdSession — multi-file continuation', () => {
   const enabled = BM.GSR;
 

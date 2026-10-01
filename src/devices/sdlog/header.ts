@@ -16,6 +16,8 @@ import {
   SDLOG_FW_ID,
   SDLOG_HEADER_LENGTH,
   SDLOG_HW_ID,
+  SDLOG_PRESSURE_SENSOR_ID,
+  SDLOG_PRESSURE_SENSOR_ID_MIN_FIRMWARE,
   SDLOG_SYNC_BLOCK_LENGTH,
   SDLOG_SYNC_OFFSET_LENGTH,
 } from './constants.js';
@@ -25,12 +27,15 @@ import {
   type SdLogChannelSpec,
 } from './channels.js';
 import { isBmp581PresentPerSrNumber } from '../pressure/detect.js';
+import { PRESSURE_SENSOR_ID, type PressureSensorKind } from '../pressure/types.js';
+import { formatShimmerSrCode } from '../identity.js';
 import {
   SdLogFormatError,
   type SdLogCalibrationBytes,
   type SdLogExpansionBoard,
   type SdLogHeader,
   type SdLogImuRanges,
+  type SdLogPressureSensor,
 } from './types.js';
 
 /** Internal parse result: the public header plus decode-time layout details. */
@@ -213,6 +218,51 @@ function parseImuRanges(bytes: Uint8Array, hw: number): SdLogImuRanges {
   return { lnAccel, wrAccel, gyro, mag, altAccel: 0, altMag: 0 };
 }
 
+/** What header byte 224 says, once the firmware gate has been applied. */
+interface PressureSensorField {
+  sensor: SdLogPressureSensor | null;
+  id: number | null;
+  inferred: boolean;
+}
+
+/**
+ * Read the pressure part from header byte 224 (`SDH_PRESSURE_SENSOR_ID`,
+ * DEV-1123), or `sensor: null` when the header does not record one. The byte
+ * is trusted only from LogAndStream firmware at or above the per-hardware
+ * {@link SDLOG_PRESSURE_SENSOR_ID_MIN_FIRMWARE}: older firmware leaves it at
+ * the 0xFF pre-fill, which reads as "not recorded" here too.
+ *
+ * HARDWARE-VERIFY: byte layout and version gates taken from the firmware
+ * change (log-and-stream-common `SDCard/shimmer_sd_header.h`) only; no SD file
+ * carrying the field, from either a Shimmer3 or a Shimmer3R, has been decoded.
+ */
+function readPressureSensorField(
+  bytes: Uint8Array,
+  hw: number,
+  fwId: number,
+  v: FwVersion,
+): PressureSensorField {
+  const notRecorded: PressureSensorField = { sensor: null, id: null, inferred: false };
+  const min = SDLOG_PRESSURE_SENSOR_ID_MIN_FIRMWARE[hw];
+  if (
+    fwId !== SDLOG_FW_ID.LOGANDSTREAM ||
+    !min ||
+    !atLeast(v, min.major, min.minor, min.internal)
+  ) {
+    return notRecorded;
+  }
+  const raw = bytes[SDLOG_PRESSURE_SENSOR_ID.OFFSET];
+  if (raw === SDLOG_PRESSURE_SENSOR_ID.NOT_RECORDED) return notRecorded;
+  if (raw === SDLOG_PRESSURE_SENSOR_ID.NONE) return { sensor: 'none', id: null, inferred: false };
+  const id = raw & SDLOG_PRESSURE_SENSOR_ID.ID_MASK;
+  return {
+    // 0x04-0x7D are reserved for future parts; 0x7E-0x7F are never allocated.
+    sensor: (PRESSURE_SENSOR_ID[id] as PressureSensorKind | undefined) ?? 'unknown',
+    id,
+    inferred: (raw & SDLOG_PRESSURE_SENSOR_ID.INFERRED_BIT) !== 0,
+  };
+}
+
 function macFromBytes(b: Uint8Array): string {
   let s = '';
   for (let i = 24; i <= 29; i++) s += b[i].toString(16).padStart(2, '0');
@@ -386,11 +436,64 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
 
   const newImu = isNewImuSensors(hardwareVersion, expansionBoard);
 
+  // Which pressure part is fitted. Until header byte 224 the header named
+  // none, so the board decides: on a Shimmer3 its expansion-board revision
+  // (new-IMU boards carry a BMP280), on a Shimmer3R its SR number, as the
+  // firmware's own fallback does — a BMP581 leaves the calibration region
+  // unwritten rather than marking it (SDCard/shimmer_sd_header.c:209-215).
+  // Byte 224, when the header records it, overrides that rule.
+  // HARDWARE-VERIFY: the SR-number path is pinned by synthetic headers only; no
+  // SD file from a BMP581 unit has been decoded and checked against a Consensys
+  // export yet.
+  const warnings: string[] = [];
+  const pressureField = readPressureSensorField(bytes, hardwareVersion, firmwareId, fwVersion);
+  let ruleSensor: PressureSensorKind;
+  let ruleSource: string;
+  if (hardwareVersion === SDLOG_HW_ID.SHIMMER_3R) {
+    const board = expansionBoard && {
+      boardId: expansionBoard.id,
+      boardRev: expansionBoard.rev,
+      specialRev: expansionBoard.revSpecial,
+    };
+    const srBmp581 = isBmp581PresentPerSrNumber({
+      hardwareVersion,
+      firmwareId,
+      firmwareVersion: fwVersion,
+      board,
+    });
+    ruleSensor = srBmp581 ? 'bmp581' : 'bmp390';
+    ruleSource = board ? `the board's SR number (${formatShimmerSrCode(board)})` : 'the board';
+  } else {
+    ruleSensor = newImu ? 'bmp280' : 'bmp180';
+    ruleSource = "the expansion board's revision";
+  }
+  const named = pressureField.sensor;
+  const pressureSensor: SdLogPressureSensor = named ?? ruleSensor;
+  if (named === 'unknown') {
+    warnings.push(
+      `Header names an unrecognised pressure sensor (id 0x${(pressureField.id ?? 0).toString(16).padStart(2, '0')}); pressure and temperature are left uncalibrated.`,
+    );
+  } else if (named !== null && named !== 'none' && named !== ruleSensor) {
+    warnings.push(
+      `Header names a ${named.toUpperCase()} pressure sensor, but ${ruleSource} implies a ${ruleSensor.toUpperCase()}; decoding as the header's ${named.toUpperCase()}.`,
+    );
+  }
+  if (pressureField.inferred) {
+    warnings.push(
+      "The pressure sensor was inferred from the board's SR number, not confirmed by chip id.",
+    );
+  }
+
   // Calibration parameter blocks (kept raw — see SdLogCalibrationBytes).
-  const pressureLen = newImu ? 24 : 22;
+  // BMP280/BMP390 trim runs on into bytes 222-223; a BMP180's stops at 22.
+  const longPressureTrim =
+    pressureSensor === 'bmp280' ||
+    pressureSensor === 'bmp390' ||
+    (pressureSensor !== 'bmp180' && newImu);
+  const pressureLen = longPressureTrim ? 24 : 22;
   const pressure = new Uint8Array(pressureLen);
   pressure.set(bytes.slice(160, 182), 0);
-  if (newImu) pressure.set(bytes.slice(222, 224), 22); // BMP280/BMP390 extra bytes
+  if (longPressureTrim) pressure.set(bytes.slice(222, 224), 22); // BMP280/BMP390 extra bytes
   const calibrationBytes: SdLogCalibrationBytes = {
     wrAccel: bytes.slice(76, 97),
     gyro: bytes.slice(97, 118),
@@ -411,27 +514,20 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
         `Shimmer3R channel table overruns the header (nChannels=${nChannels}).`,
       );
     }
-    // The header names no pressure part, and a BMP581 leaves the calibration
-    // region unwritten rather than marking it (SDCard/shimmer_sd_header.c:209-215),
-    // so the board's SR number decides, as the firmware's own fallback does.
-    // HARDWARE-VERIFY: pinned by synthetic headers only; no SD file from a
-    // BMP581 unit has been decoded and checked against a Consensys export yet.
-    const bmp581 = isBmp581PresentPerSrNumber({
-      hardwareVersion,
-      firmwareId,
-      firmwareVersion: fwVersion,
-      board: expansionBoard && {
-        boardId: expansionBoard.id,
-        boardRev: expansionBoard.rev,
-        specialRev: expansionBoard.revSpecial,
-      },
-    });
-    channels = buildShimmer3RSdLogChannels(bytes.subarray(315, 315 + nChannels), bmp581);
+    channels = buildShimmer3RSdLogChannels(bytes.subarray(315, 315 + nChannels), pressureSensor);
   } else {
-    channels = buildShimmer3SdLogChannels(enabledSensors, newImu);
+    channels = buildShimmer3SdLogChannels(enabledSensors, newImu, pressureSensor);
   }
   if (channels.length === 0) {
     throw new SdLogFormatError('BAD_HEADER', 'Header enables no data channels.');
+  }
+  if (
+    pressureSensor === 'none' &&
+    channels.some((c) => c.name === 'PRESSURE' || c.name === 'TEMPERATURE')
+  ) {
+    warnings.push(
+      'Header says no pressure sensor is fitted, but pressure channels are enabled; they are left uncalibrated.',
+    );
   }
 
   const timestampBytes = sdTimestampBytes(hardwareVersion, firmwareId, fwVersion);
@@ -483,6 +579,10 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     calibration: [],
     exg1,
     exg2,
+    pressureSensor: pressureField.sensor,
+    pressureSensorId: pressureField.id,
+    pressureSensorInferred: pressureField.inferred,
+    warnings,
   };
 
   return { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz };
