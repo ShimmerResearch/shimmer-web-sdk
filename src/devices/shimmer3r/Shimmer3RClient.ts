@@ -301,10 +301,17 @@ function withoutLeadingAck(msg: Uint8Array): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// Internal schema type
+// Internal types
 // ---------------------------------------------------------------------------
 
 type StreamSchema = StreamSchemaBase;
+
+/** The SD command awaiting its response: the single slot `_sdCommand` fills. */
+interface SdExpectation {
+  opcode: number;
+  resolve: (body: Uint8Array) => void;
+  reject: (err: Error) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Constructor options
@@ -4734,11 +4741,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _sdRx: Uint8Array = new Uint8Array(0);
   private _sdUsers = 0;
   private _sdHandlerAttached = false;
-  private _sdExpect: {
-    opcode: number;
-    resolve: (body: Uint8Array) => void;
-    reject: (err: Error) => void;
-  } | null = null;
+  private _sdExpect: SdExpectation | null = null;
   /** Fails the SD read window in flight, if there is one: see _resetLinkProtocolState. */
   private _sdWindowFail: ((err: Error) => void) | null = null;
   private _sdFrameListener: ((frame: SdDataFrame | SdStatusFrame) => void) | null = null;
@@ -4832,11 +4835,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._sdAcquire();
     try {
       return await new Promise<Uint8Array>((resolve, reject) => {
+        /* Cleared only while it is still this command's slot. A link reset
+         * rejects this command and empties the slot, but cannot cancel its
+         * write: one that fails after the next link's SD command has taken the
+         * slot would otherwise clear that command's expectation, and its
+         * response would be ignored until it timed out. */
+        const clearSlot = (): void => {
+          if (this._sdExpect === expectation) this._sdExpect = null;
+        };
         const t = setTimeout(() => {
-          this._sdExpect = null;
+          clearSlot();
           reject(new Error(`SD response 0x${rspOpcode.toString(16)} timeout`));
         }, timeoutMs);
-        this._sdExpect = {
+        const expectation: SdExpectation = {
           opcode: rspOpcode,
           resolve: (b) => {
             clearTimeout(t);
@@ -4847,6 +4858,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
             reject(e);
           },
         };
+        this._sdExpect = expectation;
         this._writeExpectingAck(cmd, timeoutMs)
           .then((ackRemainder) => {
             // When the ACK and the response share a notification the command
@@ -4855,7 +4867,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           })
           .catch((e) => {
             clearTimeout(t);
-            this._sdExpect = null;
+            clearSlot();
             reject(e);
           });
       });

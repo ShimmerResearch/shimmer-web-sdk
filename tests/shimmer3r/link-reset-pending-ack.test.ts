@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import {
+  SD_TRANSFER_OPCODES as SD,
+  SD_STATUS,
+} from '../../src/devices/shimmer3r/sdTransfer/protocol.js';
 
 /* Review finding (a "reconnect race"): a command whose ACK was still awaited
    when the link dropped left its waiter registered. On the next link, that
@@ -220,6 +224,52 @@ describe('a command pending when the link drops', () => {
     expect(await reading).toMatch(/link was reset/);
     expect(Date.now() - droppedAt).toBeLessThan(1000); // not its 6 s stall timer
     expect((client as unknown as { _sdFrameListener: unknown })._sdFrameListener).toBeNull();
+  });
+
+  it("an SD command's write failing after the reset leaves the next link's SD command alone", async () => {
+    /* Review finding: the reset rejects the SD command but cannot cancel its
+       write. A write that failed only after the next link's SD command had
+       taken the slot emptied it, and that command's response was ignored
+       until it timed out. */
+    let release = (): void => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    const client = new Shimmer3RClient({ debug: false });
+    const first = new LoopbackTransport();
+    first.setOnWrite(async (bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      } else {
+        await held; // the SD command's write is still pending at the drop
+      }
+    });
+    await client.connect(first);
+    const stranded = client.sdListDir('data').then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(50);
+    first.emitDisconnect(new Error('dropped'));
+    expect(await stranded).toMatch(/link was reset/);
+
+    // One entry, 'f.bin' of 4 bytes: attribute, size, date, time, name
+    const name = Array.from(new TextEncoder().encode('f.bin'));
+    const entry = [0, 4, 0, 0, 0, 0, 0, 0, 0, name.length, ...name];
+    const listing = [SD.LIST_DIR_RESPONSE, SD_STATUS.OK, 0, 0, entry.length, 0, 1, 0, ...entry];
+    const second = new LoopbackTransport();
+    second.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      } else if (bytes[0] === SD.LIST_DIR_COMMAND) {
+        // late enough that the old write has failed by then
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...listing])), 30);
+      }
+    });
+    await client.connect(second);
+    const reply = client.sdListDir('data').catch((e: Error) => e.message);
+    await tick(10); // the new command holds the slot
+    release();
+    const got = await Promise.race([reply, tick(1000).then(() => 'no listing after 1 s')]);
+    expect(got).toMatchObject([{ name: 'f.bin', size: 4 }]);
   });
 
   it("a status read stranded on the old link does not hide the next link's status pushes", async () => {
