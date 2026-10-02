@@ -2955,6 +2955,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * readers here, which parse by opcode and declared length rather than by
    * total length, so it is safe to leave on — but it is off by default, and
    * firmware resets it on every power cycle.
+   *
+   * It can be turned down or off again on the same link. When the device
+   * refuses (a NACK) or does not answer, this throws and the client keeps the
+   * width the device last confirmed.
    */
   async setCrcMode(mode: CrcMode): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
@@ -2968,28 +2972,66 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     const label = mode === CRC_MODE.OFF ? 'off' : `${mode} byte${mode === 1 ? '' : 's'}`;
     this._emitStatus(`SET_CRC ${label} → waiting for ACK…`);
-    /* Written before the mode is recorded, deliberately - and this ACK is the
-     * one message that arrives framed differently from what the host expects.
-     * The firmware sets its mode while processing these arguments
-     * (`shimmer_bt_uart.c:944`) and composes the ACK afterwards from the NEW
-     * mode (`:2422`), so the ACK already carries a CRC that this client is not
-     * yet looking for. Its trailer therefore arrives as a couple of trailing
-     * bytes behind the ACK, which the control handlers ignore: no waiter
-     * matches them, and a byte-stream link resyncs past them.
+    /* The reply to this command is the one message whose framing the host
+     * cannot know in advance, so while it is in flight this client frames for
+     * the NARROWER of the two widths. The firmware sets its mode while
+     * processing these arguments (`shimmer_bt_uart.c:944`) and composes the ACK
+     * afterwards from the NEW mode (`:2422`). A NACK skips the switch, so it
+     * carries the OLD mode's CRC.
      *
-     * Recording the mode first instead would parse that ACK correctly but
-     * stall for the whole ACK timeout on firmware that does not implement the
-     * command at all, because its bare NACK would be missing the trailer this
-     * client had just started expecting. Two ignorable bytes on the supported
-     * path beats a timeout on the unsupported one.
+     * Narrower survives either answer. A reply wider than expected leaves a
+     * trailer byte or two behind it, which the control handlers ignore: no
+     * waiter matches them, and a byte-stream link resyncs past them. A reply
+     * narrower than expected is lost. The framer waits for trailer bytes that
+     * are not coming, the ACK is never delivered, and this client is left
+     * framing a width behind a device that has already switched, so every
+     * later command times out too, until a reconnect. Turning a CRC off used
+     * to do exactly that, on a Shimmer3R over classic SPP.
+     *
+     * Widening (off -> 1 or 2 bytes, 1 -> 2) records the mode only after the
+     * ACK, whose new trailer arrives as those ignorable bytes. One-byte mode
+     * appends the low byte of the same CRC-16, so 1 -> 2 still finds a trailer
+     * that verifies where it looks. Recording the mode first instead would
+     * parse that ACK correctly but stall for the whole ACK timeout on firmware
+     * that does not implement the command at all, because its bare NACK would
+     * be missing the trailer this client had just started expecting. Two
+     * ignorable bytes on the supported path beats a timeout on the unsupported
+     * one.
+     *
+     * Narrowing (1 or 2 bytes -> off, 2 -> 1) records the mode before the
+     * write, so the ACK is framed exactly as the device sends it. That
+     * unsupported firmware cannot be on this path: a CRC is only ever on
+     * because this command turned it on. A NACK in the old, wider framing is
+     * still recognised, and whatever is left of its CRC (`0xC5 0x56`) is not an
+     * opcode the framer knows, so it resyncs past it.
      *
      * "Ignorable" is load-bearing and was once wrong. A reader that takes RAW
      * inbound bytes sees them — the factory-test capture is fed ahead of this
      * client's CRC handling, on purpose, because a report is unframed ASCII
      * that must not reach the framer. That reader now accounts for the trailer
      * itself (`classifyLiteProtocolAck`); everything else on the control plane
-     * genuinely does ignore an unmatched byte. */
-    await this._writeExpectingAck(new Uint8Array([OPCODES.SET_CRC_COMMAND, mode]), 1500);
+     * genuinely does ignore an unmatched byte.
+     *
+     * HARDWARE-VERIFY: run on a Shimmer3R (LogAndStream v1.01.017) over classic
+     * SPP only, switching between all three widths with a command after each.
+     * Not yet over BLE, where turning the CRC off also turns the framer off for
+     * the ACK, and not a NACK, which the firmware sends only with SD sync
+     * enabled or truncated arguments. Both rest on firmware source and a
+     * scripted device. */
+    const previous = this._crcMode;
+    const link = this._linkGeneration;
+    if (crcTrailerBytes(mode) < crcTrailerBytes(previous)) this._crcMode = mode;
+    try {
+      await this._writeExpectingAck(new Uint8Array([OPCODES.SET_CRC_COMMAND, mode]), 1500);
+    } catch (e) {
+      /* Refused, or unanswered: keep framing for the width the device last
+       * confirmed. After a NACK that is certainly what it still sends; after a
+       * timeout it is the best guess there is, since the mode cannot be read
+       * back. Not if the link has been reset meanwhile, though: that already
+       * put the mode to off, and a reconnect may have set its own since. */
+      if (this._linkGeneration === link) this._crcMode = previous;
+      throw e;
+    }
     /* Both, and in this order: the wish is recorded only once the device has
      * agreed, so a mode it refused is not re-attempted on every reconnect. */
     this._crcMode = mode;
