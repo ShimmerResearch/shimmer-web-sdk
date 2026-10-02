@@ -293,6 +293,22 @@ describe('shimmer3ControlMessageLength (unframed-stream framing primitive)', () 
     expect(shimmer3ControlMessageLength(new Uint8Array([OPCODES.SAMPLING_RATE_RESPONSE]))).toBe(3);
   });
 
+  it('sizes the replies readCalibration and getRtcTime wait for', () => {
+    // Both calls timed out over RFCOMM while these were missing: the drain
+    // resynced through each reply a byte at a time.
+    for (const opcode of [
+      OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
+      OPCODES.GYRO_CALIBRATION_RESPONSE,
+      OPCODES.MAG_CALIBRATION_RESPONSE,
+      OPCODES.WR_ACCEL_CALIBRATION_RESPONSE,
+    ]) {
+      // [opcode][21-byte kinematic block]
+      expect(shimmer3ControlMessageLength(new Uint8Array([opcode]))).toBe(22);
+    }
+    // [0x90][64-bit ticks, LSB first]
+    expect(shimmer3ControlMessageLength(new Uint8Array([OPCODES.RWC_RESPONSE]))).toBe(9);
+  });
+
   it('INQUIRY_RESPONSE needs numChannels (index 7) before length is known', () => {
     // Only 7 bytes -> numChannels byte not present yet.
     expect(shimmer3ControlMessageLength(new Uint8Array(INQUIRY_MSG.slice(0, 7)))).toBe(NEED_MORE);

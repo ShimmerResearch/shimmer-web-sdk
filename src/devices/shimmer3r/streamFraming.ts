@@ -64,6 +64,19 @@ export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>
      resync a byte at a time. */
   [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22,
   [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24,
+  /* The six per-sensor calibration replies that `readCalibration` waits for:
+     the opcode, then the SC_DATA_LEN_STD_IMU_CALIB-byte kinematic block that
+     `ShimBt_replySingleSensorCalibCmd` copies in (`Comms/shimmer_bt_uart.c:
+     1752-1825`, sent from `:2277-2289`). They were missing, so a byte stream,
+     or BLE with a link CRC, resynced through every one of them and each group
+     timed out — on a Shimmer3R over classic SPP, all six did. Framed BLE with
+     no CRC never reaches this table, which is why that went unnoticed. */
+  [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x12
+  [OPCODES.GYRO_CALIBRATION_RESPONSE]: 21, // 0x15
+  [OPCODES.MAG_CALIBRATION_RESPONSE]: 21, // 0x18
+  [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
+  [OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE]: 21, // 0xAA
+  [OPCODES.ALT_MAG_CALIBRATION_RESPONSE]: 21, // 0xB0
 });
 
 /**

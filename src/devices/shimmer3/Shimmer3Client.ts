@@ -715,6 +715,10 @@ export class Shimmer3Client extends BaseShimmerClient {
    * anchors the stream timeline accordingly — `rwc-estimated`, carrying half
    * the round trip as its uncertainty.
    *
+   * HARDWARE-VERIFY: not run on a real Shimmer3. Until DEV-1135 this client's
+   * framer could not size RWC_RESPONSE, so the call has never completed against
+   * a device.
+   *
    * @throws Error when not connected, while streaming, or when the firmware
    *   does not serve the command.
    */
