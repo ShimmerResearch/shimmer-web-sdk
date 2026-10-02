@@ -461,6 +461,10 @@ describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream'
         if (r) setTimeout(() => tr.notify(new Uint8Array(r)), 5);
       } else if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK_B, ...FW]), mode)), 0);
+      } else if (cmd[0] === OPCODES.GET_DEVICE_VERSION_COMMAND) {
+        // Read by setCrcMode before it turns a CRC on, with the firmware version.
+        const version = new Uint8Array(versionReply(cmd[0])!);
+        setTimeout(() => tr.notify(appendCrc(version, mode)), 0);
       } else {
         setTimeout(() => tr.notify(new Uint8Array(ack(mode))), 0);
       }
