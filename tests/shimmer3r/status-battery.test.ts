@@ -3,6 +3,7 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { parseShimmer3StatusBytes } from '../../src/devices/shimmer3r/protocol.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { FW_SHIMMER3R, HW, versionReply, type FwTuple } from './configFirmware.js';
 
 // The idle-time device queries: hardware version, device status and battery.
 //
@@ -48,6 +49,20 @@ function dribble3(tr: LoopbackTransport, bytes: number[]): void {
     const slice = bytes.slice(i, i + 3);
     setTimeout(() => tr.notify(slice), 0);
   }
+}
+
+/**
+ * `reply`, on a device that also answers the two version reads, as hardware
+ * `hw` running `fw`. `getStatus` reads both first while the status width is
+ * unknown, because the width follows from them. The default, LogAndStream
+ * v1.00.040 on a Shimmer3R, sends two status bytes.
+ */
+function withVersions(reply: Reply, hw: number = HW.SHIMMER3R, fw: FwTuple = FW_SHIMMER3R): Reply {
+  return (bytes, tr) => {
+    const version = versionReply(bytes[0], hw, fw);
+    if (version) setTimeout(() => tr.notify(version), 0);
+    else reply(bytes, tr);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,37 +222,90 @@ describe('Shimmer3RClient.getStatus', () => {
     usbPluggedIn: true,
   };
 
+  /** A sensor answering GET_STATUS as `[ACK][0x8A][0x71][S0][USB in]`, one packet. */
+  const recording: Reply = (bytes, tr) => {
+    if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
+      setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0, 1]), 0);
+  };
+
+  /** The opcode of every command the client wrote. */
+  const written = (t: LoopbackTransport): number[] => t.writes.map((w) => w.bytes[0]);
+
   it('reads the status coalesced with its ACK in one notification', async () => {
-    const { t, client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
-        setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0, 1]), 0);
-    });
+    const { t, client } = await framed(withVersions(recording));
     expect(await client.getStatus()).toMatchObject(RECORDING);
-    expect(t.writes.map((w) => w.bytes[0])).toEqual([OPCODES.GET_STATUS_COMMAND]);
+    // The status width follows from both versions, so they are read first.
+    expect(written(t)).toEqual([
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_FW_VERSION_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+    ]);
+  });
+
+  it('reads the versions once per link, not on every status read', async () => {
+    const { t, client } = await framed(withVersions(recording));
+    await client.getStatus();
+    await client.getStatus();
+    expect(written(t)).toEqual([
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_FW_VERSION_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+    ]);
+  });
+
+  it('reads them once for two status reads in flight together', async () => {
+    const { t, client } = await framed(withVersions(recording));
+    const [a, b] = await Promise.all([client.getStatus(), client.getStatus()]);
+    expect(a).toMatchObject(RECORDING);
+    expect(b).toMatchObject(RECORDING);
+    expect(written(t).filter((op) => op === OPCODES.GET_DEVICE_VERSION_COMMAND)).toHaveLength(1);
+    expect(written(t).filter((op) => op === OPCODES.GET_FW_VERSION_COMMAND)).toHaveLength(1);
+  });
+
+  it('skips the firmware version on a Shimmer3, whose hardware settles the width', async () => {
+    const { t, client } = await framed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
+          setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0]), 0);
+      }, HW.SHIMMER3),
+    );
+    expect((await client.getStatus()).usbPluggedIn).toBeNull();
+    expect(written(t)).toEqual([OPCODES.GET_DEVICE_VERSION_COMMAND, OPCODES.GET_STATUS_COMMAND]);
+  });
+
+  it('reads no versions while streaming', async () => {
+    // Their replies would have to get past the stream parser. The status reply
+    // shares the ACK's notification, which is how a mid-stream read works.
+    const { t, client } = await framed(withVersions(recording));
+    (client as unknown as { _streaming: boolean })._streaming = true;
+    expect(await client.getStatus()).toMatchObject(RECORDING);
+    expect(written(t)).toEqual([OPCODES.GET_STATUS_COMMAND]);
   });
 
   it('reads the status when it arrives in its own notification', async () => {
-    const { client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
-        setTimeout(() => tr.notify([ACK]), 0);
-        setTimeout(() => tr.notify([INSTREAM, STATUS, S0, 1]), 1);
-      }
-    });
+    const { client } = await framed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
+          setTimeout(() => tr.notify([ACK]), 0);
+          setTimeout(() => tr.notify([INSTREAM, STATUS, S0, 1]), 1);
+        }
+      }),
+    );
     expect(await client.getStatus()).toMatchObject(RECORDING);
   });
 
   it('reads the status dribbled three bytes at a time over a byte stream', async () => {
-    const { client } = await unframed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) dribble3(tr, [ACK, INSTREAM, STATUS, S0, 1]);
-    });
+    const { client } = await unframed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND) dribble3(tr, [ACK, INSTREAM, STATUS, S0, 1]);
+      }),
+    );
     expect(await client.getStatus()).toMatchObject(RECORDING);
   });
 
   it('does not report its own answer as an unsolicited push', async () => {
-    const { client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
-        setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0, 1]), 0);
-    });
+    const { client } = await framed(withVersions(recording));
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     await client.getStatus();
@@ -245,30 +313,76 @@ describe('Shimmer3RClient.getStatus', () => {
   });
 
   it('does not report its own answer as a push when the reply arrives separately', async () => {
-    const { client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
-        setTimeout(() => tr.notify([ACK]), 0);
-        setTimeout(() => tr.notify([INSTREAM, STATUS, S0, 1]), 1);
-      }
-    });
+    const { client } = await framed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
+          setTimeout(() => tr.notify([ACK]), 0);
+          setTimeout(() => tr.notify([INSTREAM, STATUS, S0, 1]), 1);
+        }
+      }),
+    );
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     await client.getStatus();
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('accepts a Shimmer3 short answer rather than timing out on it', async () => {
-    // The client assumes two status bytes until told otherwise. A Shimmer3
-    // sends one, so a waiter demanding two would time out on a valid reply.
+  it('still reports a push that lands while the versions are being read', async () => {
+    // The versions are read before this status read is claimed, so a push in
+    // that window is news, not this read's answer.
+    const { client } = await framed((bytes, tr) => {
+      const version = versionReply(bytes[0]);
+      if (version) {
+        setTimeout(() => tr.notify(version), 0);
+        if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND)
+          setTimeout(() => tr.notify([INSTREAM, STATUS, 0x01, 0x00]), 0); // docked
+      } else recording(bytes, tr);
+    });
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    expect(await client.getStatus()).toMatchObject(RECORDING);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ docked: true, usbPluggedIn: false });
+  });
+
+  it('accepts a one-byte answer when the versions cannot be read', async () => {
+    // With the width unknown, one byte may be the whole status: a Shimmer3
+    // sends one, and so does a Shimmer3R before LogAndStream v1.00.024. A
+    // waiter demanding two would time out on a valid reply.
     const { client } = await framed((bytes, tr) => {
       if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
         setTimeout(() => tr.notify([ACK]), 0);
         setTimeout(() => tr.notify([INSTREAM, STATUS, S0]), 1);
-      }
+      } else setTimeout(() => tr.notify([OPCODES.NACK_COMMAND_PROCESSED]), 0);
     });
     const status = await client.getStatus();
     expect(status.sdLogging).toBe(true);
     expect(status.usbPluggedIn).toBeNull();
+  });
+
+  it('tries the versions again on the next status read after they failed', async () => {
+    // A failure is not remembered for the link. A transient one would
+    // otherwise leave every later status read guessing at the width.
+    let refusals = 0;
+    const { t, client } = await framed((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND && refusals++ === 0) {
+        setTimeout(() => tr.notify([OPCODES.NACK_COMMAND_PROCESSED]), 0);
+        return;
+      }
+      withVersions(recording)(bytes, tr);
+    });
+    expect(await client.getStatus()).toMatchObject(RECORDING); // read leniently
+    expect(await client.getStatus()).toMatchObject(RECORDING);
+    expect(written(t)).toEqual([
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_FW_VERSION_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+    ]);
+    // …and once learnt, the width holds: no third round of version reads.
+    await client.getStatus();
+    expect(written(t).slice(5)).toEqual([OPCODES.GET_STATUS_COMMAND]);
   });
 
   it('splits a Shimmer3 one-byte status correctly on a byte stream', async () => {
@@ -294,18 +408,18 @@ describe('Shimmer3RClient.getStatus', () => {
     expect(t.writes).toHaveLength(3);
   });
 
-  it('rejects a truncated answer from a KNOWN Shimmer3R rather than guessing', async () => {
-    // Once the platform has been read, two status bytes is a contract, not an
-    // assumption. A one-byte answer is a truncated message; returning it would
-    // report `usbPluggedIn: null` — "this hardware has no such field" — for a
-    // sensor that does have the field. Failing is the honest answer.
-    const { client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND)
-        setTimeout(() => tr.notify([ACK, DEVVER, 10]), 0);
-      else if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
-        setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0]), 0);
-    });
-    expect(await client.readDeviceVersion()).toEqual({ hardwareVersion: 10 });
+  it('rejects a truncated answer once the versions make two bytes a contract', async () => {
+    // A Shimmer3R on LogAndStream v1.00.024 or later sends two status bytes,
+    // so once both versions are read two is a contract, not an assumption. A
+    // one-byte answer is a truncated message; returning it would report
+    // `usbPluggedIn: null` — "this firmware has no such field" — for a sensor
+    // that does have the field. Failing is the honest answer.
+    const { client } = await framed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND)
+          setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, S0]), 0);
+      }),
+    );
     await expect(client.getStatus()).rejects.toThrow(/Instream response 0x71 timeout/);
   }, 3000);
 
@@ -315,9 +429,11 @@ describe('Shimmer3RClient.getStatus', () => {
   });
 
   it('times out with a message naming the response it wanted', async () => {
-    const { client } = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
-    });
+    const { client } = await framed(
+      withVersions((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      }),
+    );
     await expect(client.getStatus()).rejects.toThrow(/Instream response 0x71 timeout/);
   }, 3000);
 });
@@ -357,25 +473,28 @@ describe('Shimmer3RClient.onDeviceStatus', () => {
     expect(spy.mock.calls[0][0]).toMatchObject({ docked: true, streaming: true });
   });
 
-  /** Connect, then tell the client which platform it is talking to. */
+  /**
+   * Connect, then read both versions, so the client knows how wide this
+   * device's status is. The default firmware, Shimmer3R LogAndStream v1.00.040,
+   * sends two bytes.
+   */
   async function framedKnowing(
     hw: number,
+    fw: FwTuple = FW_SHIMMER3R,
   ): Promise<{ t: LoopbackTransport; client: Shimmer3RClient }> {
-    const ctx = await framed((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND)
-        setTimeout(() => tr.notify([ACK, DEVVER, hw]), 0);
-    });
+    const ctx = await framed(withVersions(() => {}, hw, fw));
     expect(await ctx.client.readDeviceVersion()).toEqual({ hardwareVersion: hw });
+    await ctx.client.readFwVersion();
     return ctx;
   }
 
   it('drops a truncated push instead of reporting usbPluggedIn as null', async () => {
-    // A Shimmer3R's push carries TWO status bytes. A three-byte one is a
-    // framing failure, and surfacing it would say `usbPluggedIn: null`, which
-    // means "this hardware has no such field" — not "the byte never arrived".
-    // A caller has no way to tell those apart, so the truncated push must not
-    // become a status at all.
-    const { t, client } = await framedKnowing(10);
+    // A push from a Shimmer3R on LogAndStream v1.00.024 or later carries TWO
+    // status bytes. A three-byte one is a framing failure, and surfacing it
+    // would say `usbPluggedIn: null`, which means "this firmware has no such
+    // field" — not "the byte never arrived". A caller has no way to tell those
+    // apart, so the truncated push must not become a status at all.
+    const { t, client } = await framedKnowing(HW.SHIMMER3R);
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     t.notify([INSTREAM, STATUS, 0x21]);
@@ -388,7 +507,7 @@ describe('Shimmer3RClient.onDeviceStatus', () => {
   });
 
   it('drops a truncated ACK-prefixed push too', async () => {
-    const { t, client } = await framedKnowing(10);
+    const { t, client } = await framedKnowing(HW.SHIMMER3R);
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     t.notify([ACK, INSTREAM, STATUS, 0x21]);
@@ -396,7 +515,7 @@ describe('Shimmer3RClient.onDeviceStatus', () => {
   });
 
   it('still reports a Shimmer3 one-byte push, which is complete, not truncated', async () => {
-    const { t, client } = await framedKnowing(3);
+    const { t, client } = await framedKnowing(HW.SHIMMER3);
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     t.notify([INSTREAM, STATUS, 0x21]);
@@ -404,11 +523,34 @@ describe('Shimmer3RClient.onDeviceStatus', () => {
     expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: null });
   });
 
-  it('reports a one-byte push while the platform is still unknown', async () => {
-    // Two bytes is only this client's opening guess until readDeviceVersion
-    // answers, so it must not be enforced as a contract yet: an app that never
-    // probes would otherwise lose every push a Shimmer3 sends.
+  it('still reports the one-byte push a Shimmer3R before v1.00.024 sends', async () => {
+    // These releases have no second status byte. Judged by the hardware alone,
+    // every push they sent was dropped as truncated.
+    const { t, client } = await framedKnowing(HW.SHIMMER3R, [3, 1, 0, 23]);
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([INSTREAM, STATUS, 0x21]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: null });
+  });
+
+  it('reports a one-byte push while the width is still unknown', async () => {
+    // Until both versions are read the width is not known, so it must not be
+    // enforced as a contract yet: an app that never probes would otherwise lose
+    // every push a Shimmer3, or an early Shimmer3R, sends.
     const { t, client } = await framed(() => {});
+    const spy = vi.fn();
+    client.onDeviceStatus = spy;
+    t.notify([INSTREAM, STATUS, 0x21]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ sdPresent: true, usbPluggedIn: null });
+  });
+
+  it('reports a one-byte push when only the hardware version is known', async () => {
+    // A Shimmer3R's hardware version does not settle the width, because
+    // LogAndStream sent one byte there until v1.00.024.
+    const { t, client } = await framed(withVersions(() => {}));
+    expect(await client.readDeviceVersion()).toEqual({ hardwareVersion: HW.SHIMMER3R });
     const spy = vi.fn();
     client.onDeviceStatus = spy;
     t.notify([INSTREAM, STATUS, 0x21]);

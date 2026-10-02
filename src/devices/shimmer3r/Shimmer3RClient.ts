@@ -54,6 +54,7 @@ import {
   sign24,
   hex2,
   parseShimmer3StatusBytes,
+  statusPayloadBytesFor,
   type Shimmer3DeviceStatus,
 } from './protocol.js';
 import {
@@ -510,13 +511,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Re-framing accumulator, used only when {@link _unframed}. */
   private _ctrlBuf: Uint8Array = new Uint8Array(0);
   /**
-   * How many bytes a STATUS_RESPONSE payload carries: 2 on a Shimmer3R, 1 on a
-   * Shimmer3 (`STATUS_BYTE_COUNT`, log-and-stream-common
-   * `Comms/shimmer_bt_uart.h:259-263`). Assumed 2 until
-   * {@link readDeviceVersion} says otherwise, and handed to the framer so a
-   * byte stream splits the message in the right place.
+   * How many bytes a STATUS_RESPONSE payload carries: 2 on a Shimmer3R running
+   * LogAndStream v1.00.024 or later, 1 on anything else
+   * ({@link statusPayloadBytesFor}). `null` until the versions that decide it
+   * have been read: the hardware version, and on a Shimmer3R the firmware
+   * version too. {@link _settleStatusWidth} sets it as each read lands.
+   *
+   * Handed to the framer, through {@link _frameLength} only, so a byte stream
+   * splits the message in the right place. While it is `null` the framer sizes
+   * a status from the byte after it instead of assuming a width.
    */
-  private _statusPayloadBytes: 1 | 2 = 2;
+  private _statusPayloadBytes: 1 | 2 | null = null;
+  /**
+   * The version reads {@link getStatus} has in flight to learn
+   * {@link _statusPayloadBytes}, shared so that status reads made together
+   * read the versions once. Cleared when they settle, so the next status read
+   * tries again after a failure, and with the version caches at connect.
+   */
+  private _statusWidthReads: Promise<void> | null = null;
   /**
    * Non-zero while a {@link getStatus} round trip is outstanding, so its answer
    * is not also reported as an unsolicited push. Counted rather than flagged:
@@ -538,19 +550,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * How many status payload bytes a STATUS_RESPONSE must carry before it is
    * worth parsing.
    *
-   * Once {@link readDeviceVersion} has answered, {@link _statusPayloadBytes} is
-   * a contract — the firmware sends exactly that many — so a shorter message is
-   * a truncated one, not a shorter platform. Parsing it anyway would report
-   * `usbPluggedIn: null`, which means "this hardware has no such field" and NOT
+   * Once the versions have settled {@link _statusPayloadBytes}, it is a
+   * contract — the firmware sends exactly that many — so a shorter message is
+   * a truncated one, not a shorter status. Parsing it anyway would report
+   * `usbPluggedIn: null`, which means "this firmware has no such field" and NOT
    * "the byte did not arrive"; the caller cannot tell those apart, so the
    * shorter message must not be surfaced as a status at all.
    *
-   * Before the platform is known the 2 is only a guess biased towards this
-   * client's namesake, so demanding it would reject — or time out on — the
-   * perfectly valid one-byte status a Shimmer3 sends.
+   * Until then one byte is enough. The hardware version alone does not settle
+   * it: a Shimmer3R on LogAndStream v1.00.023 or earlier sends one byte too, so
+   * demanding two from every Shimmer3R timed out on those releases' replies
+   * and dropped their pushes.
    */
   private get _minStatusPayloadBytes(): 1 | 2 {
-    return this._deviceVersionCache ? this._statusPayloadBytes : 1;
+    return this._statusPayloadBytes ?? 1;
   }
 
   // Cached device configuration
@@ -665,10 +678,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * The answer to a {@link getStatus} call is NOT delivered here — that would
    * report every state twice.
    *
-   * A push whose payload is short of the connected platform's status length is
-   * dropped (with a debug log) rather than parsed, so `usbPluggedIn: null` here
-   * always means "a Shimmer3, which has no such field" and never "the byte went
-   * missing". See {@link readDeviceVersion} for how that length is learnt.
+   * Once the status length is known, a push whose payload is short of it is
+   * dropped (with a debug log) rather than parsed. So `usbPluggedIn: null` here
+   * means "a Shimmer3, or a Shimmer3R on LogAndStream before v1.00.024, neither
+   * of which sends the field", never "the byte went missing". The length
+   * follows from the hardware and firmware versions, read by
+   * {@link readDeviceVersion} and {@link readFwVersion}, or by
+   * {@link getStatus}, which reads them itself. Until both are known a
+   * one-byte push is reported as it is, because it may be complete.
    *
    * **Only fires while idle.** Once streaming, every inbound byte belongs to the
    * data plane and goes to the schema parser, which has no way to tell a status
@@ -787,7 +804,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.schema = null;
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
-    this._statusPayloadBytes = 2;
+    this._statusPayloadBytes = null;
+    this._statusWidthReads = null;
     /* `device` describes the far end exactly as the version caches do, so it
      * belongs in this reset. It is only ever ASSIGNED for a Web Bluetooth
      * transport (below) and only ever cleared in disconnect(), which a caller
@@ -1199,11 +1217,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     /* Otherwise the remainder has to start like something this framer knows -
        an in-stream status push, say. Arbitrary sample bytes do not, and RESYNC
        is exactly the framer saying so. */
-    return (
-      shimmer3rControlMessageLength(chunk.subarray(1), {
-        statusPayloadBytes: this._statusPayloadBytes,
-      }) !== RESYNC
-    );
+    return this._frameLength(chunk.subarray(1)) !== RESYNC;
   }
 
   /**
@@ -1225,9 +1239,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // Somebody's answer, not news: `getStatus` reports it to its own caller.
     if (this._statusReadsInFlight > 0) return;
     // The payload must be ALL there, not merely started. A guard of three
-    // bytes let a push with one status byte through on a two-byte platform, and
-    // the parser then reported `usbPluggedIn: null` — indistinguishable, to the
-    // caller, from a Shimmer3 that has no such field.
+    // bytes let a push with one status byte through from a two-byte firmware,
+    // and the parser then reported `usbPluggedIn: null` — indistinguishable, to
+    // the caller, from a firmware that has no such field.
     const need = this._minStatusPayloadBytes;
     if (msg.length < 2 + need) {
       // Dropped rather than surfaced: nobody asked for this message, so there
@@ -1239,7 +1253,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return;
     }
     try {
-      this.onDeviceStatus(parseShimmer3StatusBytes(msg.subarray(2, 2 + this._statusPayloadBytes)));
+      this.onDeviceStatus(
+        parseShimmer3StatusBytes(msg.subarray(2, 2 + (this._statusPayloadBytes ?? 2))),
+      );
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
     }
@@ -1302,31 +1318,35 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Merge a bare ACK with the message that follows it, emulating BLE: the module
-   * packs an ACK and the response the firmware wrote straight after it into ONE
-   * notification, and the waiters rely on that — `_waitForAck` hands the
-   * remainder over synchronously via `_lastAckRemainder`. Emitted as two
-   * separate messages, the response would arrive before the caller's `await`
-   * continuation had registered its response handler, and be dropped.
+   * The framer, told how wide this device's status response is.
    *
-   * Two ACKs are never merged: the second would masquerade as the first's
-   * response body.
+   * Only STATUS_RESPONSE's length depends on that — one byte on a Shimmer3 and
+   * on Shimmer3R firmware before v1.00.024, two after — and only this client
+   * knows which is answering. Every caller of the framer goes through here
+   * rather than passing the option itself: the drain, the coalescing check,
+   * the message behind an ACK under a CRC, and the stream plane's ACK check.
+   * Supplying the option in one place and forgetting it in another is not a
+   * hypothetical: it made a complete Shimmer3 status look perpetually one byte
+   * short, so the ACK and its response were never coalesced and the waiter
+   * timed out.
+   *
+   * While the width is unknown the framer is told so, and sizes a status from
+   * the byte after it rather than from a guess. A guess of two ate the ACK after
+   * every one-byte status; a guess of one left a two-byte status's second byte
+   * to be framed as a message, and 0x00 there would end framing for the read.
    */
+  private _frameLength(buf: Uint8Array): number {
+    return shimmer3rControlMessageLength(buf, {
+      statusPayloadBytes: this._statusPayloadBytes ?? 'unknown',
+    });
+  }
+
   /**
-   * The framer, told how wide this platform's status response is.
-   *
-   * Only STATUS_RESPONSE's length depends on that — one byte on a Shimmer3, two
-   * on a Shimmer3R — and only this client knows which is answering. Both the
-   * drain and the coalescing check go through here rather than calling the
-   * framer directly, because supplying the option in one place and forgetting
-   * it in the other is not a hypothetical: it made a complete Shimmer3 status
-   * look perpetually one byte short, so the ACK and its response were never
-   * coalesced and the waiter timed out.
+   * The length of the packet at the head of `buf`: {@link _frameLength}'s
+   * message, plus the link CRC where the firmware appends one.
    */
   private _controlMessageLength = (buf: Uint8Array): number => {
-    const base = shimmer3rControlMessageLength(buf, {
-      statusPayloadBytes: this._statusPayloadBytes,
-    });
+    const base = this._frameLength(buf);
     /* A CRC rides after the PACKET the firmware transmits, not after each
      * message in it - and a packet can hold two. `ShimBt_processCmd` stages the
      * ACK byte into the front of the same `resPacket` as the response
@@ -1386,9 +1406,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * that message and return the WHOLE packet, so it is verified and stripped
      * as one and the ACK branch above sees the response as its remainder -
      * exactly as it does on a link with no CRC. */
-    const after = shimmer3rControlMessageLength(buf.subarray(1), {
-      statusPayloadBytes: this._statusPayloadBytes,
-    });
+    const after = this._frameLength(buf.subarray(1));
     if (after === NEED_MORE) return NEED_MORE;
     if (after === RESYNC) {
       // Not a message this framer knows. Waiting for a lone-ACK CRC that has
@@ -1400,6 +1418,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return buf.length < total ? NEED_MORE : total;
   };
 
+  /**
+   * Merge a bare ACK with the message that follows it, emulating BLE: the module
+   * packs an ACK and the response the firmware wrote straight after it into ONE
+   * notification, and the waiters rely on that — `_waitForAck` hands the
+   * remainder over synchronously via `_lastAckRemainder`. Emitted as two
+   * separate messages, the response would arrive before the caller's `await`
+   * continuation had registered its response handler, and be dropped.
+   *
+   * Two ACKs are never merged: the second would masquerade as the first's
+   * response body. The message is measured by {@link _controlMessageLength},
+   * the drain's own function, so the two agree on where a status ends.
+   */
   private _coalesceAckWithResponse = (msg: Uint8Array, rest: Uint8Array): number => {
     if (msg.length !== 1 || msg[0] !== OPCODES.ACK_COMMAND_PROCESSED) return 0;
     if (this._expectingAck <= 0) return 0;
@@ -3192,16 +3222,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
      * §8.2, constraint 3). It matters twice over here. A CRC turns on the
      * length-aware framer, whose STATUS_RESPONSE span is 1 byte on a Shimmer3
-     * against 2 on a Shimmer3R. And Shimmer3 and Shimmer3R version numbers
-     * overlap, so the firmware version below means nothing without it. Both
-     * caches are cleared on connect, so each costs a round trip once per link. */
+     * and on Shimmer3R firmware before v1.00.024, against 2 after: the two
+     * reads here settle it (`_settleStatusWidth`). And Shimmer3 and Shimmer3R
+     * version numbers overlap, so the firmware version below means nothing
+     * without it. Both caches are cleared on connect, so each costs a round trip
+     * once per link. */
     let hardwareVersion: number = HW_ID.SHIMMER_3R;
     try {
       hardwareVersion = (await this.readDeviceVersion()).hardwareVersion;
     } catch {
-      /* Old firmware may not answer. The framer keeps its Shimmer3R default,
-       * which is this client's documented assumption anyway (`generation`), so
-       * the firmware version is judged as a Shimmer3R's too. */
+      /* Old firmware may not answer. The firmware version is then judged as a
+       * Shimmer3R's, this client's documented assumption (`generation`). The
+       * status width stays unknown, so the framer sizes each status from the
+       * byte after it (`shimmer3rControlMessageLength`), which under a CRC can
+       * be the CRC's. */
     }
     const min = SHIMMER3R_LINK_CRC_MIN_FIRMWARE;
     const minTag = firmwareTag(min.major, min.minor, min.internal);
@@ -4317,11 +4351,69 @@ export class Shimmer3RClient extends BaseShimmerClient {
         : await this._waitForResponse(OPCODES.DEVICE_VERSION_RESPONSE, 1500, link);
     if (rsp.length < 2) throw new Error('short DEVICE_VERSION_RESPONSE');
     this._deviceVersionCache = parseShimmer3DeviceVersionResponse(rsp);
-    // A Shimmer3's firmware omits the usbPluggedIn status byte, so the framer
-    // has to stop waiting for a byte that is never coming — and, worse, stop
-    // swallowing the ACK that follows the status instead.
-    this._statusPayloadBytes = this._deviceVersionCache.hardwareVersion === HW_ID.SHIMMER_3 ? 1 : 2;
+    this._settleStatusWidth();
     return this._deviceVersionCache;
+  }
+
+  /**
+   * Set {@link _statusPayloadBytes} from whichever versions have been read, as
+   * each read lands. A Shimmer3's hardware version settles it alone. A
+   * Shimmer3R's needs the firmware version as well, because LogAndStream sent
+   * one status byte there until v1.00.024 ({@link statusPayloadBytesFor}).
+   *
+   * Getting it wrong in either direction costs more than the status: a framer
+   * waiting for a second byte that is never coming swallows the ACK that
+   * follows the status instead, and one that expects a single byte leaves the
+   * second to be framed as a message of its own.
+   */
+  private _settleStatusWidth(): void {
+    this._statusPayloadBytes = statusPayloadBytesFor(
+      this._deviceVersionCache?.hardwareVersion,
+      this._fwVersionCache,
+    );
+  }
+
+  /**
+   * Read what the status width still depends on, when it is not known yet: the
+   * hardware version, and on a Shimmer3R the firmware version too. Both are
+   * cached once read, so this costs a round trip each once per link, and
+   * nothing once the width is known.
+   *
+   * Not while streaming. Both replies would have to get past the stream parser,
+   * and a status read there does without the width: over BLE its reply shares
+   * a notification with the ACK, and a byte stream hands every byte to the
+   * stream parser anyway.
+   *
+   * A read that fails leaves the width unknown, and the status is then read
+   * leniently, as before the width depended on the firmware. The next status
+   * read tries again ({@link _statusWidthReads}): a timeout, or a refusal
+   * while a factory test holds the link, remembered for the rest of the link
+   * would leave every later status read on a byte stream guessing at the
+   * width. Real firmware answers both reads. A link reset is the exception:
+   * the read that failed with it was the old link's, so the caller is failed
+   * too.
+   */
+  private async _learnStatusWidth(): Promise<void> {
+    if (this._statusPayloadBytes !== null || this._streaming) return;
+    if (!this._statusWidthReads) {
+      const reads = this._readStatusWidth().finally(() => {
+        if (this._statusWidthReads === reads) this._statusWidthReads = null;
+      });
+      this._statusWidthReads = reads;
+    }
+    await this._statusWidthReads;
+  }
+
+  /** The reads behind {@link _learnStatusWidth}. */
+  private async _readStatusWidth(): Promise<void> {
+    const link = this._linkGeneration;
+    try {
+      await this.readDeviceVersion();
+      if (this._statusPayloadBytes === null) await this.readFwVersion();
+    } catch (e) {
+      if (this._linkGeneration !== link) throw e;
+      this._log('Status width not learnt; reading the status leniently:', (e as Error).message);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -4337,23 +4429,33 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * running, whether the clock has been set since the sensor last lost power,
    * or whether the firmware failed to open its SD file.
    *
-   * Call {@link readDeviceVersion} first when the platform is unknown: a
-   * Shimmer3 answers with one status byte where a Shimmer3R sends two, and over
-   * a byte stream the framer needs to know which before it can split the
-   * message. Getting it wrong there consumes the ACK that follows.
+   * How many status bytes come back depends on the device and its firmware:
+   * one from a Shimmer3, and from a Shimmer3R before LogAndStream v1.00.024;
+   * two from a Shimmer3R from v1.00.024 ({@link statusPayloadBytesFor}). Over a
+   * byte stream, or with a link CRC on, the framer has to know which before it
+   * can split the reply, and getting it wrong consumes the ACK that follows or
+   * leaves a byte behind. So when the width is not known yet, this reads the
+   * hardware version first, and on a Shimmer3R the firmware version too. Both
+   * are cached per link once read, as {@link readDeviceVersion} and
+   * {@link readFwVersion} cache them, so that costs a round trip each once per
+   * link.
    *
-   * Calling it first also sharpens the failure mode here: with the platform
-   * known, an answer shorter than that platform's status is a truncated message
+   * With the width known, an answer shorter than it is a truncated message,
    * and this rejects on timeout rather than returning a status whose
-   * `usbPluggedIn` is `null`. While the platform is unknown the short answer is
-   * still accepted, because it is indistinguishable from a Shimmer3's.
+   * `usbPluggedIn` is `null`. While it is unknown a one-byte answer is still
+   * accepted, because it may be complete. That happens when the version reads
+   * fail, or while streaming, when they are not attempted.
    */
   async getStatus(): Promise<Shimmer3DeviceStatus> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
+    /* Before the read is claimed below, so a push that lands during the version
+     * reads is still reported as one. */
+    await this._learnStatusWidth();
+    if (this._linkGeneration !== link) throw this._linkResetError('the status');
     // Claimed before the write, not after the ACK: the reply can arrive while
     // this method is still between awaits, and it must not be mistaken for an
     // unsolicited push in that window.
-    const link = this._linkGeneration;
     this._statusReadsInFlight++;
     try {
       this._emitStatus('GET_STATUS → waiting for ACK then RSP…');
@@ -4363,7 +4465,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
       // Read once, so the ACK-remainder shortcut and the waiter that backs it
       // up agree on what counts as a whole message even if another caller
-      // learns the platform mid-await.
+      // learns the width mid-await.
       const need = this._minStatusPayloadBytes;
       const rsp =
         ackRemainder &&
@@ -4372,7 +4474,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         ackRemainder[1] === OPCODES.STATUS_RESPONSE
           ? ackRemainder
           : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, need, 1500, link);
-      const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + this._statusPayloadBytes));
+      const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + (this._statusPayloadBytes ?? 2)));
       this._emitStatus(
         `Status: docked=${status.docked} sensing=${status.sensing} ` +
           `logging=${status.sdLogging} streaming=${status.streaming} ` +
@@ -4437,6 +4539,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       minor: rsp[5],
       patch: rsp[6],
     };
+    this._settleStatusWidth();
     return this._fwVersionCache;
   }
 

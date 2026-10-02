@@ -21,6 +21,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Shimmer3R firmware before LogAndStream v1.00.024 no longer loses its status replies and pushes** (DEV-307). `Shimmer3RClient` sized every Shimmer3R STATUS_RESPONSE at two status bytes. The second byte, `usbPluggedIn`, arrived only with LogAndStream v1.00.024 (log-and-stream-common 8377afc, June 2025), and v0.00.002 to v1.00.023 send one.
+  - **Byte stream, or BLE with a link CRC on:** the client took the byte after every status from those releases as its second byte. That byte was usually the next command's ACK, so that command timed out.
+  - **BLE without a CRC:** once the hardware version had been read, `getStatus()` waited for a byte that never came and timed out, and pushes were dropped as truncated. `setCrcMode(1)` and `setCrcMode(2)` read the hardware version, so turning a CRC on was enough to set this off, and so was a refused attempt.
+
+  The width now comes from the hardware and the firmware together: two bytes only from a Shimmer3R running LogAndStream v1.00.024 or later, and one from anything else. The Java driver (`isSupportedUSBPluggedInStatus`) and the C# API (`IsTwoByteStatusResponseSupported`) already apply this rule. `getStatus()` now reads both versions first when the width is not known yet:
+  - The versions are cached per link once read, as `readDeviceVersion()` and `readFwVersion()` cache them, so they cost a round trip each once per link. Status reads made together share the reads, and the next status read tries again after a failure.
+  - They are not read while streaming.
+  - This also fixes a Shimmer3 read over a byte stream with no `readDeviceVersion()` first, which was framed at two bytes too.
+
+  Until the width is known, one status byte counts as a whole status. Over a byte stream the framer sizes a status by the byte after its first: `0x00` or `0x01` is the `usbPluggedIn` byte, and anything else starts the next message. A one-byte push therefore waits for that next byte instead of taking it. `statusPayloadBytesFor()` and `SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE` are exported, and `shimmer3rControlMessageLength` accepts `statusPayloadBytes: 'unknown'`.
+
+  `STATUS_BYTE_COUNT`, which appeared in v1.00.050 with DEV-621, is not the boundary: it replaced a count that v1.00.024 already returned. No Shimmer3R older than v1.00.024 has been run against this SDK, so the one-byte path carries a `HARDWARE-VERIFY:` marker.
+
 - **A link CRC no longer costs the reply after every stop on early Shimmer3R firmware** (DEV-976). Shimmer3R LogAndStream v0.00.002 to v1.00.010 (November and December 2024) turn the CRC off by themselves whenever sensing stops, without telling the host. The stop's own ACK still carries the trailer, because the firmware sends it before the stop runs, but every reply after it is bare. `stopStreaming()` and `stopStreamingAndLogging()` left the client expecting the trailer, so the next command's reply was framed wrongly and timed out, over BLE and over a byte stream alike. v1.00.011 removed the clear.
 
   `setCrcMode(1)` and `setCrcMode(2)` now refuse those releases, send nothing, and name v1.00.011 as the fix. Refusing, rather than dropping the expectation after a stop, also covers the stops the device makes on its own: the user button and docking end SD logging and clear the CRC the same way, and nothing tells the host the CRC went. To check, turning a CRC on first reads the device and firmware versions, each cached for the link, and it is refused as well when the firmware version cannot be read. Turning the CRC off is never refused. A reconnect that re-establishes a CRC asked for earlier reports a refusal through `onStatus`, carries on without the CRC, and keeps the request for the next device.
