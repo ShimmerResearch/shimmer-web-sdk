@@ -382,10 +382,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * it back, so this tracks what {@link setCrcMode} last set.
    *
    * Reset to off wherever a link begins or ends, by
-   * {@link _resetLinkProtocolState}. The firmware's mode is per POWER CYCLE
-   * rather than per connection, so a reconnect cannot actually know — off is
-   * assumed because it is the direction that fails safe. The host's standing
-   * request lives in {@link _desiredCrcMode} and is re-established on connect.
+   * {@link _resetLinkProtocolState}, as the firmware resets its own on every
+   * disconnect (`Comms/shimmer_bt_uart.c:2624`). Off is still assumed rather
+   * than known: old Shimmer3 firmware, or a link the firmware never saw drop,
+   * can start a link with the device's CRC on (see `CRC_MODE.OFF`), and off is
+   * the direction that fails safe. The host's standing request lives in
+   * {@link _desiredCrcMode} and is re-established on connect.
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
 
@@ -433,8 +435,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * Kept across a disconnect precisely because the device does not keep it: a
    * host that asked for a CRC once means it for the next link too, and the
-   * firmware clears its own mode on every power cycle. {@link _crcMode} tracks
-   * what the device is actually doing; this tracks what was asked for.
+   * firmware clears its own mode on every disconnect
+   * (`Comms/shimmer_bt_uart.c:2624`). {@link _crcMode} tracks what the device is
+   * actually doing; this tracks what was asked for.
    */
   private _desiredCrcMode: CrcMode = CRC_MODE.OFF;
   /** True while the active transport is a byte stream with no message framing. */
@@ -772,8 +775,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Re-apply a CRC the caller asked for on an earlier link.
    *
    * Done here so a reconnect does not silently come back unchecked — the
-   * firmware clears its mode on every power cycle, and a host that asked once
-   * means it for the next link too.
+   * firmware clears its mode on every disconnect, and a host that asked once
+   * means it for the next link too. It also brings back into step a device
+   * whose CRC was still on (see `CRC_MODE.OFF`): whatever width that device was
+   * left at, the confirmed SET_CRC_COMMAND puts both ends on the same one.
    *
    * A failure is reported and left off, never thrown: the link itself is fine
    * without a CRC, and turning a working connection into a failed one over a
@@ -844,7 +849,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * dropped under us left it set; `connect` did not clear it either, despite
    * {@link _crcMode}'s docblock saying it did. The reconnect's very first
    * exchange is `readDeviceVersion` inside {@link _reestablishCrcMode}, framed
-   * expecting a trailer the freshly power-cycled device is not appending.
+   * expecting a trailer the device is no longer appending, because the firmware
+   * cleared its mode when the link dropped.
    *
    * `_desiredCrcMode` deliberately does NOT reset: that is the host's standing
    * request, and re-establishing it is the whole point of surviving a
@@ -857,10 +863,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._streamAligned = false;
     this._streamAlignRejects = 0;
     this._lastTs = 0;
-    /* Off is the only assumption that fails safe. The firmware's CRC mode is
-     * per power cycle rather than per connection, so a reconnect genuinely
-     * cannot know — but a width the device is not appending misplaces every
-     * frame boundary, while expecting none when there is one costs a resync. */
+    /* Off matches what the firmware does on every disconnect
+     * (`Comms/shimmer_bt_uart.c:2624`). Where a link starts with the CRC still
+     * on (old Shimmer3 firmware, or a link the firmware never saw drop; see
+     * `CRC_MODE.OFF`), off is also the assumption that fails safe: a width the
+     * device is not appending misplaces every frame boundary, while expecting
+     * none when there is one costs a resync. */
     this._crcMode = CRC_MODE.OFF;
     this._crcFailures = 0;
     this._sdKnownSession = null;
@@ -2954,7 +2962,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * responses carry the CRC too. Trailing bytes are ignored by the response
    * readers here, which parse by opcode and declared length rather than by
    * total length, so it is safe to leave on — but it is off by default, and
-   * firmware resets it on every power cycle.
+   * the firmware turns it off again on every disconnect
+   * (`Comms/shimmer_bt_uart.c:2624`). A CRC this call turned on is asked for
+   * again on each later {@link connect}.
    *
    * It can be turned down or off again on the same link. When the device
    * refuses (a NACK) or does not answer, this throws and the client keeps the

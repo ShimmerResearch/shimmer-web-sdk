@@ -40,12 +40,31 @@ export const CRC_MODE = Object.freeze({
   /**
    * No CRC on anything the device sends.
    *
-   * The firmware's own state after every POWER CYCLE — not after every
-   * connection, which it survives. A host cannot read the mode back, so it
-   * cannot tell a reconnect to a power-cycled device from a reconnect to one
-   * that kept its setting; this SDK therefore assumes off on connect, because
-   * expecting a trailer that is not there misplaces every frame boundary while
-   * expecting none when there is one costs only a resync.
+   * The firmware's default. It sets this at startup
+   * (`ShimBt_btCommsProtocolInit`, `Comms/shimmer_bt_uart.c:114`) and again on
+   * every disconnect (`ShimBt_handleBtRfCommStateChange`, `:2624`), on both
+   * platforms. Every Shimmer3R release does this, and every Shimmer3 release
+   * from LogAndStream v0.15.000, so there a CRC never outlives the connection
+   * it was set on, and a host that wants one asks again on the next.
+   *
+   * Two cases can still start a link with a CRC on, and a host cannot tell them
+   * from the usual one because the mode cannot be read back:
+   *
+   *  - **Shimmer3 LogAndStream v0.11.0 and older** (v0.15.000 was the next
+   *    release). `SET_CRC_COMMAND` sets `crcChecksum` there, and only `Init()`
+   *    clears it (shimmer3-firmware `LogAndStream_v0.11.0`,
+   *    `LogAndStream/main.c:581`), so it lasts until the device next boots.
+   *  - **A link the firmware never saw drop.** Web Bluetooth's `disconnect()`
+   *    keeps the physical link up while anything else on the host is using the
+   *    device (the spec's "garbage-collect the connection"), and the next
+   *    `connect()` reuses it, so the firmware's disconnect branch never ran. An
+   *    injected transport can do the same. `SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
+   *    also leaves open whether the reset happens across a BLE reconnection the
+   *    radio module handles without telling the firmware ("Still unverified").
+   *
+   * This SDK therefore assumes off on connect, because that is the side that
+   * fails safe: expecting a trailer that is not there misplaces every frame
+   * boundary, while expecting none when there is one costs only a resync.
    */
   OFF: 0,
   /** Low byte of the CRC-16 appended to everything the device sends. */

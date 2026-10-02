@@ -412,7 +412,8 @@ describe('a link that drops under us gives up the CRC mode', () => {
      not clear it either despite the docblock claiming so. A consumer that
      reconnects the same client instance after onDisconnect - the common
      pattern - then framed its very first exchange expecting a trailer the
-     power-cycled device was no longer appending. */
+     device was no longer appending, since the firmware clears its mode on every
+     disconnect. */
 
   /**
    * A transport that ACKs SET_CRC (applying the mode before the ACK, as the
