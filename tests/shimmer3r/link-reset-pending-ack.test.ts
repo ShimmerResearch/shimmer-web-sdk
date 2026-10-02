@@ -18,6 +18,15 @@ import {
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
 const FW = [OPCODES.FW_VERSION_RESPONSE, 3, 0, 1, 0, 1, 17];
+/** Shimmer3R hardware; with `FW`, LogAndStream v1.01.017, two status bytes. */
+const DEVVER = [OPCODES.DEVICE_VERSION_RESPONSE, 10];
+/** The reply to a version read, which a status read makes first to learn its width. */
+const versionOf = (op: number): number[] =>
+  op === OPCODES.GET_DEVICE_VERSION_COMMAND
+    ? DEVVER
+    : op === OPCODES.GET_FW_VERSION_COMMAND
+      ? FW
+      : [];
 const pkt = (c: number): number[] => [TP, c & 0xff, (c >> 8) & 0xff, 0, 0];
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const expectingAck = (c: Shimmer3RClient): number =>
@@ -128,9 +137,7 @@ describe('a command pending when the link drops', () => {
           ? STATUS
           : cmd[0] === OPCODES.GET_INFOMEM_COMMAND
             ? infomem(cmd[1])
-            : cmd[0] === OPCODES.GET_FW_VERSION_COMMAND
-              ? FW
-              : [];
+            : versionOf(cmd[0]);
       setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
       if (reply.length) setTimeout(() => tr.notify(new Uint8Array(reply)), 0);
     });
@@ -140,8 +147,9 @@ describe('a command pending when the link drops', () => {
   it("a status read waiting for its instream reply does not take the next link's", async () => {
     const first = new LoopbackTransport();
     first.setOnWrite((bytes, tr) => {
-      // ACK only: the instream reply never comes on this link
-      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
+      // The version reads answered, so the status read itself goes out. Then
+      // ACK only: its instream reply never comes on this link.
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(bytes[0])])), 0);
     });
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(first);
@@ -276,7 +284,9 @@ describe('a command pending when the link drops', () => {
   it("a status read stranded on the old link does not hide the next link's status pushes", async () => {
     const first = new LoopbackTransport();
     first.setOnWrite((bytes, tr) => {
-      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no reply
+      // The version reads answered, so the status read is claimed and goes
+      // out; it gets an ACK and no reply.
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(bytes[0])])), 0);
     });
     const client = new Shimmer3RClient({ debug: false });
     const pushes: unknown[] = [];
@@ -462,7 +472,11 @@ describe('a reply settled in the same turn as the drop', () => {
   it("does not hand the old device's status to its caller", async () => {
     const first = new LoopbackTransport();
     first.setOnWrite((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
+      const version = versionOf(bytes[0]);
+      if (version.length) {
+        // The version reads the status read makes first, to learn its width
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...version])), 0);
+      } else if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
         setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
         setTimeout(() => {
           // settles the instream waiter...

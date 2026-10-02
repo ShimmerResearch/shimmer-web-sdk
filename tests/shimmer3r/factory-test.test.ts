@@ -375,6 +375,12 @@ describe('runFactoryTest — refusals and state', () => {
     const t = new LoopbackTransport({ capabilities: { framed: true } });
     t.setOnWrite((raw) => {
       const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // The version reads the status read makes first, to learn its width.
+      const version = versionReply(cmd[0]);
+      if (version) {
+        setTimeout(() => t.notify(new Uint8Array(version)), 0);
+        return;
+      }
       if (cmd[0] === OPCODES.GET_STATUS_COMMAND) {
         // bit 1 = sensing: an SD recording somebody started with the button.
         setTimeout(

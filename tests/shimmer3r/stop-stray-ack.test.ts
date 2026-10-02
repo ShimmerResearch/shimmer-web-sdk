@@ -20,10 +20,21 @@ const INSTREAM = OPCODES.INSTREAM_CMD_RESPONSE; // 0x8A
 const STATUS = OPCODES.STATUS_RESPONSE; // 0x71
 const VBATT = OPCODES.VBATT_RESPONSE; // 0x94
 const FW_RSP = OPCODES.FW_VERSION_RESPONSE; // 0x2F
+const DEVVER = OPCODES.DEVICE_VERSION_RESPONSE; // 0x25
 
 /** docked, sensing, rtcSet, sdLogging, sdPresent — and usbPluggedIn in byte 1. */
 const S0 = 0x2f;
 const S1 = 1;
+
+/**
+ * Read both versions now, so the status width is known before the stream
+ * starts. `getStatus` reads them itself when it is not, and its status read
+ * would then not be the first command after the stop.
+ */
+async function learnStatusWidth(client: Shimmer3RClient): Promise<void> {
+  await client.readDeviceVersion();
+  await client.readFwVersion();
+}
 
 interface Scripted {
   t: LoopbackTransport;
@@ -83,6 +94,9 @@ async function lateStopAck(stopOpcode: number, framed: boolean): Promise<Scripte
       case OPCODES.GET_FW_VERSION_COMMAND:
         send([ACK, FW_RSP, 3, 0, 1, 0, 0, 40], 1);
         return;
+      case OPCODES.GET_DEVICE_VERSION_COMMAND:
+        send([ACK, DEVVER, 10], 1);
+        return;
       default:
         return;
     }
@@ -99,6 +113,7 @@ for (const framed of [true, false]) {
   describe(`Shimmer3RClient command straight after a stop (${shape})`, () => {
     it('reads the status in the same task turn as stopStreaming', async () => {
       const { client } = await lateStopAck(OPCODES.STOP_STREAMING_COMMAND, framed);
+      await learnStatusWidth(client);
       await client.startStreaming();
       await client.stopStreaming();
       // No await in between: the stop's ACK has not landed yet.
@@ -107,6 +122,7 @@ for (const framed of [true, false]) {
 
     it('reads the status in the same task turn as stopStreamingAndLogging', async () => {
       const { client } = await lateStopAck(OPCODES.STOP_SDBT_COMMAND, framed);
+      await learnStatusWidth(client);
       await client.startStreamingAndLogging();
       await client.stopStreamingAndLogging();
       expect(await client.getStatus()).toMatchObject({ sdLogging: true, docked: true });
@@ -126,6 +142,25 @@ for (const framed of [true, false]) {
       await client.startStreaming();
       await client.stopStreaming();
       expect(await client.readFwVersion()).toMatchObject({ major: 1, minor: 0, patch: 40 });
+    });
+
+    it('reads the status after a stop with its width still to learn', async () => {
+      // Then the first command after the stop is the device-version read that
+      // getStatus makes, and the stop's ACK must not stand in for its ACK.
+      const { t, client } = await lateStopAck(OPCODES.STOP_STREAMING_COMMAND, framed);
+      await client.startStreaming();
+      await client.stopStreaming();
+      expect(await client.getStatus()).toMatchObject({
+        sdLogging: true,
+        docked: true,
+        usbPluggedIn: true,
+      });
+      const afterStop = t.writes.map((w) => w.bytes[0]).slice(-3);
+      expect(afterStop).toEqual([
+        OPCODES.GET_DEVICE_VERSION_COMMAND,
+        OPCODES.GET_FW_VERSION_COMMAND,
+        OPCODES.GET_STATUS_COMMAND,
+      ]);
     });
   });
 }

@@ -160,15 +160,24 @@ export {
   SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
 } from './devices/shimmer3r/streamFraming.js';
-/** Per-platform length input the STATUS_RESPONSE span needs (Shimmer3R 2 bytes, Shimmer3 1). */
+/**
+ * Per-device length input the STATUS_RESPONSE span needs: 2 bytes from a
+ * Shimmer3R on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`),
+ * or `'unknown'` before the versions are read.
+ */
 export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
 /**
  * Decode a STATUS_RESPONSE payload — what the sensor is doing right now
  * (docked / sensing / logging / streaming / SD present / RTC set). Shared by
  * both families: `Shimmer3RClient.getStatus` and the unsolicited pushes the
- * firmware sends when any of those change.
+ * firmware sends when any of those change. The other two say how many status
+ * bytes a device sends, which depends on its firmware as well as its hardware.
  */
-export { parseShimmer3StatusBytes } from './devices/shimmer3r/protocol.js';
+export {
+  parseShimmer3StatusBytes,
+  SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE,
+  statusPayloadBytesFor,
+} from './devices/shimmer3r/protocol.js';
 export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
 export {
   CHANNEL_FORMATS,
