@@ -4418,8 +4418,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
          * 1 s in all - was sized from the bench's stop tails on a Shimmer3R,
          * which ended 15-190 ms after the stop. This hand-back has run on a
          * Shimmer3R over classic SPP, where the stop ACK is held back and the
-         * window opens at once, but over BLE, where it matters, only against
-         * the loopback tests. */
+         * window opens at once, and over BLE through Windows' own Bluetooth
+         * stack, where it matters: in 19 tests across the three CRC modes no
+         * test byte reached the stream parser. Not yet through a browser's Web
+         * Bluetooth. */
         const quietMs = 150;
         const waitStart = Date.now();
         while (
@@ -4459,10 +4461,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * path would have completed it. When the structure cannot tell - or no ACK
    * comes, a module holding it back - the wait still runs to its timeout.
    *
-   * HARDWARE-VERIFY: run on a Shimmer3R over classic SPP (transparent bridge,
-   * module v1.4.16.16), with the link CRC off, one-byte and two-byte. The BLE
-   * case - the ACK ending a notification - has run only against the loopback
-   * tests.
+   * Run on a Shimmer3R (module v1.4.16.16) with the link CRC off, one-byte and
+   * two-byte: over classic SPP (transparent bridge), and over BLE (ATT MTU 517)
+   * through Windows' own Bluetooth stack. There none of 15 stop ACKs started a
+   * notification, and each was taken here, 186-273 ms after the test's
+   * duration against 2 s without this.
+   *
+   * HARDWARE-VERIFY: not yet through a browser's Web Bluetooth.
    */
   private async _stopDataRateTest(link: number): Promise<void> {
     const rxAtStop = this._dataRateTestRxCount;
