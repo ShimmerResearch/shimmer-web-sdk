@@ -362,3 +362,65 @@ describe('a link reset with a command still waiting', () => {
     await expect(run).resolves.toBe(report);
   });
 });
+
+describe('a write the old transport holds across a reconnect', () => {
+  /* Review finding: a held write failed only when the old transport let go of
+     it, and its caller's cleanup then ran against the link that had replaced
+     it. The write now fails at the reset, and the cleanups it could reach only
+     touch their own link's state. */
+  const streaming = (c: Shimmer3RClient): boolean =>
+    (c as unknown as { _streaming: boolean })._streaming;
+  function holding(opcode: number): { t: LoopbackTransport; release: () => void } {
+    let release = (): void => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    const t = new LoopbackTransport();
+    t.setOnWrite(async (bytes) => {
+      if (bytes[0] === opcode) await held; // never acknowledged
+    });
+    return { t, release };
+  }
+
+  it("does not end the next link's stream: START_STREAMING", async () => {
+    const first = holding(OPCODES.START_STREAMING_COMMAND);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first.t);
+    const stranded = client.startStreaming().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20); // the start's write is held
+    first.t.emitDisconnect(new Error('dropped'));
+
+    await client.connect(device(answersAll));
+    await client.startStreaming();
+    expect(streaming(client)).toBe(true);
+    first.release(); // the old transport lets go only now
+    expect(await stranded).toMatch(/link was reset/);
+    await tick(10);
+    expect(streaming(client)).toBe(true);
+  });
+
+  it("does not clear the next device's pressure calibration", async () => {
+    const first = holding(OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first.t);
+    const stranded = client.readPressureCalibration();
+    await tick(20); // the read's write is held
+    first.t.emitDisconnect(new Error('dropped'));
+
+    const second = new LoopbackTransport();
+    second.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND) {
+        // A BMP581: its id and no coefficients, since it compensates on-chip
+        const reply = [ACK, OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE, 1, 3];
+        setTimeout(() => tr.notify(new Uint8Array(reply)), 0);
+      }
+    });
+    await client.connect(second);
+    expect((await client.readPressureCalibration())?.sensor).toBe('bmp581');
+    first.release(); // the old transport lets go only now
+    expect(await stranded).toBeNull();
+    await tick(10);
+    expect(client.pressureCalibration?.sensor).toBe('bmp581');
+  });
+});
