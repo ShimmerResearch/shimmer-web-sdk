@@ -863,7 +863,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   /** Send a READ and await the matching DATA_RESPONSE payload. */
   private async _read(
     arg: UartComponentProperty,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildReadPacket(arg));
@@ -875,7 +875,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
     arg: UartComponentProperty,
     address: number,
     size: number,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected');
     const payload = buildMemReadPayload(arg, address, size);
@@ -887,7 +887,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _write(
     arg: UartComponentProperty,
     value: Uint8Array,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildWritePacket(arg, value));
@@ -898,7 +898,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _writeRaw(
     arg: UartComponentProperty,
     payload: Uint8Array,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildUartPacket(UART_PACKET_CMD.WRITE, arg, payload));
