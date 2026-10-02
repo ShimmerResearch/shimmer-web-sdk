@@ -418,35 +418,54 @@ describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream'
      a reframing link the ACK was then framed as that packet's next byte (bench,
      classic SPP: `a5 26 d4 00 ff`), and on BLE it can end a notification. The
      wait timed out every time: each classic speed test took 2 s longer than it
-     needed to. */
+     needed to.
+
+     The ACK is recognised only where the stream's structure rules out test
+     data: the cut packet must match the counter predicted from the complete
+     packet before it, and the data byte predicted at the candidate's position
+     must not itself be 0xFF. */
   const ACK_B = OPCODES.ACK_COMMAND_PROCESSED;
   const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
   const pkt = (c: number): number[] => [TP, c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, 0];
   const packets = (from: number, n: number): number[] =>
     Array.from({ length: n }, (_, k) => pkt(from + k)).flat();
   const FW = [OPCODES.FW_VERSION_RESPONSE, 3, 0, 1, 0, 1, 17];
+  type Mode = 0 | 1 | 2;
+  const ack = (mode: Mode): number[] => [...appendCrc(new Uint8Array([ACK_B]), mode)];
 
-  /** A device whose stop reply (tail and ACK) the test case scripts. */
-  function device(framed: boolean, stopReply: number[] | null): LoopbackTransport {
+  /**
+   * A device whose stop reply the test case scripts. ACKs and replies carry the
+   * link CRC once one is set; test packets never do, as on the firmware.
+   */
+  function device(framed: boolean, stopReply: (mode: Mode) => number[] | null): LoopbackTransport {
     const t = new LoopbackTransport(framed ? {} : { capabilities: { framed: false } });
+    let mode: Mode = 0;
     t.setOnWrite((bytes, tr) => {
       const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...packets(0, 40)])), 0);
+      if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
+        mode = cmd[1] as Mode;
+        setTimeout(() => tr.notify(new Uint8Array(ack(mode))), 0);
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
+        setTimeout(() => tr.notify(new Uint8Array([...ack(mode), ...packets(0, 40)])), 0);
       } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 0) {
-        if (stopReply) setTimeout(() => tr.notify(new Uint8Array(stopReply)), 5);
+        const r = stopReply(mode);
+        if (r) setTimeout(() => tr.notify(new Uint8Array(r)), 5);
       } else if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...FW])), 0);
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK_B, ...FW]), mode)), 0);
       } else {
-        setTimeout(() => tr.notify(new Uint8Array([ACK_B])), 0);
+        setTimeout(() => tr.notify(new Uint8Array(ack(mode))), 0);
       }
     });
     return t;
   }
 
-  async function timeTest(t: LoopbackTransport): Promise<{ overMs: number; fw: string }> {
+  async function timeTest(
+    t: LoopbackTransport,
+    crc: Mode = 0,
+  ): Promise<{ overMs: number; fw: string }> {
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
+    if (crc) await client.setCrcMode(crc);
     const start = Date.now();
     await client.runDataRateTest(100);
     const overMs = Date.now() - start - 100;
@@ -454,31 +473,70 @@ describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream'
     return { overMs, fw: `${v.major}.${v.minor}.${v.patch}` };
   }
 
+  // The last complete packet is counter 59, so the cut one is counter 60 (0x3C)
+  const tail = packets(40, 20);
+
   it('on a byte-stream link, when the cut packet had 4 bytes (the bench case)', async () => {
-    const { overMs, fw } = await timeTest(
-      device(false, [...packets(40, 20), TP, 0x26, 0xd4, 0x00, ACK_B]),
-    );
-    expect(overMs).toBeLessThan(800);
-    expect(fw).toBe('1.1.17');
+    const r = await timeTest(device(false, () => [...tail, ...pkt(60).slice(0, 4), ACK_B]));
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
   });
 
   it('on a byte-stream link, when the cut packet had 2 bytes', async () => {
-    const { overMs, fw } = await timeTest(device(false, [...packets(40, 20), TP, 0x26, ACK_B]));
-    expect(overMs).toBeLessThan(800);
-    expect(fw).toBe('1.1.17');
+    const r = await timeTest(device(false, () => [...tail, ...pkt(60).slice(0, 2), ACK_B]));
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
+  });
+
+  it('on a packet boundary', async () => {
+    const r = await timeTest(device(false, () => [...tail, ACK_B]));
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
   });
 
   it('on BLE, when the ACK ends a notification', async () => {
-    const { overMs, fw } = await timeTest(device(true, [...packets(40, 20), TP, 0x3e, ACK_B]));
-    expect(overMs).toBeLessThan(800);
-    expect(fw).toBe('1.1.17');
+    const r = await timeTest(device(true, () => [...tail, ...pkt(60).slice(0, 2), ACK_B]));
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
+  });
+
+  it.each([
+    ['one-byte', 1 as Mode],
+    ['two-byte', 2 as Mode],
+  ])('with a %s link CRC, when the ACK and its CRC follow a cut packet', async (_name, crc) => {
+    /* Review finding: test packets carry no CRC but the ACK does, so the last
+       raw byte is the ACK's CRC, not 0xFF. */
+    const r = await timeTest(
+      device(false, (mode) => [...tail, ...pkt(60).slice(0, 4), ...ack(mode)]),
+      crc,
+    );
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
+  });
+
+  it('waits out the timeout when a cut packet ends in a counter byte of 0xFF and no ACK comes', async () => {
+    /* Review finding: `a5 ff` is valid aborted data - counter 255's first byte
+       is 0xFF - so a trailing 0xFF on its own is no ACK. */
+    const r = await timeTest(device(false, () => [...packets(235, 20), ...pkt(255).slice(0, 2)]));
+    expect(r.overMs).toBeGreaterThanOrEqual(1900);
+    expect(r.fw).toBe('1.1.17');
+  });
+
+  it('waits out the timeout when data and ACK would look alike', async () => {
+    /* The ACK lands where counter 255's first byte, 0xFF, would be: nothing in
+       the stream can tell them apart, so the old behaviour stands. */
+    const r = await timeTest(
+      device(false, () => [...packets(235, 20), ...pkt(255).slice(0, 1), ACK_B]),
+    );
+    expect(r.overMs).toBeGreaterThanOrEqual(1900);
+    expect(r.fw).toBe('1.1.17');
   });
 
   it('still waits out the timeout when no stop ACK comes', async () => {
     // e.g. a classic module holding its last frames back: the stream ends on
-    // a whole packet, whose last byte is 0x00, and no 0xFF follows
-    const { overMs, fw } = await timeTest(device(false, [...packets(40, 20)]));
-    expect(overMs).toBeGreaterThanOrEqual(1900);
-    expect(fw).toBe('1.1.17');
+    // a whole packet and no ACK follows
+    const r = await timeTest(device(false, () => [...tail]));
+    expect(r.overMs).toBeGreaterThanOrEqual(1900);
+    expect(r.fw).toBe('1.1.17');
   });
 });

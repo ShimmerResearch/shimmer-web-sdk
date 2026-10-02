@@ -3,7 +3,14 @@ import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './constants.js';
-import { CRC_MODE, crcTrailerBytes, isCrcMode, verifyCrc, type CrcMode } from './crcMode.js';
+import {
+  CRC_MODE,
+  appendCrc,
+  crcTrailerBytes,
+  isCrcMode,
+  verifyCrc,
+  type CrcMode,
+} from './crcMode.js';
 import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
 import {
   EXG_BANK_LENGTH,
@@ -248,6 +255,13 @@ const STREAM_MAX_FRAME_TICKS = 32768;
  */
 const DATA_RATE_STOP_ACK_QUIET_MS = 50;
 
+/**
+ * Raw bytes kept from the end of a data-rate test stream: the stop's ACK packet
+ * (up to 3 bytes with a 2-byte CRC), a cut packet (up to 4) and the complete
+ * packet before it (5), with room to spare.
+ */
+const DATA_RATE_TAIL_BYTES = 16;
+
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
@@ -427,11 +441,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _dataRateTestLastRxAt = 0;
 
   /**
-   * The last byte received while a data-rate test owned the link, or -1. After
-   * the stop, a quiet link whose last byte is 0xFF has delivered the stop ACK:
-   * see {@link _stopDataRateTest}.
+   * The last {@link DATA_RATE_TAIL_BYTES} raw bytes received while a data-rate
+   * test owned the link, CRC trailers included. Enough to see the stream's last
+   * test packets and the stop's ACK packet behind them: see
+   * {@link _dataRateStopAckEndsStream}.
    */
-  private _dataRateTestLastByte = -1;
+  private _dataRateTestTail: number[] = [];
 
   /**
    * Bumped by every {@link _resetLinkProtocolState}, so work that outlives a
@@ -967,7 +982,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     let bytes = chunk;
     if (this._dataRateTestActive && bytes.length > 0) {
       this._dataRateTestLastRxAt = Date.now();
-      this._dataRateTestLastByte = bytes[bytes.length - 1];
+      const tail = this._dataRateTestTail;
+      for (let i = Math.max(0, bytes.length - DATA_RATE_TAIL_BYTES); i < bytes.length; i++) {
+        tail.push(bytes[i]);
+      }
+      if (tail.length > DATA_RATE_TAIL_BYTES) tail.splice(0, tail.length - DATA_RATE_TAIL_BYTES);
     }
     if (this._factoryTest) {
       const rest = this._factoryTest.feed(bytes);
@@ -4142,7 +4161,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const linkGone = (): Error => new Error('The link was reset during the data-rate test');
     this._dataRateTestActive = true;
     this._dataRateTestLastRxAt = Date.now();
-    this._dataRateTestLastByte = -1;
+    this._dataRateTestTail = [];
     try {
       await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
       if (this._linkGeneration !== link) throw linkGone();
@@ -4216,16 +4235,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * rather than the start. Either way the wait timed out, and every classic
    * speed test took 2 s longer than it needed to.
    *
-   * The ACK is always the last byte, though, and a test stream never ends in
-   * 0xFF on its own: every packet's last byte is the top byte of its counter,
-   * 0x00. So once the link has gone quiet after the stop and its last byte was
-   * 0xFF, that byte was the ACK, and the wait is completed the way the ACK path
-   * would have completed it. A stop ACK that never comes - the module holding
-   * it back - still waits out the timeout.
+   * The ACK packet is always the last thing on the link, though. So once the
+   * link has gone quiet after the stop, and the stream's structure shows its
+   * end is the ACK packet rather than test data
+   * ({@link _dataRateStopAckEndsStream}), the wait is completed the way the ACK
+   * path would have completed it. When the structure cannot tell - or no ACK
+   * comes, a module holding it back - the wait still runs to its timeout.
    *
    * HARDWARE-VERIFY: run on a Shimmer3R over classic SPP (transparent bridge,
-   * module v1.4.16.16). The BLE case - the ACK ending a notification - has run
-   * only against the loopback tests.
+   * module v1.4.16.16), with the link CRC off, one-byte and two-byte. The BLE
+   * case - the ACK ending a notification - has run only against the loopback
+   * tests.
    */
   private async _stopDataRateTest(link: number): Promise<void> {
     const stopSentAt = Date.now();
@@ -4243,8 +4263,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
         !settled &&
         this._expectingAck > 0 &&
         this._dataRateTestLastRxAt > stopSentAt &&
-        this._dataRateTestLastByte === OPCODES.ACK_COMMAND_PROCESSED &&
-        Date.now() - this._dataRateTestLastRxAt >= DATA_RATE_STOP_ACK_QUIET_MS
+        Date.now() - this._dataRateTestLastRxAt >= DATA_RATE_STOP_ACK_QUIET_MS &&
+        this._dataRateStopAckEndsStream()
       ) {
         this._log('Data-rate test: the stop ACK ended the stream inside a test packet; taking it');
         this._expectingAck = Math.max(0, this._expectingAck - 1);
@@ -4254,6 +4274,74 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
     await ack;
+  }
+
+  /**
+   * Whether the data-rate test stream, as received, ends in the stop's ACK
+   * packet rather than in test data.
+   *
+   * The stream's last bytes have to be exactly the ACK packet this link's CRC
+   * mode sends: `0xFF`, then its CRC when one is on. Test packets carry no CRC,
+   * so with a CRC on the last raw byte is the ACK's CRC, not `0xFF`.
+   *
+   * That alone is not proof. A cut packet's counter bytes can also be `0xFF`
+   * (`a5 ff` is a valid aborted tail), so the candidate `0xFF` has to sit where
+   * test data could not have put one. Test packets are `0xA5` followed by a
+   * little-endian counter that steps by one per packet. So the last complete
+   * packet predicts every byte of the one after it:
+   *
+   * - **The candidate starts a packet** (the stream ended on a packet boundary).
+   *   Only `0xA5` can be data there, so it is the ACK.
+   * - **The candidate falls inside a cut packet.** The cut packet's received
+   *   bytes must be the predicted counter's, and the candidate is the ACK only
+   *   when the predicted byte at its position is not `0xFF`. When it is, data
+   *   and ACK look alike, and this returns false: the wait then runs out its
+   *   timeout, as it always did.
+   *
+   * Anything that does not fit this structure - garbage, or too few packets to
+   * check against - also returns false.
+   */
+  private _dataRateStopAckEndsStream(): boolean {
+    const t = this._dataRateTestTail;
+    const ackPacket = appendCrc(new Uint8Array([OPCODES.ACK_COMMAND_PROCESSED]), this._crcMode);
+    const ack = t.length - ackPacket.length; // where the candidate ACK byte sits
+    if (ack < 0) return false;
+    for (let i = 0; i < ackPacket.length; i++) {
+      if (t[ack + i] !== ackPacket[i]) return false;
+    }
+    const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
+    const counterAt = (i: number): number | null =>
+      i >= 0 && i + 4 < ack && t[i] === TP
+        ? (t[i + 1] | (t[i + 2] << 8) | (t[i + 3] << 16) | (t[i + 4] << 24)) >>> 0
+        : null;
+    const byteOf = (c: number, k: number): number => (c >>> (8 * k)) & 0xff;
+
+    let fits = false;
+    // cut = how many bytes of the last packet arrived before the candidate:
+    // 0 means it ended on a packet boundary
+    for (let cut = 0; cut <= 4; cut++) {
+      const last = ack - (cut === 0 ? 5 : cut); // start of the last packet seen
+      const before = last - 5; // the complete packet before it
+      if (cut === 0) {
+        const a = counterAt(before);
+        const b = counterAt(last);
+        if (a === null || b === null || b !== (a + 1) >>> 0) continue;
+        fits = true; // only 0xA5 can start a packet: the candidate is the ACK
+        continue;
+      }
+      const prev = counterAt(before);
+      if (prev === null || t[last] !== TP) continue;
+      const next = (prev + 1) >>> 0;
+      let matches = true;
+      for (let j = 1; j < cut; j++) {
+        if (t[last + j] !== byteOf(next, j - 1)) matches = false;
+      }
+      if (!matches) continue;
+      // The data byte that would sit where the candidate is
+      if (byteOf(next, cut - 1) === OPCODES.ACK_COMMAND_PROCESSED) return false;
+      fits = true;
+    }
+    return fits;
   }
 
   // ---------------------------------------------------------------------------
