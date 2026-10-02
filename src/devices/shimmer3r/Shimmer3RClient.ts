@@ -389,6 +389,39 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
 
+  /**
+   * True while {@link runDataRateTest} owns the link. Every received chunk then
+   * goes to the test's byte counter and nowhere else, except an ACK that a
+   * command is waiting for, which still takes the normal path so the start and
+   * stop ACKs are recognised.
+   *
+   * Without this, a framed transport (BLE) delivered the test stream exactly as
+   * the module cut it into notifications, and since the counter's high bytes
+   * are 0x00 most notifications started with the DATA_PACKET opcode. Once a
+   * stream schema existed they were handed to the stream aligner: it flooded
+   * "Frame timing does not match" (about 130 times in a 5 s test on the bench)
+   * and could deliver test bytes to onStreamFrame as samples. A reframed link -
+   * classic, or BLE with a link CRC on - was never affected, because there the
+   * framer hands over whole 0xA5 test packets.
+   *
+   * It belongs to the link the test started on: {@link _resetLinkProtocolState}
+   * clears it, so a reconnect is never diverted by a test from the old link.
+   */
+  private _dataRateTestActive = false;
+
+  /**
+   * When the last byte was diverted to a data-rate test. The test hands the
+   * link back only once this has gone quiet: see {@link runDataRateTest}.
+   */
+  private _dataRateTestLastRxAt = 0;
+
+  /**
+   * Bumped by every {@link _resetLinkProtocolState}, so work that outlives a
+   * link - a data-rate test waiting out its duration - can tell the link it
+   * started on is gone.
+   */
+  private _linkGeneration = 0;
+
   /** Candidate alignments the timestamp check has rejected since the last lock. */
   private _streamAlignRejects = 0;
 
@@ -833,6 +866,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._sdKnownSession = null;
     this._resetCalibrationState();
     this._timeline.reset();
+    /* A data-rate test is the old link's: diverting the next link's traffic -
+     * stream data included - to it would hide that link from everything else.
+     * runDataRateTest sees the generation move and gives up. */
+    this._dataRateTestActive = false;
+    this._linkGeneration++;
   }
 
   /**
@@ -924,6 +962,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _handleFramedChunk = (chunk: Uint8Array): void => {
     this._log('Notify len=', chunk.length, 'data=', chunk);
 
+    // A data-rate test owns the link: see _dataRateTestActive.
+    if (
+      this._dataRateTestActive &&
+      !(chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && (this._expectingAck ?? 0) > 0)
+    ) {
+      this._dataRateTestLastRxAt = Date.now();
+      this._emitTemp(chunk);
+      return;
+    }
+
     /* Check and strip the packet's CRC before anything above sees the message.
      * One place, because every whole control message arrives here - from the
      * framer on a reframed link, or straight from a framed transport.
@@ -983,6 +1031,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
         if (this._streaming && this._lastAckRemainder[0] === OPCODES.DATA_PACKET) {
           this._log('Appending DATA remainder after ACK to stream buffer');
           this._rxBuf = concatU8(this._rxBuf, this._lastAckRemainder);
+        } else if (this._dataRateTestActive) {
+          /* Test packets behind the start ACK, or behind a counter byte taken
+           * for the stop ACK. Test traffic, never a status push, whatever its
+           * first byte. */
+          this._dataRateTestLastRxAt = Date.now();
+          this._emitTemp(this._lastAckRemainder);
         } else {
           this._log('Forwarding non-DATA remainder to control handlers');
           this._emitTemp(this._lastAckRemainder);
@@ -1127,7 +1181,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // DATA_PACKET belongs to the stream plane even before `_streaming` is set
       // (the window between START_STREAMING and its ACK). Its length comes from
       // the schema, so stop framing and let the stream parser own the rest.
-      inspect: (buf) => (buf[0] === OPCODES.DATA_PACKET ? 'stop' : 'frame'),
+      // Not during a data-rate test, which owns the link: there a leading 0x00
+      // is a counter byte - a previous test's leftovers arriving mid-packet -
+      // and stopping would hand them to the stream parser past the test's
+      // guard in _handleFramedChunk. Framing instead resyncs over them.
+      inspect: (buf) =>
+        buf[0] === OPCODES.DATA_PACKET && !this._dataRateTestActive ? 'stop' : 'frame',
       coalesce: this._coalesceAckWithResponse,
       onDrop: (byte) =>
         this._log(`serial resync: dropping unframeable byte 0x${byte.toString(16)}`),
@@ -4056,13 +4115,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (counting) bytes += chunk.length;
     };
     this._onTemp(counter);
+    // Before the start command: bytes a previous test left behind (a classic
+    // link can hold its last chunk until the host next sends) must not reach
+    // the stream parser either.
+    const link = this._linkGeneration;
+    const linkGone = (): Error => new Error('The link was reset during the data-rate test');
+    this._dataRateTestActive = true;
+    this._dataRateTestLastRxAt = Date.now();
     try {
       await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
+      if (this._linkGeneration !== link) throw linkGone();
       const startedAt = Date.now();
       counting = true;
       let elapsed = 0;
       while (elapsed < durationMs) {
         await new Promise((r) => setTimeout(r, Math.min(250, durationMs - elapsed)));
+        // A drop and reconnect while waiting: the count is not this link's,
+        // and this test must not go on to stop, or clear, the new one
+        if (this._linkGeneration !== link) throw linkGone();
         elapsed = Date.now() - startedAt;
         onProgress?.(bytes, elapsed);
       }
@@ -4075,15 +4145,45 @@ export class Shimmer3RClient extends BaseShimmerClient {
       };
     } finally {
       this._offTemp(counter);
-      try {
-        await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000);
-      } catch {
-        /* the stop ACK can be indistinguishable from residual test bytes */
+      /* On a link that has since been reset there is nothing to stop or hand
+       * back: the reset already cleared the flag, and the buffers now belong to
+       * the new link. */
+      if (this._linkGeneration === link) {
+        try {
+          await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000);
+        } catch {
+          /* the stop ACK can be indistinguishable from residual test bytes */
+        }
+        /* Hand the link back only once test traffic has stopped arriving, not
+         * at the ACK. Which 0xFF ended the wait above cannot be trusted: a
+         * counter byte of 0xFF can begin a notification, and the real ACK need
+         * not sit on a packet boundary, because stopping aborts the transfer in
+         * flight. Reopened at a false ACK, the packets still behind it reached
+         * the stream parser. Quiet also covers a stop ACK that never came.
+         *
+         * HARDWARE-VERIFY: the quiet window - 150 ms with no test bytes, at most
+         * 1 s in all - was sized from the bench's stop tails on a Shimmer3R,
+         * which ended 15-190 ms after the stop. This hand-back has run on a
+         * Shimmer3R over classic SPP, where the stop ACK is held back and the
+         * window opens at once, but over BLE, where it matters, only against
+         * the loopback tests. */
+        const quietMs = 150;
+        const waitStart = Date.now();
+        while (
+          this._linkGeneration === link &&
+          Date.now() - this._dataRateTestLastRxAt < quietMs &&
+          Date.now() - waitStart < 1000
+        ) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (this._linkGeneration === link) {
+          // Drop any test bytes still sitting in the re-framing accumulator on
+          // an unframed transport, then hand the link back.
+          this._rxBuf = new Uint8Array(0);
+          this._ctrlBuf = new Uint8Array(0);
+          this._dataRateTestActive = false;
+        }
       }
-      // Drop any test bytes that were mistaken for stream data, or that are
-      // still sitting in the re-framing accumulator on an unframed transport.
-      this._rxBuf = new Uint8Array(0);
-      this._ctrlBuf = new Uint8Array(0);
     }
   }
 
