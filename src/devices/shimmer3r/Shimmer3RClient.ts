@@ -903,6 +903,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * stream data included - to it would hide that link from everything else.
      * runDataRateTest sees the generation move and gives up. */
     this._dataRateTestActive = false;
+    /* ACK accounting is per link as well. A command pending when the link went
+     * has no ACK coming on the next one, and a count or remainder left over
+     * from it would be taken as the next link's: its waiter gives up instead
+     * (see _waitForAck), and the count starts again from zero. */
+    this._expectingAck = 0;
+    this._lastAckRemainder = null;
     this._linkGeneration++;
   }
 
@@ -3823,17 +3829,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
     u8: Uint8Array,
     ackTimeoutMs = 1000,
   ): Promise<Uint8Array | null> {
+    const link = this._linkGeneration;
     this._expectingAck++;
     try {
       await this._write(u8);
       return await this._waitForAck(ackTimeoutMs);
     } catch (e) {
-      this._expectingAck = Math.max(0, this._expectingAck - 1);
+      // Not across a link reset, which has already zeroed the count: what is
+      // counted now belongs to the next link's commands
+      if (this._linkGeneration === link) this._expectingAck = Math.max(0, this._expectingAck - 1);
       throw e;
     }
   }
 
   private _waitForAck(timeoutMs = 1000): Promise<Uint8Array | null> {
+    const link = this._linkGeneration;
     return new Promise<Uint8Array | null>((resolve, reject) => {
       const t = setTimeout(() => {
         this._offTemp(handler);
@@ -3842,6 +3852,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
+        /* Left over from a link that has since been reset. Everything arriving
+         * now is the next link's, and taking it - its ACK, and with it the
+         * response coalesced behind, which the remainder hand-off below gives
+         * to whichever waiter runs first - starved that link's own waiter:
+         * a readFwVersion straight after a reconnect timed out. */
+        if (this._linkGeneration !== link) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          reject(new Error('The link was reset while waiting for the ACK'));
+          return;
+        }
         // A NACK is the firmware's answer, so stop waiting for one that is not
         // coming. Several commands are refused outright while the device is
         // sensing (`ShimBt_isCmdBlockedWhileSensing`), and "NACK received" says
@@ -3879,6 +3900,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._lastAckRemainder = null;
       return Promise.resolve(rem);
     }
+    const link = this._linkGeneration;
     return new Promise<Uint8Array>((resolve, reject) => {
       const t = setTimeout(() => {
         this._offTemp(handler);
@@ -3887,6 +3909,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
       const handler = (chunk: Uint8Array): void => {
         if (!chunk || chunk.length === 0) return;
+        // A waiter from a link since reset: the reply arriving now answers the
+        // next link's command, not this one (see _waitForAck)
+        if (this._linkGeneration !== link) {
+          clearTimeout(t);
+          this._offTemp(handler);
+          reject(new Error('The link was reset while waiting for the response'));
+          return;
+        }
         // The expected opcode first, so a reply is never mistaken for framing;
         // then the same message with a stray ACK stepped over. Resolving with
         // the stripped buffer is what lets every caller keep reading its reply

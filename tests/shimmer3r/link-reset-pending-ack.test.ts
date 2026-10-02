@@ -1,0 +1,73 @@
+import { describe, it, expect } from 'vitest';
+import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
+import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+
+/* Review finding (a "reconnect race"): a command whose ACK was still awaited
+   when the link dropped left its waiter registered. On the next link, that
+   waiter took the first ACK - and the response coalesced behind it, which the
+   remainder hand-off gives to whichever waiter runs first - so the new link's
+   own command timed out, and the ACK count stayed one too high for good. The
+   data-rate test's stop made this likely: it waits up to 2 s for its ACK. */
+
+const ACK = OPCODES.ACK_COMMAND_PROCESSED;
+const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
+const FW = [OPCODES.FW_VERSION_RESPONSE, 3, 0, 1, 0, 1, 17];
+const pkt = (c: number): number[] => [TP, c & 0xff, (c >> 8) & 0xff, 0, 0];
+const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const expectingAck = (c: Shimmer3RClient): number =>
+  (c as unknown as { _expectingAck: number })._expectingAck;
+
+/** A device that ACKs everything, except what `silent` names, which it never answers. */
+function device(silent: (cmd: Uint8Array) => boolean): LoopbackTransport {
+  const t = new LoopbackTransport();
+  t.setOnWrite((bytes, tr) => {
+    const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (silent(cmd)) return;
+    if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...pkt(0), ...pkt(1)])), 0);
+    } else if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+    } else {
+      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
+    }
+  });
+  return t;
+}
+const answersAll = (): boolean => false;
+
+describe('a command pending when the link drops', () => {
+  it("does not take the next link's ACK and reply: data-rate stop", async () => {
+    const isStop = (c: Uint8Array): boolean => c[0] === OPCODES.SET_DATA_RATE_TEST && c[1] === 0;
+    const first = device(isStop);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const test = client.runDataRateTest(100);
+    await tick(160); // the stop has gone out and its ACK is awaited
+    first.emitDisconnect(new Error('dropped'));
+
+    await client.connect(device(answersAll));
+    const v = await client.readFwVersion();
+    expect(`${v.major}.${v.minor}.${v.patch}`).toBe('1.1.17');
+    await test; // the measurement was over before the drop
+    expect(expectingAck(client)).toBe(0);
+  });
+
+  it("does not take the next link's ACK and reply: any command", async () => {
+    const first = device((c) => c[0] === OPCODES.GET_FW_VERSION_COMMAND);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const stranded = client.readFwVersion().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    first.emitDisconnect(new Error('dropped'));
+
+    await client.connect(device(answersAll));
+    const v = await client.readFwVersion();
+    expect(`${v.major}.${v.minor}.${v.patch}`).toBe('1.1.17');
+    expect(await stranded).toMatch(/link was reset/);
+    expect(expectingAck(client)).toBe(0);
+  });
+});
