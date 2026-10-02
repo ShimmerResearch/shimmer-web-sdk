@@ -301,7 +301,8 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
   let corruptArmed = opts.corruptSeqOnce !== undefined;
   let dropArmed = opts.dropSeqOnce !== undefined;
   /* The link CRC in force, as SET_CRC_COMMAND left it. Zero until a host asks,
-     which is the state after every power cycle. */
+     which is the state at the start of every link: the firmware clears it at
+     startup and on every disconnect. */
   let crcMode: 0 | 1 | 2 = 0;
 
   /* A control reply: composed by `ShimBt_sendRspOrAck`, which is one of the
