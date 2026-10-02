@@ -240,6 +240,14 @@ const STREAM_ALIGN_MAX_REJECTS = 256;
  */
 const STREAM_MAX_FRAME_TICKS = 32768;
 
+/**
+ * How long the link must stay quiet after a data-rate test's stop, with 0xFF
+ * as its last byte, before that byte is taken as the stop ACK. The ACK follows
+ * the last test byte within milliseconds (bench: 22 ms after the stop, classic
+ * SPP), so this only has to outlast the gap between two arrivals.
+ */
+const DATA_RATE_STOP_ACK_QUIET_MS = 50;
+
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
@@ -410,10 +418,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _dataRateTestActive = false;
 
   /**
-   * When the last byte was diverted to a data-rate test. The test hands the
-   * link back only once this has gone quiet: see {@link runDataRateTest}.
+   * When the last byte arrived while a data-rate test owned the link. The test
+   * hands the link back only once this has gone quiet: see
+   * {@link runDataRateTest}. Kept at the transport entry,
+   * {@link _handleNotify}, so it sees every byte, including those a reframing
+   * accumulator is still holding.
    */
   private _dataRateTestLastRxAt = 0;
+
+  /**
+   * The last byte received while a data-rate test owned the link, or -1. After
+   * the stop, a quiet link whose last byte is 0xFF has delivered the stop ACK:
+   * see {@link _stopDataRateTest}.
+   */
+  private _dataRateTestLastByte = -1;
 
   /**
    * Bumped by every {@link _resetLinkProtocolState}, so work that outlives a
@@ -947,6 +965,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _handleNotify = (chunk: Uint8Array): void => {
     let bytes = chunk;
+    if (this._dataRateTestActive && bytes.length > 0) {
+      this._dataRateTestLastRxAt = Date.now();
+      this._dataRateTestLastByte = bytes[bytes.length - 1];
+    }
     if (this._factoryTest) {
       const rest = this._factoryTest.feed(bytes);
       if (!rest || rest.length === 0) return;
@@ -967,7 +989,6 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._dataRateTestActive &&
       !(chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && (this._expectingAck ?? 0) > 0)
     ) {
-      this._dataRateTestLastRxAt = Date.now();
       this._emitTemp(chunk);
       return;
     }
@@ -1035,7 +1056,6 @@ export class Shimmer3RClient extends BaseShimmerClient {
           /* Test packets behind the start ACK, or behind a counter byte taken
            * for the stop ACK. Test traffic, never a status push, whatever its
            * first byte. */
-          this._dataRateTestLastRxAt = Date.now();
           this._emitTemp(this._lastAckRemainder);
         } else {
           this._log('Forwarding non-DATA remainder to control handlers');
@@ -4122,6 +4142,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const linkGone = (): Error => new Error('The link was reset during the data-rate test');
     this._dataRateTestActive = true;
     this._dataRateTestLastRxAt = Date.now();
+    this._dataRateTestLastByte = -1;
     try {
       await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
       if (this._linkGeneration !== link) throw linkGone();
@@ -4149,11 +4170,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * back: the reset already cleared the flag, and the buffers now belong to
        * the new link. */
       if (this._linkGeneration === link) {
-        try {
-          await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000);
-        } catch {
-          /* the stop ACK can be indistinguishable from residual test bytes */
-        }
+        await this._stopDataRateTest(link);
         /* Hand the link back only once test traffic has stopped arriving, not
          * at the ACK. Which 0xFF ended the wait above cannot be trusted: a
          * counter byte of 0xFF can begin a notification, and the real ACK need
@@ -4185,6 +4202,58 @@ export class Shimmer3RClient extends BaseShimmerClient {
         }
       }
     }
+  }
+
+  /**
+   * Stop a data-rate test and wait for the stop's ACK, which the normal ACK
+   * path often cannot see.
+   *
+   * Stopping aborts the firmware's transfer in flight, so the stream usually
+   * ends part-way through a 5-byte test packet, and the ACK follows straight
+   * after. A reframing link then takes the ACK as that packet's next byte -
+   * bench, Shimmer3R over classic SPP: the stream ended `a5 26 d4 00 ff`, framed
+   * as one test packet - and on BLE it can arrive at the end of a notification
+   * rather than the start. Either way the wait timed out, and every classic
+   * speed test took 2 s longer than it needed to.
+   *
+   * The ACK is always the last byte, though, and a test stream never ends in
+   * 0xFF on its own: every packet's last byte is the top byte of its counter,
+   * 0x00. So once the link has gone quiet after the stop and its last byte was
+   * 0xFF, that byte was the ACK, and the wait is completed the way the ACK path
+   * would have completed it. A stop ACK that never comes - the module holding
+   * it back - still waits out the timeout.
+   *
+   * HARDWARE-VERIFY: run on a Shimmer3R over classic SPP (transparent bridge,
+   * module v1.4.16.16). The BLE case - the ACK ending a notification - has run
+   * only against the loopback tests.
+   */
+  private async _stopDataRateTest(link: number): Promise<void> {
+    const stopSentAt = Date.now();
+    let settled = false;
+    const ack = this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 0]), 2000).then(
+      () => undefined,
+      () => undefined, // a timeout or a NACK: carry on to the hand-back either way
+    );
+    void ack.then(() => {
+      settled = true;
+    });
+    while (!settled && this._linkGeneration === link) {
+      await new Promise((r) => setTimeout(r, 20));
+      if (
+        !settled &&
+        this._expectingAck > 0 &&
+        this._dataRateTestLastRxAt > stopSentAt &&
+        this._dataRateTestLastByte === OPCODES.ACK_COMMAND_PROCESSED &&
+        Date.now() - this._dataRateTestLastRxAt >= DATA_RATE_STOP_ACK_QUIET_MS
+      ) {
+        this._log('Data-rate test: the stop ACK ended the stream inside a test packet; taking it');
+        this._expectingAck = Math.max(0, this._expectingAck - 1);
+        this._lastAckRemainder = null;
+        this._emitTemp(new Uint8Array([OPCODES.ACK_COMMAND_PROCESSED]));
+        break;
+      }
+    }
+    await ack;
   }
 
   // ---------------------------------------------------------------------------

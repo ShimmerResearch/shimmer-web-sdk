@@ -411,3 +411,74 @@ describe('Shimmer3RClient.runDataRateTest hands the link back cleanly (review fi
     expect(seen.frames.length).toBeGreaterThan(0);
   });
 });
+
+describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream', () => {
+  /* Stopping aborts the firmware's transfer in flight, so the stream usually
+     ends part-way through a test packet and the ACK follows straight after. On
+     a reframing link the ACK was then framed as that packet's next byte (bench,
+     classic SPP: `a5 26 d4 00 ff`), and on BLE it can end a notification. The
+     wait timed out every time: each classic speed test took 2 s longer than it
+     needed to. */
+  const ACK_B = OPCODES.ACK_COMMAND_PROCESSED;
+  const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
+  const pkt = (c: number): number[] => [TP, c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, 0];
+  const packets = (from: number, n: number): number[] =>
+    Array.from({ length: n }, (_, k) => pkt(from + k)).flat();
+  const FW = [OPCODES.FW_VERSION_RESPONSE, 3, 0, 1, 0, 1, 17];
+
+  /** A device whose stop reply (tail and ACK) the test case scripts. */
+  function device(framed: boolean, stopReply: number[] | null): LoopbackTransport {
+    const t = new LoopbackTransport(framed ? {} : { capabilities: { framed: false } });
+    t.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...packets(0, 40)])), 0);
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 0) {
+        if (stopReply) setTimeout(() => tr.notify(new Uint8Array(stopReply)), 5);
+      } else if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...FW])), 0);
+      } else {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B])), 0);
+      }
+    });
+    return t;
+  }
+
+  async function timeTest(t: LoopbackTransport): Promise<{ overMs: number; fw: string }> {
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    const start = Date.now();
+    await client.runDataRateTest(100);
+    const overMs = Date.now() - start - 100;
+    const v = await client.readFwVersion();
+    return { overMs, fw: `${v.major}.${v.minor}.${v.patch}` };
+  }
+
+  it('on a byte-stream link, when the cut packet had 4 bytes (the bench case)', async () => {
+    const { overMs, fw } = await timeTest(
+      device(false, [...packets(40, 20), TP, 0x26, 0xd4, 0x00, ACK_B]),
+    );
+    expect(overMs).toBeLessThan(800);
+    expect(fw).toBe('1.1.17');
+  });
+
+  it('on a byte-stream link, when the cut packet had 2 bytes', async () => {
+    const { overMs, fw } = await timeTest(device(false, [...packets(40, 20), TP, 0x26, ACK_B]));
+    expect(overMs).toBeLessThan(800);
+    expect(fw).toBe('1.1.17');
+  });
+
+  it('on BLE, when the ACK ends a notification', async () => {
+    const { overMs, fw } = await timeTest(device(true, [...packets(40, 20), TP, 0x3e, ACK_B]));
+    expect(overMs).toBeLessThan(800);
+    expect(fw).toBe('1.1.17');
+  });
+
+  it('still waits out the timeout when no stop ACK comes', async () => {
+    // e.g. a classic module holding its last frames back: the stream ends on
+    // a whole packet, whose last byte is 0x00, and no 0xFF follows
+    const { overMs, fw } = await timeTest(device(false, [...packets(40, 20)]));
+    expect(overMs).toBeGreaterThanOrEqual(1900);
+    expect(fw).toBe('1.1.17');
+  });
+});
