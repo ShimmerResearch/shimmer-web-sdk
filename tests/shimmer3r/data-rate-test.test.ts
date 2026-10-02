@@ -243,3 +243,171 @@ describe('Shimmer3RClient.runDataRateTest over BLE notifications', () => {
     expect(frames.length).toBeGreaterThan(0);
   });
 });
+
+describe('Shimmer3RClient.runDataRateTest hands the link back cleanly (review findings)', () => {
+  const ACK_B = OPCODES.ACK_COMMAND_PROCESSED;
+  const TP = OPCODES.DATA_RATE_TEST_RESPONSE;
+  // The same 16-byte LN_ACCEL + GYRO schema the BLE tests above use.
+  const INQUIRY = [
+    OPCODES.INQUIRY_RESPONSE,
+    0x80,
+    0x02,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    6,
+    1,
+    0x00,
+    0x01,
+    0x02,
+    0x0a,
+    0x0b,
+    0x0c,
+  ];
+  const pkt = (c: number): number[] => [TP, c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, 0];
+  const packets = (from: number, n: number): number[] =>
+    Array.from({ length: n }, (_, k) => pkt(from + k)).flat();
+  const frame = (ts: number): number[] => [
+    0x00,
+    ts & 0xff,
+    (ts >> 8) & 0xff,
+    (ts >> 16) & 0xff,
+    ...new Array(12).fill(0),
+  ];
+  const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * A scripted device: ACKs everything, answers the inquiry, and on the test's
+   * start and stop commands sends whatever the test case scripts.
+   */
+  function device(
+    opts: {
+      framed?: boolean;
+      onStart?: (tr: LoopbackTransport) => void;
+      onStop?: (tr: LoopbackTransport) => void;
+    } = {},
+  ): LoopbackTransport {
+    const t = new LoopbackTransport(
+      opts.framed === false ? { capabilities: { framed: false } } : {},
+    );
+    t.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (cmd[0] === OPCODES.INQUIRY_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...INQUIRY])), 0);
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1 && opts.onStart) {
+        opts.onStart(tr);
+      } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 0 && opts.onStop) {
+        opts.onStop(tr);
+      } else {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B])), 0);
+      }
+    });
+    return t;
+  }
+
+  function watch(client: Shimmer3RClient): {
+    frames: unknown[];
+    status: string[];
+    pushes: unknown[];
+  } {
+    const seen = { frames: [] as unknown[], status: [] as string[], pushes: [] as unknown[] };
+    client.onStreamFrame = (oc) => seen.frames.push(oc);
+    client.onStatus = (m) => seen.status.push(m);
+    client.onDeviceStatus = (s) => seen.pushes.push(s);
+    return seen;
+  }
+
+  it('lets go of the link when it drops mid-test, so a reconnect is not diverted', async () => {
+    /* The flag outlived the link: the reset on drop and on connect did not
+       clear it, so after a reconnect the new link's notifications - stream
+       data included - went to the old test until its timer ran out. */
+    const old = device({
+      onStart: (tr) => {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...packets(0, 20)])), 0);
+      },
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(old);
+    await client.inquiry();
+    const test = client.runDataRateTest(5000);
+    const outcome = test.then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    old.emitDisconnect(new Error('dropped'));
+
+    const fresh = device();
+    await client.connect(fresh);
+    await client.inquiry();
+    const seen = watch(client);
+    fresh.notify([...frame(640), ...frame(1280), ...frame(1920)]);
+    await tick();
+    expect(seen.frames.length).toBeGreaterThan(0);
+    expect(await outcome).toMatch(/link was reset/);
+  });
+
+  it("keeps a previous test's leftovers from the stream parser on a byte-stream link", async () => {
+    /* On a reframed link a buffer starting with DATA_PACKET left the framer for
+       the stream parser before _handleFramedChunk's guard was reached. Classic
+       leftovers arrive mid-packet, so they can start with a 0x00 counter byte. */
+    const leftovers = [0x00, 0x00, ...packets(0x4702, 30), ACK_B];
+    const t = device({
+      framed: false,
+      onStart: (tr) => {
+        setTimeout(() => tr.notify(new Uint8Array([...leftovers, ACK_B, ...packets(0, 40)])), 0);
+      },
+      onStop: (tr) => setTimeout(() => tr.notify(new Uint8Array([ACK_B])), 0),
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.inquiry();
+    const seen = watch(client);
+    await client.runDataRateTest(100);
+    expect(seen.frames).toHaveLength(0);
+    expect(seen.status.filter((m) => /Frame timing/i.test(m))).toEqual([]);
+  });
+
+  it('still diverts test packets behind a counter byte taken for the stop ACK', async () => {
+    /* A notification can begin on a counter byte of 0xFF while the stop's ACK
+       is awaited, and was taken for it: the link reopened, and the packets still
+       on their way reached the stream parser (before the fix: 5 frames and two
+       "Frame timing" warnings from this script). Its remainder, test bytes
+       that happen to read as a status push, must not surface as one either. */
+    const t = device({
+      onStart: (tr) => {
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B, ...packets(0, 20)])), 0);
+      },
+      onStop: (tr) => {
+        // ...A5 [FF 8A 71 24] 01 00: counter 0x24718AFF, cut so the
+        // notification begins on its first byte, then more in flight
+        setTimeout(() => tr.notify(new Uint8Array([0xff, 0x8a, 0x71, 0x24, 0x01, 0x00])), 0);
+        // ~3 KB still in flight, as the bench saw after a stop: enough for
+        // the stream aligner to lock onto, which a short tail is not
+        setTimeout(() => {
+          for (let k = 0; k < 30; k++)
+            tr.notify(new Uint8Array([0, 0, ...packets(30 + 20 * k, 20)]));
+        }, 30);
+        setTimeout(() => tr.notify(new Uint8Array([ACK_B])), 60);
+      },
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    await client.inquiry();
+    const seen = watch(client);
+    await client.runDataRateTest(100);
+    await tick(100);
+    expect(seen.frames).toHaveLength(0);
+    expect(seen.status.filter((m) => /Frame timing/i.test(m))).toEqual([]);
+    expect(seen.pushes).toHaveLength(0);
+
+    // And the stream path is back once the traffic has stopped.
+    t.notify([...frame(640), ...frame(1280), ...frame(1920)]);
+    await tick();
+    expect(seen.frames.length).toBeGreaterThan(0);
+  });
+});
