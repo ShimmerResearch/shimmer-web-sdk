@@ -453,6 +453,16 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
      one, so a host tries both — see `Shimmer3Client.readPressureCalibration`. */
   [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22, // 0x58
   [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24, // 0x9F
+  /* Without these, `getRtcTime` and every `readCalibration` group timed out:
+     this client reframes everything, and a reply the table cannot size is
+     resynced through a byte at a time. The calibration replies are the opcode
+     and a 21-byte kinematic block (SC_DATA_LEN_STD_IMU_CALIB, copied by
+     `ShimBt_replySingleSensorCalibCmd` in `Comms/shimmer_bt_uart.c`). */
+  [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x12
+  [OPCODES.GYRO_CALIBRATION_RESPONSE]: 21, // 0x15
+  [OPCODES.MAG_CALIBRATION_RESPONSE]: 21, // 0x18
+  [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
+  [OPCODES.RWC_RESPONSE]: 8, // 0x90 64-bit ticks, LSB first
 });
 
 /** Sentinel: need more bytes before the message length can be determined. */
