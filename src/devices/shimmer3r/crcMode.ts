@@ -34,6 +34,7 @@
  */
 
 import { shimmerUartCrcCalc } from '../dock/crc.js';
+import { FW_ID, HW_ID } from '../infomem/layout.js';
 
 /** CRC modes the firmware accepts as `SET_CRC_COMMAND`'s only argument. */
 export const CRC_MODE = Object.freeze({
@@ -65,6 +66,10 @@ export const CRC_MODE = Object.freeze({
    * This SDK therefore assumes off on connect, because that is the side that
    * fails safe: expecting a trailer that is not there misplaces every frame
    * boundary, while expecting none when there is one costs only a resync.
+   *
+   * Shimmer3R firmware before LogAndStream v1.00.011 also goes back to off
+   * whenever sensing stops, mid-connection and without telling the host. This
+   * SDK does not turn a CRC on there: see {@link SHIMMER3R_LINK_CRC_MIN_FIRMWARE}.
    */
   OFF: 0,
   /** Low byte of the CRC-16 appended to everything the device sends. */
@@ -136,4 +141,78 @@ export function verifyCrc(msg: Uint8Array, mode: CrcMode): boolean {
   const [lsb, msb] = shimmerUartCrcCalc(msg, payloadLen);
   if (msg[payloadLen] !== lsb) return false;
   return mode === CRC_MODE.ONE_BYTE || msg[payloadLen + 1] === msb;
+}
+
+/**
+ * The first Shimmer3R firmware this SDK turns a link CRC on for: LogAndStream
+ * v1.00.011.
+ *
+ * Every release before it, v0.00.002 to v1.00.010 (November and December
+ * 2024), turns the CRC off by itself whenever sensing stops, in
+ * `S4Sens_stopSensing` (shimmer3r-firmware `S3R_Production/S4_App/s4_sensing.c`,
+ * `:354` at v1.00.010). The host is not told. The clear arrived with 43926e49
+ * and was removed by c8016de3, and v1.00.011 was the first release without it.
+ * Every later release turns the CRC off only at startup and on disconnect.
+ *
+ * The stop's own ACK still carries the trailer. `BtUart_processCmd` schedules
+ * the stop (task bit 12) and then the ACK (bit 6), and the task loop always
+ * runs the lowest bit first (`S4_NORM_Task_getCurrent`), so the ACK is built
+ * while the CRC is still on (`shimmer_bt_comms.c:2344`). Every reply after it
+ * is bare, so a host still expecting the trailer waits for bytes that never
+ * come, and the exchange after the stop is lost.
+ *
+ * A host cannot track the clear instead. `stopSensing` runs for more than the
+ * host's own stops: STOP_STREAMING (0x20), STOP_SDBT (0x97) and STOP_LOGGING
+ * (0x93), but also the user button and docking, which end SD logging without
+ * the host asking. Nothing tells the host that the CRC went with them: a dock
+ * pushes a status, but no status carries the CRC mode. Its own stops are no
+ * easier, because the stream still in flight and the stop's ACK both carry the
+ * CRC, so the moment the device stopped adding it cannot be seen from the host.
+ */
+export const SHIMMER3R_LINK_CRC_MIN_FIRMWARE = Object.freeze({
+  major: 1,
+  minor: 0,
+  internal: 11,
+} as const);
+
+/**
+ * True unless the firmware turns the link CRC off by itself whenever sensing
+ * stops, which Shimmer3R LogAndStream did before
+ * {@link SHIMMER3R_LINK_CRC_MIN_FIRMWARE}.
+ *
+ * The hardware decides which version line the number belongs to, because
+ * Shimmer3 and Shimmer3R LogAndStream versions overlap. No Shimmer3 firmware
+ * clears the CRC at a stop: every LogAndStream tag from v0.15.000 clears it only
+ * at startup and on disconnect, and v0.11.0 and older only at startup.
+ *
+ * The hardware is taken as the device reports it, and one build reports it
+ * wrongly. LogAndStream_Shimmer3R v1.00.008 is a side build for older Consensys,
+ * v1.00.007 with `OLD_CONSENSYS_SUPPORT` set, and it reports hardware 3. It does
+ * clear the CRC, but it sends exactly what a Shimmer3 on LogAndStream v1.00.008
+ * sends, so it passes here. That is deliberate: refusing every Shimmer3 on that
+ * release would be wrong far more often.
+ *
+ * Firmware other than LogAndStream returns true. No Shimmer3R build of anything
+ * else is known, so there is no source to judge it by.
+ *
+ * HARDWARE-VERIFY: derived from the firmware source (the task order and both
+ * clear sites at v1.00.010) and a scripted device. No Shimmer3R on v1.00.010 or
+ * earlier has been run against this SDK.
+ *
+ * @param hardwareVersion The DEVICE_VERSION_RESPONSE hardware id: 10 for a
+ *   Shimmer3R, 3 for a Shimmer3.
+ * @param fw The FW_VERSION_RESPONSE, as `Shimmer3RClient.readFwVersion()`
+ *   returns it. `patch` is the firmware's internal version number.
+ */
+export function keepsLinkCrcWhenSensingStops(
+  hardwareVersion: number,
+  fw: Readonly<{ fwId: number; major: number; minor: number; patch: number }>,
+): boolean {
+  if (hardwareVersion !== HW_ID.SHIMMER_3R || fw.fwId !== FW_ID.LOGANDSTREAM) return true;
+  const min = SHIMMER3R_LINK_CRC_MIN_FIRMWARE;
+  return (
+    fw.major > min.major ||
+    (fw.major === min.major &&
+      (fw.minor > min.minor || (fw.minor === min.minor && fw.patch >= min.internal)))
+  );
 }

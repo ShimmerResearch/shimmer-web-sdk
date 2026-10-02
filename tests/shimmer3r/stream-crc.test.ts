@@ -6,6 +6,9 @@ import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
 import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
 import { SD_TRANSFER_OPCODES } from '../../src/devices/shimmer3r/sdTransfer/protocol.js';
+// Every device asked for a CRC answers the two version reads setCrcMode makes
+// first, as a Shimmer3R whose firmware keeps the CRC when sensing stops.
+import { versionReply } from './configFirmware.js';
 
 // SET_CRC_COMMAND makes the firmware append 1 or 2 CRC bytes to every packet,
 // so the frame ON THE WIRE grows while the schema's payload does not. These
@@ -75,7 +78,9 @@ async function session(crcBytes: 0 | 1 | 2): Promise<{
     const op = bytes[0];
     const send = (msg: number[]) =>
       setTimeout(() => tr.notify(appendCrc(new Uint8Array(msg), mode as never)), 0);
-    if (op === OPCODES.INQUIRY_COMMAND) send([ACK, ...INQUIRY_BODY]);
+    const version = versionReply(op);
+    if (version) send(version);
+    else if (op === OPCODES.INQUIRY_COMMAND) send([ACK, ...INQUIRY_BODY]);
     else if (op === OPCODES.SET_CRC_COMMAND) {
       mode = bytes[1] as 0 | 1 | 2;
       send([ACK]);
@@ -183,7 +188,10 @@ describe('Shimmer3R link CRC', () => {
     const t = new LoopbackTransport({ capabilities: { framed: false } });
     t.setOnWrite((bytes, tr) => {
       const op = bytes[0];
-      if (op === OPCODES.SET_CRC_COMMAND) {
+      const version = versionReply(op);
+      if (version) {
+        setTimeout(() => tr.notify(version), 0);
+      } else if (op === OPCODES.SET_CRC_COMMAND) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), 0)), 0);
       } else if (op === OPCODES.INQUIRY_COMMAND) {
         /* One read carrying the whole packet, as an RFCOMM read does. Split
@@ -213,7 +221,9 @@ describe('Shimmer3R link CRC', () => {
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
       const op = bytes[0];
-      if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      const version = versionReply(op);
+      if (version) setTimeout(() => tr.notify(version), 0);
+      else if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.INQUIRY_COMMAND) {
         const pkt = appendCrc(new Uint8Array([ACK, ...INQUIRY_BODY]), CRC_MODE.TWO_BYTE);
         pkt[5] = (pkt[5] ^ 0xff) & 0xff; // corrupted after the CRC was computed
@@ -240,7 +250,9 @@ describe('Shimmer3R link CRC', () => {
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
       const op = bytes[0];
-      if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+      const version = versionReply(op);
+      if (version) setTimeout(() => tr.notify(version), 0);
+      else if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.GET_INFOMEM_COMMAND) {
         const pkt = appendCrc(
           new Uint8Array([ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]),
@@ -268,7 +280,9 @@ describe('Shimmer3R link CRC', () => {
     const make = (): LoopbackTransport => {
       const t = new LoopbackTransport();
       t.setOnWrite((bytes, tr) => {
-        if (bytes[0] === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+        const version = versionReply(bytes[0]);
+        if (version) setTimeout(() => tr.notify(version), 0);
+        else if (bytes[0] === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       });
       return t;
     };
@@ -290,10 +304,14 @@ describe('Shimmer3R link CRC', () => {
   it('does not re-attempt a mode the device refused', async () => {
     // The wish is recorded only once the device agrees, so a firmware that
     // NACKs SET_CRC is not asked again on every reconnect.
-    const t = new LoopbackTransport(); // never answers SET_CRC
+    const t = new LoopbackTransport(); // answers the version reads, never SET_CRC
+    t.setOnWrite((bytes, tr) => {
+      const version = versionReply(bytes[0]);
+      if (version) setTimeout(() => tr.notify(version), 0);
+    });
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
-    await expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow();
+    await expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow(/ACK timeout/);
     await client.disconnect();
 
     const second = new LoopbackTransport();
@@ -318,7 +336,10 @@ describe('Shimmer3R link CRC', () => {
     const t = new LoopbackTransport();
     let mode: 0 | 1 | 2 = 0;
     t.setOnWrite((bytes, tr) => {
-      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+      const version = versionReply(bytes[0]);
+      if (version) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         mode = bytes[1] as 0 | 1 | 2;
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
       }
@@ -369,7 +390,10 @@ describe('Shimmer3R link CRC', () => {
     const t = new LoopbackTransport();
     let mode: 0 | 1 | 2 = 0;
     t.setOnWrite((bytes, tr) => {
-      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+      const version = versionReply(bytes[0]);
+      if (version) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         mode = bytes[1] as 0 | 1 | 2;
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
       }
@@ -430,7 +454,10 @@ describe('a link that drops under us gives up the CRC mode', () => {
           seen.modeAtFirstWrite = client.crcMode;
           first = false;
         }
-        if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+        const version = versionReply(bytes[0]);
+        if (version) {
+          setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode as never)), 0);
+        } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
           mode = bytes[1];
           setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
         }
@@ -500,8 +527,8 @@ describe('switching the CRC width, in either direction', () => {
      keeps passing for the right reason. */
 
   const NACK = OPCODES.NACK_COMMAND_PROCESSED;
-  const FW_VERSION_PAYLOAD = [0x03, 0x00, 0x01, 0x00, 0x0c, 0x00];
-  const FW_VERSION = { fwId: 3, major: 1, minor: 12, patch: 0 };
+  /** GET_VBATT's payload: ADC 0x0A34, charger bits 0x40. Distinct, so a misframed reply shows. */
+  const VBATT_PAYLOAD = [0x34, 0x0a, 0x40];
 
   const LINKS = [
     { name: 'BLE', framed: true },
@@ -534,13 +561,16 @@ describe('switching the CRC width, in either direction', () => {
         const packet = appendCrc(new Uint8Array(msg), device.mode);
         setTimeout(() => tr.notify(packet), 0);
       };
-      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+      const version = versionReply(bytes[0]);
+      if (version) {
+        reply(version);
+      } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         if (device.ignoreSetCrc) return;
         if (device.refuseSetCrc) return reply([NACK]);
         device.mode = bytes[1] as CrcMode;
         reply([ACK]);
-      } else if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        reply([ACK, OPCODES.FW_VERSION_RESPONSE, ...FW_VERSION_PAYLOAD]);
+      } else if (bytes[0] === OPCODES.GET_VBATT_COMMAND) {
+        reply([ACK, OPCODES.INSTREAM_CMD_RESPONSE, OPCODES.VBATT_RESPONSE, ...VBATT_PAYLOAD]);
       }
     });
     return { t, device };
@@ -556,11 +586,19 @@ describe('switching the CRC width, in either direction', () => {
     return { client, t, device };
   }
 
-  /** The command after the switch. A fresh client's first read, so never cached. */
+  /**
+   * The command after the switch: a battery read, which is never cached, so it
+   * always reaches the device. The firmware version, which the hardware run
+   * read here, no longer does: setCrcMode reads and caches it before turning a
+   * CRC on.
+   */
   async function expectNextCommandAnswered(client: Shimmer3RClient, t: LoopbackTransport) {
     const sent = t.writes.length;
-    await expect(client.readFwVersion()).resolves.toEqual(FW_VERSION);
-    expect(t.writes.slice(sent).map((w) => w.bytes[0])).toEqual([OPCODES.GET_FW_VERSION_COMMAND]);
+    await expect(client.getBattery()).resolves.toMatchObject({
+      adcValue: 0x0a34,
+      chargingStatusRaw: 0x40,
+    });
+    expect(t.writes.slice(sent).map((w) => w.bytes[0])).toEqual([OPCODES.GET_VBATT_COMMAND]);
   }
 
   for (const link of LINKS) {

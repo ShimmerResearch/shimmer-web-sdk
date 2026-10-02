@@ -33,6 +33,38 @@ export const FW_SHIMMER3R: FwTuple = [3, 1, 0, 40];
 /** Shimmer3 + SDLog 0.8.68 → relocated offsets but LEGACY 0x1800 addressing. */
 export const FW_LEGACY_SDLOG: FwTuple = [2, 0, 8, 68];
 
+/**
+ * The reply to GET_DEVICE_VERSION or GET_FW_VERSION as one packet,
+ * `[ACK][response]`, or `null` for any other opcode.
+ *
+ * A device that is asked to turn a link CRC on has to answer both, because
+ * `setCrcMode` reads them first and refuses firmware that drops the CRC when
+ * sensing stops. The default, LogAndStream 1.0.40 on a Shimmer3R, keeps it.
+ */
+export function versionReply(
+  op: number,
+  hardwareVersion: number = HW.SHIMMER3R,
+  firmware: FwTuple = FW_SHIMMER3R,
+): number[] | null {
+  if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) {
+    return [ACK, OPCODES.DEVICE_VERSION_RESPONSE, hardwareVersion];
+  }
+  if (op === OPCODES.GET_FW_VERSION_COMMAND) {
+    const [fwId, major, minor, internal] = firmware;
+    return [
+      ACK,
+      OPCODES.FW_VERSION_RESPONSE,
+      fwId & 0xff,
+      (fwId >> 8) & 0xff,
+      major & 0xff,
+      (major >> 8) & 0xff,
+      minor & 0xff,
+      internal & 0xff,
+    ];
+  }
+  return null;
+}
+
 export interface ScriptedFirmwareOptions {
   /** BLE-shaped when true (the default), a byte stream when false. */
   framed?: boolean;
@@ -131,22 +163,12 @@ export async function scriptedFirmware(
 
     switch (b[0]) {
       case OPCODES.GET_DEVICE_VERSION_COMMAND:
-        send([ACK], [OPCODES.DEVICE_VERSION_RESPONSE, hw]);
+      case OPCODES.GET_FW_VERSION_COMMAND: {
+        // The ACK as its own message here, and the response behind it.
+        const [ack, ...rsp] = versionReply(b[0], hw, [fwId, fwMajor, fwMinor, fwInternal])!;
+        send([ack], rsp);
         return;
-      case OPCODES.GET_FW_VERSION_COMMAND:
-        send(
-          [ACK],
-          [
-            OPCODES.FW_VERSION_RESPONSE,
-            fwId & 0xff,
-            (fwId >> 8) & 0xff,
-            fwMajor & 0xff,
-            (fwMajor >> 8) & 0xff,
-            fwMinor & 0xff,
-            fwInternal & 0xff,
-          ],
-        );
-        return;
+      }
       case OPCODES.GET_INFOMEM_COMMAND: {
         const len = b[1];
         const off = pageOffset(b[2] | (b[3] << 8));
