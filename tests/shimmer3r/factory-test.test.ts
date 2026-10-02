@@ -15,6 +15,7 @@ import {
   SHIMMER3_FACTORY_TEST_TYPE,
   SHIMMER3_FACTORY_TEST_TYPES,
 } from '../../src/devices/shimmer3r/factoryTest.js';
+import { versionReply } from './configFirmware.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 const NACK = OPCODES.NACK_COMMAND_PROCESSED;
@@ -172,6 +173,12 @@ describe('runFactoryTest — with the link CRC on', () => {
     let mode = 0;
     t.setOnWrite((raw) => {
       const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // The version reads setCrcMode makes before turning a CRC on.
+      const version = versionReply(cmd[0]);
+      if (version) {
+        setTimeout(() => t.notify(appendCrc(new Uint8Array(version), mode as never)), 0);
+        return;
+      }
       if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
         mode = cmd[1];
         // ACK plus the trailer the new mode implies, in ONE notification.

@@ -5,9 +5,11 @@ import type { ShimmerClientOptions } from '../../core/types.js';
 import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './constants.js';
 import {
   CRC_MODE,
+  SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
   appendCrc,
   crcTrailerBytes,
   isCrcMode,
+  keepsLinkCrcWhenSensingStops,
   verifyCrc,
   type CrcMode,
 } from './crcMode.js';
@@ -299,6 +301,15 @@ const DATA_RATE_TAIL_BYTES = 24;
 function withoutLeadingAck(msg: Uint8Array): Uint8Array {
   return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
 }
+
+/** A firmware version as the release tags spell it, e.g. `v1.00.011`. */
+function firmwareTag(major: number, minor: number, internal: number): string {
+  return `v${major}.${String(minor).padStart(2, '0')}.${String(internal).padStart(3, '0')}`;
+}
+
+/** {@link Shimmer3RClient.setCrcMode}'s refusal while a stream is running. */
+const CRC_CHANGE_MID_STREAM =
+  'Cannot change the CRC mode while streaming: it would move every frame boundary.';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -847,20 +858,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private async _reestablishCrcMode(): Promise<void> {
     if (this._desiredCrcMode === CRC_MODE.OFF) return;
     const want = this._desiredCrcMode;
-    /* The device version first, which the protocol document requires of any
-     * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
-     * §8.2, constraint 3) - and which matters more here than it does for a
-     * host that asks in its own sequence: a CRC turns on the length-aware
-     * framer, and that framer's STATUS_RESPONSE span is 1 byte on a Shimmer3
-     * against 2 on a Shimmer3R. `_deviceVersionCache` is cleared on
-     * disconnect, so on a reconnect this would otherwise frame a Shimmer3's
-     * status one byte too wide. Cached, so it costs a round trip once. */
-    try {
-      await this.readDeviceVersion();
-    } catch {
-      /* Old firmware may not answer. The framer keeps its Shimmer3R default,
-       * which is this client's documented assumption anyway. */
-    }
+    /* setCrcMode reads the device and firmware versions first. Both caches are
+     * cleared on connect, so this link is judged on its own device: one whose
+     * firmware drops the CRC when sensing stops is refused here, reported
+     * below, and the request is kept for the next device. */
     try {
       await this.setCrcMode(want);
     } catch (e) {
@@ -3086,16 +3087,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * It can be turned down or off again on the same link. When the device
    * refuses (a NACK) or does not answer, this throws and the client keeps the
    * width the device last confirmed.
+   *
+   * **Refused on Shimmer3R firmware older than LogAndStream v1.00.011**
+   * ({@link SHIMMER3R_LINK_CRC_MIN_FIRMWARE}), and nothing is sent. Those
+   * releases turn the CRC off by themselves whenever streaming or logging
+   * stops, so the reply after every stop would be lost; see
+   * {@link keepsLinkCrcWhenSensingStops}. To check, turning a CRC on first reads
+   * the device and firmware versions (each cached for the link), and it is
+   * refused as well when the firmware version cannot be read. Turning the CRC
+   * off is never refused and asks nothing first.
    */
   async setCrcMode(mode: CrcMode): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!isCrcMode(mode)) {
       throw new Error(`Invalid CRC mode ${String(mode)} (expected 0, 1 or 2)`);
     }
-    if (this._streaming) {
-      throw new Error(
-        'Cannot change the CRC mode while streaming: it would move every frame boundary.',
-      );
+    if (this._streaming) throw new Error(CRC_CHANGE_MID_STREAM);
+    if (mode !== CRC_MODE.OFF) {
+      await this._assertFirmwareKeepsLinkCrc();
+      // Again: a stream may have started while the versions were being read.
+      if (this._streaming) throw new Error(CRC_CHANGE_MID_STREAM);
     }
     const label = mode === CRC_MODE.OFF ? 'off' : `${mode} byte${mode === 1 ? '' : 's'}`;
     this._emitStatus(`SET_CRC ${label} → waiting for ACK…`);
@@ -3164,6 +3175,54 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._crcMode = mode;
     this._desiredCrcMode = mode;
     this._emitStatus(`Link CRC ${label}`);
+  }
+
+  /**
+   * Throw unless this device's firmware keeps a link CRC once it is on, which
+   * Shimmer3R firmware before {@link SHIMMER3R_LINK_CRC_MIN_FIRMWARE} does not.
+   *
+   * Refusing is the only answer that covers every stop. The client could drop
+   * its own expectation after {@link stopStreaming}, but the device also stops
+   * on its own (the user button and docking end SD logging), and nothing tells
+   * the host that the CRC went with it. See {@link keepsLinkCrcWhenSensingStops}
+   * for the firmware side.
+   */
+  private async _assertFirmwareKeepsLinkCrc(): Promise<void> {
+    /* The device version first, which the protocol document requires of any
+     * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
+     * §8.2, constraint 3). It matters twice over here. A CRC turns on the
+     * length-aware framer, whose STATUS_RESPONSE span is 1 byte on a Shimmer3
+     * against 2 on a Shimmer3R. And Shimmer3 and Shimmer3R version numbers
+     * overlap, so the firmware version below means nothing without it. Both
+     * caches are cleared on connect, so each costs a round trip once per link. */
+    let hardwareVersion: number = HW_ID.SHIMMER_3R;
+    try {
+      hardwareVersion = (await this.readDeviceVersion()).hardwareVersion;
+    } catch {
+      /* Old firmware may not answer. The framer keeps its Shimmer3R default,
+       * which is this client's documented assumption anyway (`generation`), so
+       * the firmware version is judged as a Shimmer3R's too. */
+    }
+    const min = SHIMMER3R_LINK_CRC_MIN_FIRMWARE;
+    const minTag = firmwareTag(min.major, min.minor, min.internal);
+    const fw = await this.readFwVersion().catch((e: unknown) => {
+      /* Refused rather than risked: an unknown version may be one of the
+       * releases that drop the CRC, and on those the cost is the reply after
+       * every stop. */
+      throw new Error(
+        `Cannot turn the link CRC on: the firmware version could not be read ` +
+          `(${(e as Error).message}), and Shimmer3R firmware before LogAndStream ` +
+          `${minTag} turns the CRC off by itself whenever streaming or logging stops.`,
+      );
+    });
+    if (!keepsLinkCrcWhenSensingStops(hardwareVersion, fw)) {
+      throw new Error(
+        `Cannot turn the link CRC on: Shimmer3R LogAndStream ` +
+          `${firmwareTag(fw.major, fw.minor, fw.patch)} turns it off by itself whenever ` +
+          `streaming or logging stops, without telling the host, so the reply after every ` +
+          `stop would be lost. Update to LogAndStream ${minTag} or later to use a CRC.`,
+      );
+    }
   }
 
   /** The CRC width currently in force, as last set by {@link setCrcMode}. */

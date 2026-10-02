@@ -3,6 +3,7 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { CRC_MODE, appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
+import { versionReply } from './configFirmware.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 
@@ -59,7 +60,11 @@ describe('Shimmer3RClient.runDataRateTest', () => {
       const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       // ACKs are CRC'd; the test packets deliberately are not.
       const ack = () => setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
-      if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
+      // The version reads setCrcMode makes before turning a CRC on.
+      const version = versionReply(cmd[0]);
+      if (version) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
         mode = cmd[1] as 0 | 1 | 2;
         ack();
       } else if (cmd[0] === OPCODES.SET_DATA_RATE_TEST && cmd[1] === 1) {
@@ -143,7 +148,11 @@ describe('Shimmer3RClient.runDataRateTest over BLE notifications', () => {
     };
     t.setOnWrite((bytes, tr) => {
       const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      if (cmd[0] === OPCODES.INQUIRY_COMMAND) {
+      // The version reads setCrcMode makes before turning a CRC on.
+      const version = versionReply(cmd[0]);
+      if (version) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (cmd[0] === OPCODES.INQUIRY_COMMAND) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK_B, ...INQUIRY]), mode)), 0);
       } else if (cmd[0] === OPCODES.SET_CRC_COMMAND) {
         mode = cmd[1] as 0 | 1 | 2;
