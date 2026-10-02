@@ -519,6 +519,52 @@ describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream'
     }
   });
 
+  it('when a counter byte of 0xA5 could be misread as a packet start', async () => {
+    /* Review finding, with its own example: counters 0x00FEA50E and 0x00FEA50F,
+       then three bytes of 0x00FEA510 and the ACK. The tail ends
+       `a5 0e a5 fe 00 a5 0f a5 fe 00 a5 10 a5 ff`. Read from the 0xA5 at index
+       7, one "complete packet" predicts 0xFF at the candidate, and that used to
+       reject the ACK before the true alignment, which predicts 0xFE, was
+       tried. */
+    const reply = [...packets(0xfea500, 16), ...pkt(0xfea510).slice(0, 3), ACK_B];
+    const r = await timeTest(device(false, () => reply));
+    expect(r.overMs).toBeLessThan(800);
+    expect(r.fw).toBe('1.1.17');
+  });
+
+  it('reads the packet alignment right whatever bytes the counters carry', () => {
+    /* The parser itself, over counters that put 0xA5 or 0xFF in each counter
+       byte, carry across bytes, or both, every cut, and every CRC mode. With
+       four complete packets before the cut, the ACK must be taken exactly
+       where test data could not have put a 0xFF in its place. Where data
+       could have, data and ACK are the same bytes, so this also checks that
+       data is never taken for the ACK. */
+    const client = new Shimmer3RClient({ debug: false }) as unknown as {
+      _dataRateTestTail: number[];
+      _crcMode: Mode;
+      _dataRateStopAckEndsStream(): boolean;
+    };
+    const bases = [
+      0x3c, 0xa1, 0xa4, 0xa5, 0xfb, 0xfe, 0x1ff, 0xa5fe, 0xa5ff, 0xffa1, 0xfea50c, 0xfea50f,
+      0xa5a5a1, 0xa500fb, 0xa5fffe, 0xfffa5a,
+    ];
+    const wrong: string[] = [];
+    for (const mode of [0, 1, 2] as Mode[]) {
+      client._crcMode = mode;
+      for (const base of bases) {
+        for (let cut = 0; cut <= 4; cut++) {
+          const cutPkt = pkt(base + 4);
+          client._dataRateTestTail = [...packets(base, 4), ...cutPkt.slice(0, cut), ...ack(mode)];
+          const expected = cut === 0 || cutPkt[cut] !== ACK_B;
+          if (client._dataRateStopAckEndsStream() !== expected) {
+            wrong.push(`counter 0x${(base + 4).toString(16)}, cut ${cut}, CRC ${mode}`);
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
   it('on a packet boundary', async () => {
     const r = await timeTest(device(false, () => [...tail, ACK_B]));
     expect(r.overMs).toBeLessThan(800);

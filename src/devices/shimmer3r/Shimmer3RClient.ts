@@ -259,10 +259,10 @@ const DATA_RATE_STOP_ACK_QUIET_MS = 50;
 
 /**
  * Raw bytes kept from the end of a data-rate test stream: the stop's ACK packet
- * (up to 3 bytes with a 2-byte CRC), a cut packet (up to 4) and the complete
- * packet before it (5), with room to spare.
+ * (up to 3 bytes with a 2-byte CRC), a cut packet (up to 4) and the two
+ * complete packets before it (10) that fix the alignment, with room to spare.
  */
-const DATA_RATE_TAIL_BYTES = 16;
+const DATA_RATE_TAIL_BYTES = 24;
 
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
@@ -4479,7 +4479,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * (`a5 ff` is a valid aborted tail), so the candidate `0xFF` has to sit where
    * test data could not have put one. Test packets are `0xA5` followed by a
    * little-endian counter that steps by one per packet. So the last complete
-   * packet predicts every byte of the one after it:
+   * packet predicts every byte of the one after it, once the packet alignment
+   * is known. Two complete packets in sequence fix it. One does not, since
+   * `0xA5` also occurs inside counters, and a packet misread from there can
+   * predict a `0xFF` at the candidate. A misaligned pair cannot step by exactly
+   * one: the counter's low byte, which changes every packet, lands in a higher
+   * byte of the misread value.
    *
    * - **The candidate starts a packet** (the stream ended on a packet boundary).
    *   Only `0xA5` can be data there, so it is the ACK.
@@ -4521,7 +4526,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
         continue;
       }
       const prev = counterAt(before);
-      if (prev === null || t[last] !== TP) continue;
+      const prev2 = counterAt(before - 5);
+      if (prev === null || prev2 === null || prev !== (prev2 + 1) >>> 0 || t[last] !== TP) {
+        continue;
+      }
       const next = (prev + 1) >>> 0;
       let matches = true;
       for (let j = 1; j < cut; j++) {
