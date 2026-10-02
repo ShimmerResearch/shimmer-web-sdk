@@ -1,5 +1,6 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { HandlerSet } from '../../core/handlerSet.js';
+import { LinkGeneration, linkResetError } from '../../core/linkGeneration.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
@@ -178,8 +179,17 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Number of command handlers ({@link _waitForAck} / {@link _waitForResponse})
    * currently awaiting a response. Gates NACK framing in {@link _drainControl}
    * so a stray 0xFE arriving with no command in flight cannot fabricate a NACK.
+   * Like `_awaitInq`, it counts the current link's waiters only.
    */
   private _awaitCmd = 0;
+  /**
+   * Which link the client is on. {@link _resetLinkProtocolState} moves it on
+   * and fails every waiter registered for the old link. An operation captures
+   * `_link.current` before its first write and passes it to each step, so a
+   * drop strands the operation: it neither takes the next link's ACK or reply
+   * nor goes on issuing commands over the next link.
+   */
+  private readonly _link = new LinkGeneration();
 
   // Cached device info from the connect handshake
   deviceVersion: Shimmer3DeviceVersion | null = null;
@@ -329,6 +339,15 @@ export class Shimmer3Client extends BaseShimmerClient {
       );
     }
     this._transport = t;
+    /* Before anything is read over the new link: a command still waiting on
+     * the previous one fails here, rather than take this link's ACK or reply. */
+    this._resetLinkProtocolState();
+    const link = this._link.current;
+    /* And the previous transport's subscriptions go. After a drop nothing else
+     * removes them, and a late notification or disconnect event from that
+     * transport would be taken as this link's. */
+    this._notifyUnsub?.();
+    this._disconnectUnsub?.();
     this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
@@ -341,47 +360,61 @@ export class Shimmer3Client extends BaseShimmerClient {
      * link other than the one it just opened. */
     this._emitStatus(`Connected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
 
-    await this._handshake();
+    await this._handshake(link);
   }
 
-  private async _handshake(): Promise<void> {
+  /** @param link the link {@link connect} opened: every step runs on it alone. */
+  private async _handshake(link: number): Promise<void> {
+    /* The STOP and the dummy read are best effort, so their errors - a link
+     * reset among them - are swallowed. The link is therefore checked before
+     * each buffer flush: a handshake stranded by a drop must not empty the
+     * next link's buffer, nor go on to ask the next device for its versions. */
+    const gone = (): Error => new Error('The link was reset during the connect handshake');
     // 2) Flush the serial buffer with a dummy read (ShimmerBluetooth#dummyReadSamplingRate:
     //    "it actually acts to clear the write buffer"). A best-effort STOP first
     //    ensures a device left streaming from a previous session is quiesced.
     if (this._stopStreamingOnConnect) {
       try {
-        await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]));
+        await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]), link);
       } catch {
         /* ignore */
       }
     }
+    this._link.throwIfReset(link, gone);
     this._rxBuf = new Uint8Array(0);
     this._emitStatus('Flushing RFCOMM buffer (dummy read)…');
     try {
-      await this._write(new Uint8Array([OPCODES.GET_SAMPLING_RATE_COMMAND]));
+      await this._write(new Uint8Array([OPCODES.GET_SAMPLING_RATE_COMMAND]), link);
     } catch {
       /* ignore */
     }
-    await new Promise<void>((r) => setTimeout(r, SHIMMER3_DEFAULTS.DUMMY_READ_DRAIN_MS));
+    // Fails at a reset, rather than flush the next link's buffer once it ends
+    await this._link.run(
+      link,
+      () => new Promise<void>((r) => setTimeout(r, SHIMMER3_DEFAULTS.DUMMY_READ_DRAIN_MS)),
+      gone,
+    );
     this._rxBuf = new Uint8Array(0); // discard whatever the dummy read produced
 
     // 3) HW version. Responses may or may not be ACK-prefixed on classic firmware,
     //    so wait for the response opcode directly (any leading ACK is ignored).
     this._emitStatus('GET_DEVICE_VERSION → waiting for response…');
-    await this._write(new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]));
+    await this._write(new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]), link);
     const verBytes = await this._waitForResponse(
       OPCODES.DEVICE_VERSION_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
     );
     this.deviceVersion = parseShimmer3DeviceVersionResponse(verBytes);
     this._emitStatus(`HW version = ${this.deviceVersion.hardwareVersion}`);
 
     // 4) FW version.
     this._emitStatus('GET_FW_VERSION → waiting for response…');
-    await this._write(new Uint8Array([OPCODES.GET_FW_VERSION_COMMAND]));
+    await this._write(new Uint8Array([OPCODES.GET_FW_VERSION_COMMAND]), link);
     const fwBytes = await this._waitForResponse(
       OPCODES.FW_VERSION_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
     );
     this.firmwareVersion = parseShimmer3FwVersionResponse(fwBytes);
     this._emitStatus(
@@ -408,10 +441,8 @@ export class Shimmer3Client extends BaseShimmerClient {
     } finally {
       this._notifyUnsub = this._disconnectUnsub = null;
       this._transport = null;
-      this._rxBuf = new Uint8Array(0);
+      this._resetLinkProtocolState();
       this.schema = null;
-      this._streaming = false;
-      this._streamStarting = false;
       this.ExpPower = 0;
       this._resetCalibrationState();
       this._timeline.reset();
@@ -419,10 +450,43 @@ export class Shimmer3Client extends BaseShimmerClient {
     }
   }
 
-  /** Handle an unexpected transport disconnect (the link dropped under us). */
-  private _handleTransportDisconnect = (reason?: Error): void => {
+  /**
+   * Protocol state that belongs to ONE link, cleared wherever a link ends or a
+   * new one begins: {@link connect}, {@link disconnect} and
+   * {@link _handleTransportDisconnect}.
+   *
+   * Last, it fails every command still waiting on the old link. Such a command
+   * used to stay registered: every waiter sees every message, so on the next
+   * link it took the first ACK or matching reply as its own, and an operation
+   * stranded part-way - the connect handshake, a stop's drain - went on over
+   * the next link.
+   *
+   * HARDWARE-VERIFY: failing the old link's commands here assumes nothing that
+   * answers them can arrive over the next link, or nothing that the connect
+   * handshake's flush does not discard. Exercised on loopback only; no Shimmer3
+   * has dropped and reconnected under this code.
+   */
+  private _resetLinkProtocolState(): void {
+    this._rxBuf = new Uint8Array(0);
     this._streaming = false;
     this._streamStarting = false;
+    /* A residual drain belongs to the link it began on. Left set, it held back
+     * every byte the next link delivered until that drain gave up. */
+    this._drainingResidual = false;
+    /* The gates count the current link's waiters. One stranded on the old link
+     * kept a stray 0x02 or 0xFE framed on the next; the waiter is failed below,
+     * and does not uncount what the next link has counted. */
+    this._awaitInq = 0;
+    this._awaitCmd = 0;
+    this._link.reset();
+  }
+
+  /** Handle an unexpected transport disconnect (the link dropped under us). */
+  private _handleTransportDisconnect = (reason?: Error): void => {
+    /* The transport itself is left in place: this is a notification, and a
+     * caller may still call disconnect() to tear down. The link's protocol
+     * state goes, and every command still waiting on it fails. */
+    this._resetLinkProtocolState();
     this._emitStatus('Device disconnected');
     this._emitDisconnect(reason);
   };
@@ -489,7 +553,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    * - NACK (0xFE) with no command outstanding is likewise dropped. This diverges
    *   from the Java driver (ShimmerObject processes every 0xFE unconditionally)
    *   but strictly reduces the risk of a leaked stream byte being read as a NACK.
-   *   Defence-in-depth: `_onTemp` handlers are only added while `_awaitCmd > 0`,
+   *   Defence-in-depth: a waiter only listens while it is counted in `_awaitCmd`,
    *   so an ungated stray 0xFE would emit to no listener anyway — this keeps that
    *   invariant explicit and survives refactors that add a longer-lived listener.
    */
@@ -672,8 +736,9 @@ export class Shimmer3Client extends BaseShimmerClient {
   ): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
     this._assertExgSupported();
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
-    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
-    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    const link = this._link.current;
+    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs, link);
+    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs, link);
     /* Cache for the streaming conversion: the millivolt factor needs the PGA
        gain and the reference voltage out of these registers. */
     this._exgBanks = { exg1, exg2 };
@@ -725,9 +790,10 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (this._streaming) throw new Error('Cannot read the real-world clock while streaming');
     this._assertRwcSupported('read');
 
+    const link = this._link.current;
     const hostBeforeMs = Date.now();
-    await this._write(new Uint8Array([OPCODES.GET_RWC_COMMAND]));
-    const rsp = await this._waitForResponse(OPCODES.RWC_RESPONSE, timeoutMs);
+    await this._write(new Uint8Array([OPCODES.GET_RWC_COMMAND]), link);
+    const rsp = await this._waitForResponse(OPCODES.RWC_RESPONSE, timeoutMs, link);
     if (rsp[0] !== OPCODES.RWC_RESPONSE || rsp.length < 9) {
       throw new Error(`Malformed RWC response (${rsp.length} bytes).`);
     }
@@ -866,10 +932,11 @@ export class Shimmer3Client extends BaseShimmerClient {
       },
     ];
 
+    const link = this._link.current;
     for (const attempt of attempts) {
       try {
-        await this._write(new Uint8Array([attempt.cmd]));
-        const frame = await this._waitForResponse(attempt.resp, timeoutMs);
+        await this._write(new Uint8Array([attempt.cmd]), link);
+        const frame = await this._waitForResponse(attempt.resp, timeoutMs, link);
         /* The modern reply is length-prefixed and self-describing; the legacy
            ones are a bare fixed-length block, so the sensor id has to come from
            which command answered. */
@@ -889,6 +956,10 @@ export class Shimmer3Client extends BaseShimmerClient {
         // A blank block means this was the wrong command for the fitted part;
         // keep trying the others rather than settling for it.
       } catch {
+        /* A reset under the read says nothing about the firmware, and the
+           calibration held now, if any, is the next device's: leave both it
+           and the status line alone, and ask the next device nothing. */
+        if (!this._link.isCurrent(link)) return null;
         /* No answer, or an answer that was not what it claimed. Try the next. */
       }
     }
@@ -901,13 +972,17 @@ export class Shimmer3Client extends BaseShimmerClient {
     return null;
   }
 
-  private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
+  private async _readExgChip(
+    chip: ExgChipIndex,
+    timeoutMs: number,
+    link: number,
+  ): Promise<Uint8Array> {
     // GET is ACK-then-response, and _waitForResponse already tolerates the
     // optional ACK prefix (as inquiry() relies on), so register for the response
     // directly instead of awaiting the ACK first — no race if the device
     // coalesces the two into one RFCOMM chunk.
-    await this._write(buildGetExgRegsCommand(chip));
-    const frame = await this._waitForResponse(OPCODES.EXG_REGS_RESPONSE, timeoutMs);
+    await this._write(buildGetExgRegsCommand(chip), link);
+    const frame = await this._waitForResponse(OPCODES.EXG_REGS_RESPONSE, timeoutMs, link);
     return decodeExgRegsResponse(frame);
   }
 
@@ -936,13 +1011,17 @@ export class Shimmer3Client extends BaseShimmerClient {
 
     const b1 = new Uint8Array(exg1);
     const b2 = new Uint8Array(exg2);
+    // Both banks on one link: chip 2's must not go to whatever replaced it
+    const link = this._link.current;
     await this._writeExpectingAck(
       buildSetExgRegsCommand(EXG_CHIP1, b1),
       SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+      link,
     );
     await this._writeExpectingAck(
       buildSetExgRegsCommand(EXG_CHIP2, b2),
       SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+      link,
     );
 
     const readBack = await this.readExgConfig();
@@ -1020,10 +1099,12 @@ export class Shimmer3Client extends BaseShimmerClient {
   async inquiry(): Promise<Shimmer3InquiryResult> {
     if (!this._transport) throw new Error('Not connected');
     this._emitStatus('INQUIRY → waiting for response…');
-    await this._write(new Uint8Array([OPCODES.INQUIRY_COMMAND]));
+    const link = this._link.current;
+    await this._write(new Uint8Array([OPCODES.INQUIRY_COMMAND]), link);
     const rsp = await this._waitForResponse(
       OPCODES.INQUIRY_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
     );
     // A channel ID this SDK cannot describe has to reach the host, not just the
     // schema: its width was guessed, so every later channel in the frame may be
@@ -1114,10 +1195,12 @@ export class Shimmer3Client extends BaseShimmerClient {
       offset & 0xff,
       (offset >> 8) & 0xff,
     ]);
-    await this._write(cmd);
+    const link = this._link.current;
+    await this._write(cmd, link);
     const rsp = await this._waitForResponse(
       OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
     );
 
     /* Response is [DAUGHTER_CARD_MEM_RSP][length][data...]; the opcode and
@@ -1170,10 +1253,12 @@ export class Shimmer3Client extends BaseShimmerClient {
       address & 0xff,
       (address >> 8) & 0xff,
     ]);
-    await this._write(cmd);
+    const link = this._link.current;
+    await this._write(cmd, link);
     const rsp = await this._waitForResponse(
       OPCODES.INFOMEM_RESPONSE,
       SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
     );
 
     /* Response is [INFOMEM_RSP][length][data...]; the opcode and length bytes
@@ -1263,16 +1348,20 @@ export class Shimmer3Client extends BaseShimmerClient {
     if (!this._transport) throw new Error('Not connected');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
+    const link = this._link.current;
     // Stale buffered bytes (e.g. residual post-stop stream data) would desync
     // the ACK wait for START — drain to quiescence and discard them first. A
     // clean state (empty buffer) skips this entirely.
     if (this._rxBuf.length > 0) {
       this._drainingResidual = true;
       try {
-        await this._drainQuiescent(300, 2000);
+        await this._drainQuiescent(300, 2000, link);
       } finally {
-        this._drainingResidual = false;
+        // Not across a link reset, which has cleared it: the flag is the next link's now
+        if (this._link.isCurrent(link)) this._drainingResidual = false;
       }
+      // Nor go on to discard the next link's bytes and start its stream
+      this._link.throwIfReset(link, () => linkResetError('the residual stream to drain'));
       this._log('start: discarded', this._rxBuf.length, 'stale byte(s) pre-START');
       this._rxBuf = new Uint8Array(0);
     }
@@ -1283,9 +1372,11 @@ export class Shimmer3Client extends BaseShimmerClient {
       await this._writeExpectingAck(
         new Uint8Array([OPCODES.START_STREAMING_COMMAND]),
         SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+        link,
       );
     } catch (e) {
-      this._streamStarting = false;
+      // Not across a link reset, which has cleared it: it is the next link's now
+      if (this._link.isCurrent(link)) this._streamStarting = false;
       throw e;
     }
     this._streaming = true;
@@ -1297,8 +1388,9 @@ export class Shimmer3Client extends BaseShimmerClient {
 
   override async stopStreaming(): Promise<void> {
     this._emitStatus('STOP_STREAMING → sending, then draining residual stream…');
+    const link = this._link.current;
     try {
-      await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]));
+      await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]), link);
     } catch (err: unknown) {
       this._emitStatus(`STOP_STREAMING write failed: ${(err as Error).message}`);
     }
@@ -1309,13 +1401,19 @@ export class Shimmer3Client extends BaseShimmerClient {
     // draining (or accumulate-only if we weren't in streaming mode — e.g.
     // quiescing a device left streaming unattended), and only re-enable the
     // control plane once the pipe has been quiet for ~300 ms.
+    //
+    // None of it once the link has been reset, before the drain or during it:
+    // the reset has already left the stream and emptied the buffer, and what
+    // arrives from then on is the next link's to parse.
+    if (!this._link.isCurrent(link)) return;
     this._streamStarting = false;
     if (!this._streaming) this._drainingResidual = true;
     try {
-      await this._drainQuiescent(300, 3000);
+      await this._drainQuiescent(300, 3000, link);
     } finally {
-      this._drainingResidual = false;
+      if (this._link.isCurrent(link)) this._drainingResidual = false;
     }
+    if (!this._link.isCurrent(link)) return;
     if (this._rxBuf.length) {
       this._log('stop drain: discarding', this._rxBuf.length, 'residual byte(s)');
     }
@@ -1326,7 +1424,9 @@ export class Shimmer3Client extends BaseShimmerClient {
 
   /**
    * Resolve once no bytes have arrived for `quietMs` (checked every 50 ms via
-   * the `_rxSeq` counter bumped in {@link _handleNotify}), or `maxMs` overall.
+   * the `_rxSeq` counter bumped in {@link _handleNotify}), or `maxMs` overall,
+   * or once `link` has been reset: the bytes arriving after that are the next
+   * link's, and they would keep a drain of the old one going.
    *
    * HEURISTIC (hardware QA, please probe): the Shimmer3 streaming protocol has
    * no end-of-stream handshake — STOP_STREAMING is ACKed but the firmware does
@@ -1336,12 +1436,13 @@ export class Shimmer3Client extends BaseShimmerClient {
    * frame leaks into the next command's control parsing; too long and stop()
    * stalls. Values may need adjusting against real BT latency/buffering.
    */
-  private async _drainQuiescent(quietMs: number, maxMs: number): Promise<void> {
+  private async _drainQuiescent(quietMs: number, maxMs: number, link: number): Promise<void> {
     const start = Date.now();
     let lastSeq = this._rxSeq;
     let quietSince = Date.now();
     for (;;) {
       await new Promise<void>((r) => setTimeout(r, 50));
+      if (!this._link.isCurrent(link)) return;
       if (this._rxSeq !== lastSeq) {
         lastSeq = this._rxSeq;
         quietSince = Date.now();
@@ -1592,10 +1693,11 @@ export class Shimmer3Client extends BaseShimmerClient {
       },
     ];
     const done: InertialGroup[] = [];
+    const link = this._link.current;
     for (const { group, get, resp } of plan) {
       try {
-        await this._write(new Uint8Array([get]));
-        const rsp = await this._waitForResponse(resp, timeoutMs);
+        await this._write(new Uint8Array([get]), link);
+        const rsp = await this._waitForResponse(resp, timeoutMs, link);
         if (rsp.length < 22) continue; // opcode + 21-byte block
         const scale = getGroupDefaults(this._imuFamily, group)?.sensitivityScale ?? 1;
         const cal = parseKinematicCalibBlock(rsp.subarray(1, 22), { sensitivityScale: scale });
@@ -1615,29 +1717,60 @@ export class Shimmer3Client extends BaseShimmerClient {
   // Low-level transport + ACK/response helpers
   // ---------------------------------------------------------------------------
 
-  private async _write(u8: Uint8Array): Promise<void> {
-    if (!this._transport) throw new Error('Not connected');
-    this._log('Write', u8);
-    await this._transport.write(u8);
+  /**
+   * Write `u8` over the link `link`, the one the calling operation began on.
+   * Refused once that link has been reset, and failed at the reset if the
+   * transport is still holding the write then. Writing through
+   * `this._transport` regardless let an operation stranded by a drop go on
+   * over the next link, and a held write's failure ran its caller's cleanup
+   * against that link once the old transport let go.
+   */
+  private _write(u8: Uint8Array, link: number): Promise<void> {
+    return this._link.run(
+      link,
+      async () => {
+        if (!this._transport) throw new Error('Not connected');
+        this._log('Write', u8);
+        await this._transport.write(u8);
+      },
+      () => new Error('The link was reset while the command was being sent'),
+    );
   }
 
-  private async _writeExpectingAck(u8: Uint8Array, ackTimeoutMs: number): Promise<void> {
-    await this._write(u8);
-    await this._waitForAck(ackTimeoutMs);
+  /**
+   * @param link the link the operation began on. The default, the link now in
+   *   place, suits only an operation's first step: a later step passes the link
+   *   its operation captured before its first await.
+   */
+  private async _writeExpectingAck(
+    u8: Uint8Array,
+    ackTimeoutMs: number,
+    link = this._link.current,
+  ): Promise<void> {
+    await this._write(u8, link);
+    await this._waitForAck(ackTimeoutMs, link);
   }
 
-  /** Resolve on the next ACK control message; reject on NACK or timeout. */
-  private _waitForAck(timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  /**
+   * Resolve on the next ACK control message; reject on NACK, on timeout, or
+   * when `link` is reset.
+   *
+   * @param link the link the command was written on, from the caller: read
+   *   here instead, after an awaited write, it could already be the next link's.
+   */
+  private _waitForAck(timeoutMs: number, link: number): Promise<void> {
+    const settled = new Promise<void>((resolve, reject) => {
       // Mark a command in flight so _drainControl frames NACK (0xFE) only while
-      // this window is open; balanced on every settle path below.
-      this._awaitCmd += 1;
+      // this window is open; balanced on every settle path below. Counted on
+      // its own link only: a reset zeroes the count, and a waiter it fails must
+      // not then uncount the next link's commands.
+      if (this._link.isCurrent(link)) this._awaitCmd += 1;
       const settle = (): void => {
-        this._awaitCmd = Math.max(0, this._awaitCmd - 1);
+        if (this._link.isCurrent(link)) this._awaitCmd = Math.max(0, this._awaitCmd - 1);
       };
       const t = setTimeout(() => {
         settle();
-        this._offTemp(handler);
+        off();
         reject(new Error('ACK timeout'));
       }, timeoutMs);
       const handler = (msg: Uint8Array): void => {
@@ -1645,32 +1778,50 @@ export class Shimmer3Client extends BaseShimmerClient {
         if (msg[0] === ACK) {
           clearTimeout(t);
           settle();
-          this._offTemp(handler);
+          off();
           resolve();
         } else if (msg[0] === NACK) {
           clearTimeout(t);
           settle();
-          this._offTemp(handler);
+          off();
           reject(new Error('NACK received'));
         }
       };
-      this._onTemp(handler);
+      /* Bound to its link. Every waiter sees every message, so one left over
+       * from a dropped link took the next link's first ACK as its own. */
+      const off = this._link.listen(this._temps, link, handler, () => {
+        clearTimeout(t);
+        settle();
+        reject(linkResetError('the ACK'));
+      });
     });
+    return this._link.settled(settled, link, () => linkResetError('the ACK'));
   }
 
   /**
    * Resolve on the next control message whose opcode matches `expectedOpcode`.
    * Leading ACKs are ignored (classic firmware may or may not ACK-prefix a
-   * response); a NACK rejects.
+   * response); a NACK rejects, and so does a reset of `link`.
+   *
+   * @param link as for {@link _waitForAck}: read before the command's write.
    */
-  private _waitForResponse(expectedOpcode: number, timeoutMs: number): Promise<Uint8Array> {
-    return new Promise<Uint8Array>((resolve, reject) => {
+  private _waitForResponse(
+    expectedOpcode: number,
+    timeoutMs: number,
+    link: number,
+  ): Promise<Uint8Array> {
+    const what = `the response (opcode 0x${expectedOpcode.toString(16)})`;
+    const settled = new Promise<Uint8Array>((resolve, reject) => {
       // Track that an INQUIRY_RESPONSE is genuinely awaited so _drainControl
       // only frames 0x02 while this window is open. _awaitCmd (bumped for every
-      // command) gates NACK framing the same way.
-      if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) this._awaitInq += 1;
-      this._awaitCmd += 1;
+      // command) gates NACK framing the same way. Both on this link only, as in
+      // _waitForAck.
+      if (this._link.isCurrent(link)) {
+        if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) this._awaitInq += 1;
+        this._awaitCmd += 1;
+      }
       const settleInq = (): void => {
+        if (!this._link.isCurrent(link)) return;
         if (expectedOpcode === OPCODES.INQUIRY_RESPONSE) {
           this._awaitInq = Math.max(0, this._awaitInq - 1);
         }
@@ -1678,7 +1829,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       };
       const t = setTimeout(() => {
         settleInq();
-        this._offTemp(handler);
+        off();
         reject(new Error(`Response timeout (opcode 0x${expectedOpcode.toString(16)})`));
       }, timeoutMs);
       const handler = (msg: Uint8Array): void => {
@@ -1687,27 +1838,27 @@ export class Shimmer3Client extends BaseShimmerClient {
         if (msg[0] === NACK) {
           clearTimeout(t);
           settleInq();
-          this._offTemp(handler);
+          off();
           reject(new Error('NACK received'));
           return;
         }
         if (msg[0] === expectedOpcode) {
           clearTimeout(t);
           settleInq();
-          this._offTemp(handler);
+          off();
           resolve(msg);
         }
       };
-      this._onTemp(handler);
+      // Bound to its link, as in _waitForAck
+      const off = this._link.listen(this._temps, link, handler, () => {
+        clearTimeout(t);
+        settleInq();
+        reject(linkResetError(what));
+      });
     });
+    return this._link.settled(settled, link, () => linkResetError(what));
   }
 
-  private _onTemp(fn: (chunk: Uint8Array) => void): void {
-    this._temps.add(fn);
-  }
-  private _offTemp(fn: (chunk: Uint8Array) => void): void {
-    this._temps.delete(fn);
-  }
   private _emitTemp(buf: Uint8Array): void {
     this._temps.emit(buf);
   }
