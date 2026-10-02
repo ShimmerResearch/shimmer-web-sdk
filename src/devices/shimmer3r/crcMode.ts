@@ -44,8 +44,8 @@ export const CRC_MODE = Object.freeze({
    * (`ShimBt_btCommsProtocolInit`, `Comms/shimmer_bt_uart.c:114`) and again on
    * every disconnect (`ShimBt_handleBtRfCommStateChange`, `:2624`), on both
    * platforms. Every Shimmer3R release does this, and every Shimmer3 release
-   * from LogAndStream v0.15.000, so there a CRC never outlives the connection
-   * it was set on, and a host that wants one asks again on the next.
+   * from LogAndStream v0.15.000, so on those releases a CRC never outlives the
+   * connection it was set on, and a host that wants one asks again on the next.
    *
    * Two cases can still start a link with a CRC on, and a host cannot tell them
    * from the usual one because the mode cannot be read back:

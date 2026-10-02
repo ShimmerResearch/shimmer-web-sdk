@@ -436,8 +436,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Kept across a disconnect precisely because the device does not keep it: a
    * host that asked for a CRC once means it for the next link too, and the
    * firmware clears its own mode on every disconnect
-   * (`Comms/shimmer_bt_uart.c:2624`). {@link _crcMode} tracks what the device is
-   * actually doing; this tracks what was asked for.
+   * (`Comms/shimmer_bt_uart.c:2624`), apart from the exceptions listed under
+   * `CRC_MODE.OFF`. {@link _crcMode} tracks what the device is actually doing;
+   * this tracks what was asked for.
    */
   private _desiredCrcMode: CrcMode = CRC_MODE.OFF;
   /** True while the active transport is a byte stream with no message framing. */
@@ -2963,8 +2964,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * readers here, which parse by opcode and declared length rather than by
    * total length, so it is safe to leave on — but it is off by default, and
    * the firmware turns it off again on every disconnect
-   * (`Comms/shimmer_bt_uart.c:2624`). A CRC this call turned on is asked for
-   * again on each later {@link connect}.
+   * (`Comms/shimmer_bt_uart.c:2624`), apart from the exceptions listed under
+   * `CRC_MODE.OFF`. A CRC this call turned on is asked for again on each later
+   * {@link connect}.
    *
    * It can be turned down or off again on the same link. When the device
    * refuses (a NACK) or does not answer, this throws and the client keeps the
