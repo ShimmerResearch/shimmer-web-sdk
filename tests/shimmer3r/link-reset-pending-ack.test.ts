@@ -101,4 +101,175 @@ describe('a command pending when the link drops', () => {
     expect(await stranded).toMatch(/link was reset/);
     expect(expectingAck(client)).toBe(0);
   });
+
+  /* The same rule for every reply waiter on the temp plane, raised in review:
+     a stranded operation must not accept a reply from a later connection. */
+  const STATUS = [OPCODES.INSTREAM_CMD_RESPONSE, OPCODES.STATUS_RESPONSE, 0x24, 0x01];
+  const infomem = (n: number): number[] => [
+    OPCODES.INFOMEM_RESPONSE,
+    n,
+    ...Array.from({ length: n }, (_, k) => 0x40 + k),
+  ];
+  /** A device that answers status and InfoMem reads in full, each reply in a
+   *  notification of its own after the ACK's, as BLE can deliver them. (A reply
+   *  packed in behind the ACK goes to the ACK's own waiter alone, so a split
+   *  reply is the case in which a stranded waiter sees all of it.) */
+  function fullDevice(): LoopbackTransport {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const reply =
+        cmd[0] === OPCODES.GET_STATUS_COMMAND
+          ? STATUS
+          : cmd[0] === OPCODES.GET_INFOMEM_COMMAND
+            ? infomem(cmd[1])
+            : cmd[0] === OPCODES.GET_FW_VERSION_COMMAND
+              ? FW
+              : [];
+      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
+      if (reply.length) setTimeout(() => tr.notify(new Uint8Array(reply)), 0);
+    });
+    return t;
+  }
+
+  it("a status read waiting for its instream reply does not take the next link's", async () => {
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      // ACK only: the instream reply never comes on this link
+      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const stranded = client.getStatus().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    first.emitDisconnect(new Error('dropped'));
+
+    await client.connect(fullDevice());
+    await client.getStatus();
+    expect(await stranded).toMatch(/link was reset/);
+  });
+
+  it('an InfoMem read with half its reply does not take the rest from the next link', async () => {
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      // the opcode, length and 4 of the bytes asked for, then nothing
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...infomem(cmd[1]).slice(0, 6)])), 0);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const stranded = client.readInfoMem(0, 16).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    first.emitDisconnect(new Error('dropped'));
+
+    await client.connect(fullDevice());
+    const data = await client.readInfoMem(0, 16);
+    expect(Array.from(data)).toEqual(infomem(16).slice(2));
+    expect(await stranded).toMatch(/link was reset/);
+  });
+
+  it('an SD command fails at the reset rather than refusing new SD commands until it times out', async () => {
+    const client = new Shimmer3RClient({ debug: false });
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      } else {
+        setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no SD reply
+      }
+    });
+    await client.connect(first);
+    const started = client.sdListDir('data').then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(50); // the listing has been asked for and is awaited
+    const droppedAt = Date.now();
+    first.emitDisconnect(new Error('dropped'));
+    expect(await started).toMatch(/link was reset/);
+    expect(Date.now() - droppedAt).toBeLessThan(1000); // not its 5 s timeout
+    expect((client as unknown as { _sdExpect: unknown })._sdExpect).toBeNull();
+  });
+
+  it('an SD file read fails at the reset rather than waiting out its stall timer', async () => {
+    const client = new Shimmer3RClient({ debug: false });
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      } else {
+        setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no data frames
+      }
+    });
+    await client.connect(first);
+    const reading = client.sdReadFileWindow('data/f.bin', 0, 4096).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(50); // the window has been asked for and is awaited
+    const droppedAt = Date.now();
+    first.emitDisconnect(new Error('dropped'));
+    expect(await reading).toMatch(/link was reset/);
+    expect(Date.now() - droppedAt).toBeLessThan(1000); // not its 6 s stall timer
+    expect((client as unknown as { _sdFrameListener: unknown })._sdFrameListener).toBeNull();
+  });
+
+  it("a status read stranded on the old link does not hide the next link's status pushes", async () => {
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no reply
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    const pushes: unknown[] = [];
+    client.onDeviceStatus = (s) => pushes.push(s);
+    await client.connect(first);
+    const stranded = client.getStatus().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    first.emitDisconnect(new Error('dropped'));
+
+    const second = fullDevice();
+    await client.connect(second);
+    second.notify(new Uint8Array(STATUS)); // unsolicited, as on docking
+    expect(pushes).toHaveLength(1);
+    expect(await stranded).toMatch(/link was reset/);
+  });
+});
+
+describe('the transport of a link that dropped', () => {
+  it('has its late traffic and disconnect ignored on the next link', async () => {
+    const first = device(answersAll);
+    const client = new Shimmer3RClient({ debug: false });
+    let drops = 0;
+    client.onDisconnect = () => drops++;
+    await client.connect(first);
+    first.emitDisconnect(new Error('dropped'));
+
+    const second = new LoopbackTransport();
+    second.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 30);
+      }
+    });
+    await client.connect(second);
+    const v = client.readFwVersion();
+    await tick(5);
+    // A reply the old link's transport delivers late, from a different firmware
+    first.notify(new Uint8Array([ACK, OPCODES.FW_VERSION_RESPONSE, 3, 0, 9, 0, 9, 0]));
+    const got = await v;
+    expect(`${got.major}.${got.minor}.${got.patch}`).toBe('1.1.17');
+
+    first.emitDisconnect(new Error('late'));
+    expect(drops).toBe(1);
+  });
 });
