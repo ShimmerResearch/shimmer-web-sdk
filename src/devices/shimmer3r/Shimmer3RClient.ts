@@ -389,6 +389,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _crcMode: CrcMode = CRC_MODE.OFF;
 
+  /**
+   * True while {@link runDataRateTest} owns the link. Every received chunk then
+   * goes to the test's byte counter and nowhere else, except an ACK that a
+   * command is waiting for, which still takes the normal path so the start and
+   * stop ACKs are recognised.
+   *
+   * Without this, a framed transport (BLE) delivered the test stream exactly as
+   * the module cut it into notifications, and since the counter's high bytes
+   * are 0x00 most notifications started with the DATA_PACKET opcode. Once a
+   * stream schema existed they were handed to the stream aligner: it flooded
+   * "Frame timing does not match" (about 130 times in a 5 s test on the bench)
+   * and could deliver test bytes to onStreamFrame as samples. A reframed link -
+   * classic, or BLE with a link CRC on - was never affected, because there the
+   * framer hands over whole 0xA5 test packets.
+   */
+  private _dataRateTestActive = false;
+
   /** Candidate alignments the timestamp check has rejected since the last lock. */
   private _streamAlignRejects = 0;
 
@@ -923,6 +940,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _handleFramedChunk = (chunk: Uint8Array): void => {
     this._log('Notify len=', chunk.length, 'data=', chunk);
+
+    // A data-rate test owns the link: see _dataRateTestActive.
+    if (
+      this._dataRateTestActive &&
+      !(chunk[0] === OPCODES.ACK_COMMAND_PROCESSED && (this._expectingAck ?? 0) > 0)
+    ) {
+      this._emitTemp(chunk);
+      return;
+    }
 
     /* Check and strip the packet's CRC before anything above sees the message.
      * One place, because every whole control message arrives here - from the
@@ -4056,6 +4082,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (counting) bytes += chunk.length;
     };
     this._onTemp(counter);
+    // Before the start command: bytes a previous test left behind (a classic
+    // link can hold its last chunk until the host next sends) must not reach
+    // the stream parser either.
+    this._dataRateTestActive = true;
     try {
       await this._writeExpectingAck(new Uint8Array([OPCODES.SET_DATA_RATE_TEST, 1]), 2000);
       const startedAt = Date.now();
@@ -4080,10 +4110,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
       } catch {
         /* the stop ACK can be indistinguishable from residual test bytes */
       }
-      // Drop any test bytes that were mistaken for stream data, or that are
-      // still sitting in the re-framing accumulator on an unframed transport.
+      // Drop any test bytes still sitting in the re-framing accumulator on an
+      // unframed transport, then hand the link back.
       this._rxBuf = new Uint8Array(0);
       this._ctrlBuf = new Uint8Array(0);
+      this._dataRateTestActive = false;
     }
   }
 
