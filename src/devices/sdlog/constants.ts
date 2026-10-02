@@ -112,3 +112,33 @@ export const SDLOG_EXP_BRD_ID = Object.freeze({
   GSR_UNIFIED: 48,
   BR_AMP_UNIFIED: 49,
 } as const);
+
+/**
+ * SD header byte 224, `SDH_PRESSURE_SENSOR_ID` (log-and-stream-common
+ * `SDCard/shimmer_sd_header.h`; DEV-1123): the pressure part the firmware
+ * found. Bits 0-6 are the sensor id, numbered as the 0xA7 reply's
+ * (`PRESSURE_SENSOR_ID`); bit 7 means the id was inferred from the board's SR
+ * number because the chip-id check was inconclusive. The firmware pre-fills
+ * the header with 0xFF, so older files read `NOT_RECORDED` here.
+ */
+export const SDLOG_PRESSURE_SENSOR_ID = Object.freeze({
+  OFFSET: 224,
+  ID_MASK: 0x7f,
+  INFERRED_BIT: 0x80,
+  /** No pressure sensor fitted (Shimmer3 only). */
+  NONE: 0xfe,
+  /** Not recorded: the firmware predates the field. */
+  NOT_RECORDED: 0xff,
+} as const);
+
+/**
+ * First LogAndStream version that writes {@link SDLOG_PRESSURE_SENSOR_ID},
+ * per hardware id. Shimmer3 and Shimmer3R version numbers overlap, so the
+ * gate has to know which hardware it is looking at.
+ */
+export const SDLOG_PRESSURE_SENSOR_ID_MIN_FIRMWARE: Readonly<
+  Record<number, { major: number; minor: number; internal: number }>
+> = Object.freeze({
+  [SDLOG_HW_ID.SHIMMER_3]: Object.freeze({ major: 1, minor: 1, internal: 6 }),
+  [SDLOG_HW_ID.SHIMMER_3R]: Object.freeze({ major: 1, minor: 1, internal: 18 }),
+});

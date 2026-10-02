@@ -40,6 +40,12 @@ export interface HeaderFixtureOptions {
   exg1?: number[];
   /** ADS1292R chip-2 register bank → SD header bytes 66-75. */
   exg2?: number[];
+  /**
+   * Pressure sensor id → SD header byte 224 (DEV-1123). Defaults to 0xFF, the
+   * firmware's pre-fill ("not recorded"): a zero-filled byte would read as a
+   * BMP180 on firmware new enough to trust it.
+   */
+  pressureSensorId?: number;
 }
 
 /** Build a modern Shimmer3 (256 B) or Shimmer3R (384 B) SD-log header. */
@@ -108,6 +114,7 @@ export function buildSdLogHeader(opts: HeaderFixtureOptions = {}): Uint8Array {
   for (let off = 76; off < 182; off++) b[off] = fill(off);
   b[222] = fill(222);
   b[223] = fill(223);
+  b[224] = opts.pressureSensorId ?? 0xff;
 
   if (opts.expansionBoard) {
     b[214] = opts.expansionBoard[0];

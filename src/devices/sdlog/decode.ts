@@ -62,13 +62,16 @@ interface Bmp581Indices {
 }
 
 /**
- * Locate the BMP581 pair, or null when the file has neither channel — which is
- * every file whose board the SR rule gives a BMP390, because only
- * `buildShimmer3RSdLogChannels` names these.
+ * Locate the calibrated BMP581 pair, or null when the file has neither channel
+ * — which is every file not decided as a Shimmer3R BMP581, because only
+ * `buildShimmer3RSdLogChannels` emits these calibrated. Every other pressure
+ * pair, including an unknown part's or one the header says is not fitted
+ * (DEV-1123), stays raw.
  */
 function findBmp581(channels: SdLogChannelSpec[]): Bmp581Indices | null {
-  const pressure = channels.findIndex((c) => c.name === SDLOG_BMP581_PRESSURE_NAME);
-  const temperature = channels.findIndex((c) => c.name === SDLOG_BMP581_TEMPERATURE_NAME);
+  const find = (name: string): number => channels.findIndex((c) => c.name === name && c.calibrated);
+  const pressure = find(SDLOG_BMP581_PRESSURE_NAME);
+  const temperature = find(SDLOG_BMP581_TEMPERATURE_NAME);
   return pressure < 0 && temperature < 0 ? null : { pressure, temperature };
 }
 

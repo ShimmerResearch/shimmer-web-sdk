@@ -2,12 +2,13 @@
  * Which pressure part a Shimmer3R carries, when the sensor will not say.
  *
  * The in-band answer is the 0xA7 reply's sensor id (see `./types.ts`), but two
- * places have no such reply to read. An SD-log file carries no sensor id at
- * all — for a BMP581 the firmware simply leaves the header's calibration
- * region unwritten (`SDCard/shimmer_sd_header.c:209-215`) — and a
- * LogAndStream_Shimmer3R v1.01.006 NACKs 0xA7 on a BMP581. Both fall back to
- * the rule the firmware itself uses when the chip id cannot be read: the
- * board's SR number.
+ * places have no such reply to read. An SD-log file from before
+ * LogAndStream_Shimmer3R v1.01.018 carries no sensor id at all — for a BMP581
+ * the firmware simply leaves the header's calibration region unwritten
+ * (`SDCard/shimmer_sd_header.c:209-215`); later files record it in header byte
+ * 224 (DEV-1123, `sdlog/header.ts`) — and a LogAndStream_Shimmer3R v1.01.006
+ * NACKs 0xA7 on a BMP581. Both fall back to the rule the firmware itself uses
+ * when the chip id cannot be read: the board's SR number.
  */
 
 import { FW_ID, HW_ID } from '../infomem/layout.js';

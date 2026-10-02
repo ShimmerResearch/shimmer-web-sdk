@@ -886,6 +886,7 @@ export type {
   SdLogExpansionBoard,
   SdLogImuRanges,
   SdLogChannelCalibrationInfo,
+  SdLogPressureSensor,
   SdLogDataType,
   SdLogChannelSpec,
   SdLogDecodeOptions,
