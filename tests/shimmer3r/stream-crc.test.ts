@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
-import { CRC_MODE } from '../../src/devices/shimmer3r/crcMode.js';
+import { CRC_MODE, crcTrailerBytes, type CrcMode } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
 import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
@@ -476,5 +476,164 @@ describe('a link that drops under us gives up the CRC mode', () => {
 
     first.t.emitDisconnect();
     expect(buf()).toHaveLength(0);
+  });
+});
+
+describe('switching the CRC width, in either direction', () => {
+  /* The firmware applies SET_CRC while processing its argument
+     (`Comms/shimmer_bt_uart.c:942-946`) and appends the CRC when the reply goes
+     out, from whatever mode is current by then (`:2422-2426`). So the ACK is
+     framed in the NEW mode. A refused command never reaches the switch, so its
+     NACK is framed in the OLD one.
+
+     Turning the CRC off used to lose that ACK. The client was still framing
+     for the old, longer trailer and waited for bytes the ACK never had, so
+     setCrcMode timed out with the device already switched and the client not:
+     every command after it timed out too, until a reconnect. Found on a
+     Shimmer3R over classic SPP, where setCrcMode(2) then setCrcMode(0) failed
+     with "ACK timeout" and readFwVersion after it failed the same way.
+
+     Two bytes to one survived, but only by luck: the ACK's one-byte CRC is
+     0xF4, which is not an opcode the framer knows, so it fell back to a bare
+     ACK. That case passes with or without the fix, and is here so that it
+     keeps passing for the right reason. */
+
+  const NACK = OPCODES.NACK_COMMAND_PROCESSED;
+  const FW_VERSION_PAYLOAD = [0x03, 0x00, 0x01, 0x00, 0x0c, 0x00];
+  const FW_VERSION = { fwId: 3, major: 1, minor: 12, patch: 0 };
+
+  const LINKS = [
+    { name: 'BLE', framed: true },
+    { name: 'classic SPP', framed: false },
+  ] as const;
+  type Link = (typeof LINKS)[number];
+
+  const SWITCHES: ReadonlyArray<readonly [CrcMode, CrcMode]> = [
+    [CRC_MODE.OFF, CRC_MODE.ONE_BYTE],
+    [CRC_MODE.OFF, CRC_MODE.TWO_BYTE],
+    [CRC_MODE.ONE_BYTE, CRC_MODE.TWO_BYTE],
+    [CRC_MODE.TWO_BYTE, CRC_MODE.ONE_BYTE],
+    [CRC_MODE.ONE_BYTE, CRC_MODE.OFF],
+    [CRC_MODE.TWO_BYTE, CRC_MODE.OFF],
+  ];
+  const SHORTER = SWITCHES.filter(([from, to]) => crcTrailerBytes(to) < crcTrailerBytes(from));
+  const label = (m: CrcMode): string => ['off', '1 byte', '2 bytes'][m];
+
+  /**
+   * A device that frames every reply in its current CRC mode, as the firmware
+   * does. `refuseSetCrc` NACKs the command and keeps the mode, and
+   * `ignoreSetCrc` drops it as if it never arrived.
+   */
+  function crcDevice(link: Link) {
+    const device = { mode: CRC_MODE.OFF as CrcMode, refuseSetCrc: false, ignoreSetCrc: false };
+    const t = new LoopbackTransport({ capabilities: { framed: link.framed } });
+    t.setOnWrite((bytes, tr) => {
+      const reply = (msg: number[]): void => {
+        // Composed now, in the mode the reply is sent in; delivered as one read.
+        const packet = appendCrc(new Uint8Array(msg), device.mode);
+        setTimeout(() => tr.notify(packet), 0);
+      };
+      if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
+        if (device.ignoreSetCrc) return;
+        if (device.refuseSetCrc) return reply([NACK]);
+        device.mode = bytes[1] as CrcMode;
+        reply([ACK]);
+      } else if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        reply([ACK, OPCODES.FW_VERSION_RESPONSE, ...FW_VERSION_PAYLOAD]);
+      }
+    });
+    return { t, device };
+  }
+
+  /** A fresh client over a fresh device, both already in CRC mode `from`. */
+  async function connectedAt(link: Link, from: CrcMode) {
+    const { t, device } = crcDevice(link);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+    if (from !== CRC_MODE.OFF) await client.setCrcMode(from);
+    expect(device.mode).toBe(from);
+    return { client, t, device };
+  }
+
+  /** The command after the switch. A fresh client's first read, so never cached. */
+  async function expectNextCommandAnswered(client: Shimmer3RClient, t: LoopbackTransport) {
+    const sent = t.writes.length;
+    await expect(client.readFwVersion()).resolves.toEqual(FW_VERSION);
+    expect(t.writes.slice(sent).map((w) => w.bytes[0])).toEqual([OPCODES.GET_FW_VERSION_COMMAND]);
+  }
+
+  for (const link of LINKS) {
+    for (const [from, to] of SWITCHES) {
+      it(`${label(from)} -> ${label(to)} over ${link.name}: ACKed, and the next command is answered`, async () => {
+        const { client, t, device } = await connectedAt(link, from);
+
+        await client.setCrcMode(to);
+        expect(device.mode).toBe(to);
+        expect(client.crcMode).toBe(to);
+
+        await expectNextCommandAnswered(client, t);
+        // Nothing was misframed on the way: a reply cut at the wrong place
+        // would have failed its CRC and been counted.
+        expect(client.crcFailures).toBe(0);
+      });
+    }
+
+    for (const [from, to] of SHORTER) {
+      it(`a NACKed ${label(from)} -> ${label(to)} over ${link.name} keeps the old width`, async () => {
+        /* The client frames for the narrower width while a downgrade is in
+           flight, but a NACK arrives in the wider one: the device skipped the
+           switch. The client must go back to it, and the NACK's extra trailer
+           bytes must not swallow the next reply. */
+        const { client, t, device } = await connectedAt(link, from);
+        device.refuseSetCrc = true;
+
+        await expect(client.setCrcMode(to)).rejects.toThrow(/NACK/);
+        expect(device.mode).toBe(from);
+        expect(client.crcMode).toBe(from);
+
+        await expectNextCommandAnswered(client, t);
+        expect(client.crcFailures).toBe(0);
+      });
+    }
+  }
+
+  it('keeps the old width when a downgrade is never answered', async () => {
+    const { client, t, device } = await connectedAt(LINKS[1], CRC_MODE.TWO_BYTE);
+    device.ignoreSetCrc = true;
+
+    vi.useFakeTimers();
+    try {
+      const switching = expect(client.setCrcMode(CRC_MODE.OFF)).rejects.toThrow(/ACK timeout/);
+      await vi.advanceTimersByTimeAsync(1500);
+      await switching;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(device.mode).toBe(CRC_MODE.TWO_BYTE);
+    expect(client.crcMode).toBe(CRC_MODE.TWO_BYTE);
+
+    await expectNextCommandAnswered(client, t);
+  });
+
+  it('does not put a dropped link’s width back once the downgrade gives up', async () => {
+    /* The link resets to off when it drops, and a reconnect may have set a
+       width of its own by the time the old command's wait runs out. Its
+       failure belongs to the link it was sent on, so it must leave the mode
+       alone. */
+    const { client, t, device } = await connectedAt(LINKS[1], CRC_MODE.TWO_BYTE);
+    device.ignoreSetCrc = true;
+
+    vi.useFakeTimers();
+    try {
+      const switching = expect(client.setCrcMode(CRC_MODE.OFF)).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      t.emitDisconnect(new Error('link lost'));
+      expect(client.crcMode).toBe(CRC_MODE.OFF);
+      await vi.advanceTimersByTimeAsync(1500);
+      await switching;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 });
