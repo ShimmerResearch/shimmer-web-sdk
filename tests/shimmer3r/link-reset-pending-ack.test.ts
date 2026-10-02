@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { SHIMMER3_FACTORY_TEST_TYPE } from '../../src/devices/shimmer3r/factoryTest.js';
 import {
   SD_TRANSFER_OPCODES as SD,
   SD_STATUS,
@@ -321,5 +322,43 @@ describe('the transport of a link that dropped', () => {
 
     first.emitDisconnect(new Error('late'));
     expect(drops).toBe(1);
+  });
+});
+
+describe('a link reset with a command still waiting', () => {
+  it('fails the command at once, so the next link can start a factory test', async () => {
+    /* Review finding: the reset zeroed the ACK count but left the command's
+       waiter registered, to fail at the next link's traffic or at its own
+       timeout. runFactoryTest refuses to start while any waiter is registered,
+       so until then it reported the next link busy. */
+    const first = device((c) => c[0] === OPCODES.GET_FW_VERSION_COMMAND);
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const stranded = client.readFwVersion().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20); // its ACK is awaited
+    first.emitDisconnect(new Error('dropped'));
+    // Nothing has arrived on any link since, so only the reset can fail it
+    const early = await Promise.race([stranded, tick(200).then(() => 'still waiting')]);
+    expect(early).toMatch(/link was reset/);
+
+    const report =
+      '//**************************** TEST START ' +
+      '************************************//\r\n' +
+      'Overall Result = PASS\r\n' +
+      '//***************************** TEST END ' +
+      '*************************************//\r\n';
+    const second = new LoopbackTransport();
+    second.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_FACTORY_TEST) {
+        const text = Uint8Array.from(report, (c) => c.charCodeAt(0));
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...text])), 0);
+      }
+    });
+    await client.connect(second);
+    const run = client.runFactoryTest(SHIMMER3_FACTORY_TEST_TYPE.MAIN, { preflight: false });
+    await expect(run).resolves.toBe(report);
   });
 });

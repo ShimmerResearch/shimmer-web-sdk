@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
@@ -486,6 +486,37 @@ describe('Shimmer3RClient.runDataRateTest takes a stop ACK that ends the stream'
     const r = await timeTest(device(false, () => [...tail, ...pkt(60).slice(0, 2), ACK_B]));
     expect(r.overMs).toBeLessThan(800);
     expect(r.fw).toBe('1.1.17');
+  });
+
+  it('when the stop ACK lands in the millisecond the stop went out', async () => {
+    /* Review finding: the fast path wanted the stream's last chunk timed
+       strictly after the stop, and Date.now() counts whole milliseconds, so an
+       ACK arriving in the same one waited out the timeout. (The 5 ms the device
+       here takes to reply hid that.) This clock moves only between the test's
+       own ticks, and stands still from the stop until its reply has arrived. */
+    let now = 1_000_000;
+    let held = false;
+    const clock = setInterval(() => {
+      if (!held) now += 5;
+    }, 5);
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const t = device(false, () => {
+        held = true; // set as the stop is written, in the same tick
+        setTimeout(() => (held = false), 20); // after the reply, due at 5 ms
+        return [...tail, ...pkt(60).slice(0, 4), ACK_B];
+      });
+      const client = new Shimmer3RClient({ debug: false });
+      await client.connect(t);
+      const start = performance.now();
+      await client.runDataRateTest(100);
+      expect(performance.now() - start - 100).toBeLessThan(800);
+      const v = await client.readFwVersion();
+      expect(`${v.major}.${v.minor}.${v.patch}`).toBe('1.1.17');
+    } finally {
+      spy.mockRestore();
+      clearInterval(clock);
+    }
   });
 
   it('on a packet boundary', async () => {
