@@ -248,10 +248,12 @@ const STREAM_ALIGN_MAX_REJECTS = 256;
 const STREAM_MAX_FRAME_TICKS = 32768;
 
 /**
- * How long the link must stay quiet after a data-rate test's stop, with 0xFF
- * as its last byte, before that byte is taken as the stop ACK. The ACK follows
- * the last test byte within milliseconds (bench: 22 ms after the stop, classic
- * SPP), so this only has to outlast the gap between two arrivals.
+ * How long the link must stay quiet after a data-rate test's stop before its
+ * end is checked for the stop's ACK packet - `0xFF`, plus the CRC trailer when a
+ * link CRC is on - in a position the stream's structure rules out as test data
+ * (see `_dataRateStopAckEndsStream`). The ACK follows the last test byte within
+ * milliseconds (bench: 22 ms after the stop, classic SPP), so this only has to
+ * outlast the gap between two arrivals.
  */
 const DATA_RATE_STOP_ACK_QUIET_MS = 50;
 
@@ -3833,7 +3835,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._expectingAck++;
     try {
       await this._write(u8);
-      return await this._waitForAck(ackTimeoutMs);
+      /* The write is asynchronous, and the link can be reset while it is
+       * pending. The command then went to a link that is gone, and no ACK for
+       * it is coming on the next one - a waiter registered now would see the
+       * next link's generation, pass as current, and take that link's ACK and
+       * reply. */
+      if (this._linkGeneration !== link) {
+        throw new Error('The link was reset while the command was being sent');
+      }
+      return await this._waitForAck(ackTimeoutMs, link);
     } catch (e) {
       // Not across a link reset, which has already zeroed the count: what is
       // counted now belongs to the next link's commands
@@ -3842,8 +3852,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
-  private _waitForAck(timeoutMs = 1000): Promise<Uint8Array | null> {
-    const link = this._linkGeneration;
+  /**
+   * @param link the link generation the command was written on, from the
+   *   caller: read here instead, after an awaited write, it could already be
+   *   the next link's.
+   */
+  private _waitForAck(timeoutMs = 1000, link = this._linkGeneration): Promise<Uint8Array | null> {
     return new Promise<Uint8Array | null>((resolve, reject) => {
       const t = setTimeout(() => {
         this._offTemp(handler);

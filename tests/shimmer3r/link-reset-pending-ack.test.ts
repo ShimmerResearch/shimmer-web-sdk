@@ -70,4 +70,35 @@ describe('a command pending when the link drops', () => {
     expect(await stranded).toMatch(/link was reset/);
     expect(expectingAck(client)).toBe(0);
   });
+
+  it("does not take the next link's ACK and reply: a write still in flight at the reset", async () => {
+    /* Review finding: the write is asynchronous. A waiter registered after it
+       resolves - here once the link has already been replaced - used to read
+       the next link's generation, pass as current, and take that link's ACK
+       and reply. */
+    let release = (): void => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    const first = new LoopbackTransport();
+    first.setOnWrite(async (bytes) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) await held; // never answered
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const stranded = client.readFwVersion().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20); // its write is still pending
+    first.emitDisconnect(new Error('dropped'));
+
+    await client.connect(device(answersAll));
+    const fresh = client.readFwVersion();
+    // The old write completes just before the new link's reply arrives, so
+    // its command would be first in line for it
+    release();
+    const v = await fresh;
+    expect(`${v.major}.${v.minor}.${v.patch}`).toBe('1.1.17');
+    expect(await stranded).toMatch(/link was reset/);
+    expect(expectingAck(client)).toBe(0);
+  });
 });
