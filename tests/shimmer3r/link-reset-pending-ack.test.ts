@@ -424,3 +424,66 @@ describe('a write the old transport holds across a reconnect', () => {
     expect(client.pressureCalibration?.sensor).toBe('bmp581');
   });
 });
+
+describe('a reply settled in the same turn as the drop', () => {
+  /* Review finding: a waiter that settled, and so left the reset's reach,
+     inside the very notification whose transport then reported the link down
+     delivered its result after the next link had begun. A notification and a
+     disconnect in one turn, with the application reconnecting from
+     onDisconnect, is the case. */
+  const OLD_FW = [OPCODES.FW_VERSION_RESPONSE, 3, 0, 9, 0, 9, 0]; // v9.9.0
+
+  it('does not refill the version cache the reconnect cleared', async () => {
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
+        setTimeout(() => {
+          tr.notify(new Uint8Array([ACK, ...OLD_FW])); // settles the ACK waiter...
+          tr.emitDisconnect(new Error('dropped')); // ...and the link drops in the same turn
+        }, 0);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    let reconnected: Promise<void> = Promise.resolve();
+    client.onDisconnect = () => {
+      reconnected = client.connect(device(answersAll));
+    };
+    const stale = client.readFwVersion().then(
+      (v) => `${v.major}.${v.minor}.${v.patch}`,
+      (e: Error) => e.message,
+    );
+    expect(await stale).toMatch(/link was reset/);
+    await reconnected;
+    const v = await client.readFwVersion();
+    expect(`${v.major}.${v.minor}.${v.patch}`).toBe('1.1.17');
+  });
+
+  it("does not hand the old device's status to its caller", async () => {
+    const first = new LoopbackTransport();
+    first.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK])), 0);
+        setTimeout(() => {
+          // settles the instream waiter...
+          tr.notify(
+            new Uint8Array([OPCODES.INSTREAM_CMD_RESPONSE, OPCODES.STATUS_RESPONSE, 0x24, 0x01]),
+          );
+          tr.emitDisconnect(new Error('dropped')); // ...and the link drops in the same turn
+        }, 5);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    let reconnected: Promise<void> = Promise.resolve();
+    client.onDisconnect = () => {
+      reconnected = client.connect(device(answersAll));
+    };
+    const stale = client.getStatus().then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    expect(await stale).toMatch(/link was reset/);
+    await reconnected;
+  });
+});
