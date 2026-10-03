@@ -40,6 +40,11 @@ export const FW_LEGACY_SDLOG: FwTuple = [2, 0, 8, 68];
  * A device that is asked to turn a link CRC on has to answer both, because
  * `setCrcMode` reads them first and refuses firmware that drops the CRC when
  * sensing stops. The default, LogAndStream 1.0.40 on a Shimmer3R, keeps it.
+ *
+ * That default is also one whose status push a 2-byte CRC overruns behind the
+ * ACK prefix, so `setCrcMode(2)` turns the prefix off first. A device asked
+ * for two bytes therefore has to ACK SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE
+ * too, and one that pushes statuses has to leave the prefix off them after.
  */
 export function versionReply(
   op: number,
