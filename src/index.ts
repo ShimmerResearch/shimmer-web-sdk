@@ -127,8 +127,9 @@ export {
 export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
 // Bluetooth link CRC (SET_CRC_COMMAND). Device-to-host only: the firmware never
 // checks a CRC on a command, so a host only has to verify what it receives.
-// The last two say which firmware setCrcMode refuses, for consumers that want to
-// tell their users why.
+// The firmware pairs after those say which firmware setCrcMode refuses, and on
+// which it turns the status push's ACK prefix off before a 2-byte CRC, for
+// consumers that want to tell their users why.
 export {
   CRC_MODE,
   isCrcMode,
@@ -137,6 +138,8 @@ export {
   verifyCrc,
   SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
   keepsLinkCrcWhenSensingStops,
+  SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE,
+  twoByteCrcOverrunsStatusPush,
 } from './devices/shimmer3r/crcMode.js';
 export type { CrcMode } from './devices/shimmer3r/crcMode.js';
 // Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or

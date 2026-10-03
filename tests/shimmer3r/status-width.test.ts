@@ -25,9 +25,11 @@ import { HW, versionReply, type FwTuple } from './configFirmware.js';
 //
 // The devices below send what each release sends, as packets: the reply rides
 // behind its ACK, the CRC covers the whole packet, and a push carries the ACK
-// prefix the firmware defaults to (`useAckPrefixForInstreamResponses`). A
-// framed link gets one notification per packet; a byte stream gets 3-byte
-// reads.
+// prefix the firmware defaults to (`useAckPrefixForInstreamResponses`) until
+// SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE turns it off. setCrcMode(2) does that
+// on v1.00.024 to v1.00.049, whose push a 2-byte CRC would otherwise overrun
+// (crc-push-overrun.test.ts). A framed link gets one notification per packet; a
+// byte stream gets 3-byte reads.
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED; // 0xFF
 const NACK = OPCODES.NACK_COMMAND_PROCESSED; // 0xFE
@@ -71,7 +73,7 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** A sensor running `release`, connected to a client over `link`. */
 async function sensor(release: Release, link: Link) {
-  const state = { mode: CRC_MODE.OFF as CrcMode, usb: 1 };
+  const state = { mode: CRC_MODE.OFF as CrcMode, usb: 1, ackPrefix: true };
   const t = new LoopbackTransport({
     capabilities: link.framed ? {} : { framed: false },
     deviceName: link.framed ? 'Shimmer3R-BLE' : 'Shimmer3R-SPP',
@@ -95,6 +97,9 @@ async function sensor(release: Release, link: Link) {
     const version = versionReply(op, release.hw, release.fw);
     if (version) {
       send(version);
+    } else if (op === OPCODES.SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE) {
+      state.ackPrefix = bytes[1] !== 0;
+      send([ACK]);
     } else if (op === OPCODES.SET_CRC_COMMAND) {
       // Switched while the command is processed, so its own ACK has the new trailer
       state.mode = bytes[1] as CrcMode;
@@ -113,8 +118,9 @@ async function sensor(release: Release, link: Link) {
   return {
     t,
     client,
-    /** An unsolicited status, as on docking: behind the default ACK prefix. */
-    push: (s0: number): void => send([ACK, INSTREAM, STATUS, ...statusBytes(s0)]),
+    /** An unsolicited status, as on docking: behind the ACK prefix while it is on. */
+    push: (s0: number): void =>
+      send([...(state.ackPrefix ? [ACK] : []), INSTREAM, STATUS, ...statusBytes(s0)]),
   };
 }
 
