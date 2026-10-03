@@ -21,7 +21,8 @@ import {
 import { CHANNEL_UNITS } from '../../core/units.js';
 import { StreamTimeline, TICKS_PER_MS, type TimelineState } from '../../core/StreamTimeline.js';
 import { UNIX_TIMESTAMP_NAME } from '../calibration/streamChannels.js';
-import { msToRtcBytesLE } from '../dock/protocol.js';
+import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
+import { parseShimmer3StatusBytes, type Shimmer3DeviceStatus } from '../shimmer3r/protocol.js';
 import {
   ADC_BITS,
   ADC_VREF_VOLTS,
@@ -57,6 +58,9 @@ import {
   deriveShimmer3FirmwareVersionCode,
   shimmer3UsesThreeByteTimestamp,
   shimmer3ControlMessageLength,
+  shimmer3SupportsStatusRequest,
+  shimmer3SupportsBatteryRequest,
+  SHIMMER3_STATUS_PAYLOAD_BYTES,
   type Shimmer3InquiryResult,
   type Shimmer3StreamSchema,
   type Shimmer3DeviceVersion,
@@ -180,6 +184,12 @@ export class Shimmer3Client extends BaseShimmerClient {
    * so a stray 0xFE arriving with no command in flight cannot fabricate a NACK.
    */
   private _awaitCmd = 0;
+  /**
+   * Non-zero while a {@link getStatus} round trip is outstanding, so its answer
+   * is not also reported as an unsolicited push. Counted rather than flagged:
+   * two callers may be awaiting at once.
+   */
+  private _statusReadsInFlight = 0;
 
   // Cached device info from the connect handshake
   deviceVersion: Shimmer3DeviceVersion | null = null;
@@ -251,6 +261,29 @@ export class Shimmer3Client extends BaseShimmerClient {
   // Callbacks
   onInquiry: ((info: Shimmer3InquiryResult) => void) | null = null;
   onExpPowerChanged: ((expPower: number) => void) | null = null;
+
+  /**
+   * Invoked for a STATUS_RESPONSE the host did not ask for. A Shimmer3 pushes
+   * one when it is docked or undocked, and when sensing starts or stops for any
+   * reason other than a host command, such as the button, the end of a trial,
+   * or a low battery. This is how a host learns that the user pressed the
+   * button or seated the sensor in its dock.
+   *
+   * The answer to a {@link getStatus} call is NOT delivered here, because that
+   * would report every state twice.
+   *
+   * `usbPluggedIn` is always `null`. A Shimmer3 sends one status byte, and the
+   * USB flag is the second byte, which only a Shimmer3R sends.
+   *
+   * **Only fires while idle.** Once streaming, every inbound byte belongs to
+   * the stream parser, which cannot tell a push from sample bytes and skips it
+   * while resynchronising. Do not rely on this callback to notice that a
+   * recording stopped mid-stream.
+   *
+   * HARDWARE-VERIFY: exercised against a scripted device only. No Shimmer3 has
+   * pushed a status to it.
+   */
+  onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
 
   constructor(opts: Shimmer3ClientOptions = {}) {
     super(opts);
@@ -412,6 +445,9 @@ export class Shimmer3Client extends BaseShimmerClient {
       this.schema = null;
       this._streaming = false;
       this._streamStarting = false;
+      // A status read still waiting when the link goes must not hide the next
+      // link's pushes until its own timeout fires.
+      this._statusReadsInFlight = 0;
       this.ExpPower = 0;
       this._resetCalibrationState();
       this._timeline.reset();
@@ -452,7 +488,8 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Extract every complete control message currently buffered and dispatch each
    * to the temp handlers, then keep the incomplete tail for the next chunk. This
    * is what makes the unframed RFCOMM stream behave like framed BLE for the
-   * ACK/response machinery below.
+   * ACK/response machinery below. A status push goes to {@link onDeviceStatus}
+   * as well.
    */
   private _drainControl(): void {
     /* Dispatch each message as it is extracted, NOT in a batch afterwards: the
@@ -465,7 +502,10 @@ export class Shimmer3Client extends BaseShimmerClient {
     const { rest } = drainByteStream(this._rxBuf, {
       messageLength: shimmer3ControlMessageLength,
       inspect: (buf) => this._inspectControlHead(buf),
-      onMessage: (msg) => this._emitTemp(msg),
+      onMessage: (msg) => {
+        this._emitTemp(msg);
+        this._maybeEmitDeviceStatus(msg);
+      },
       onDrop: (byte, reason) =>
         this._log(
           reason === 'resync'
@@ -1090,6 +1130,156 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Device status and battery
+  //
+  // Both replies come behind the 0x8A (INSTREAM_CMD_RESPONSE) prefix, which
+  // `shimmer3ControlMessageLength` sizes by the byte after it. The status also
+  // arrives unasked: see onDeviceStatus.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ask what the sensor is doing: docked, sensing, SD logging, streaming, SD
+   * card present, RTC set, SD error, red LED (GET_STATUS_COMMAND 0x72 →
+   * `[ACK][0x8A][0x71][status0]`).
+   *
+   * An inquiry reports the configuration. Only the status says whether a
+   * recording is actually running, whether the clock has been set since the
+   * sensor last lost power, or whether the firmware failed to open its SD file.
+   *
+   * `usbPluggedIn` is always `null`. A Shimmer3 sends one status byte, and the
+   * USB flag is the second byte, which only a Shimmer3R sends.
+   *
+   * HARDWARE-VERIFY: exercised against a scripted device only. No Shimmer3 has
+   * answered it.
+   *
+   * @throws Error when not connected, while streaming (the stream parser owns
+   *   every byte then), on firmware without the command, or on timeout.
+   */
+  async getStatus(
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<Shimmer3DeviceStatus> {
+    if (!this._transport) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot read the status while streaming');
+    this._assertRequestSupported('status');
+    // Claimed before the write, so that a reply landing while the write is
+    // still being awaited is not reported as a push.
+    this._statusReadsInFlight += 1;
+    try {
+      this._emitStatus('GET_STATUS → waiting for response…');
+      await this._write(new Uint8Array([OPCODES.GET_STATUS_COMMAND]));
+      const rsp = await this._waitForResponse(
+        OPCODES.INSTREAM_CMD_RESPONSE,
+        timeoutMs,
+        OPCODES.STATUS_RESPONSE,
+      );
+      const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + SHIMMER3_STATUS_PAYLOAD_BYTES));
+      this._emitStatus(
+        `Status: docked=${status.docked} sensing=${status.sensing} ` +
+          `logging=${status.sdLogging} streaming=${status.streaming} ` +
+          `sdPresent=${status.sdPresent} rtcSet=${status.rtcSet}`,
+      );
+      return status;
+    } finally {
+      this._statusReadsInFlight = Math.max(0, this._statusReadsInFlight - 1);
+    }
+  }
+
+  /**
+   * Read the battery voltage and charger state (GET_VBATT_COMMAND 0x95 →
+   * `[ACK][0x8A][0x94][raw x3]`).
+   *
+   * The three bytes are the firmware's battery record: a 12-bit ADC reading,
+   * little-endian, then the charger's STAT1 and STAT2 bits in bits 6 and 7.
+   * Every Shimmer3 release sends it that way. It is the same record the dock
+   * UART carries, so {@link parseBatteryStatus} decodes it, with the same
+   * voltage curve and the same refusal to give a percentage for a reading out
+   * of range.
+   *
+   * HARDWARE-VERIFY: exercised against a scripted device only. No Shimmer3 has
+   * answered it.
+   *
+   * @throws Error when not connected, while streaming, on firmware without the
+   *   command, or on timeout.
+   */
+  async getBattery(
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+  ): Promise<WiredBatteryStatus> {
+    if (!this._transport) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot read the battery while streaming');
+    this._assertRequestSupported('battery');
+    this._emitStatus('GET_VBATT → waiting for response…');
+    await this._write(new Uint8Array([OPCODES.GET_VBATT_COMMAND]));
+    const rsp = await this._waitForResponse(
+      OPCODES.INSTREAM_CMD_RESPONSE,
+      timeoutMs,
+      OPCODES.VBATT_RESPONSE,
+    );
+    const batt = parseBatteryStatus(rsp.subarray(2, 5));
+    const pct = batt.percentage === null ? 'n/a' : `${batt.percentage.toFixed(1)}%`;
+    this._emitStatus(
+      `Battery: ${batt.voltage.toFixed(3)} V (${pct}), charger ${batt.chargingStatus}`,
+    );
+    return batt;
+  }
+
+  /**
+   * Refuse a status or battery read on firmware that does not serve it,
+   * before anything is written. That firmware sends no answer, so asking would
+   * cost the whole response timeout. The gates are the Java driver's: see
+   * {@link shimmer3SupportsStatusRequest} and
+   * {@link shimmer3SupportsBatteryRequest}.
+   */
+  private _assertRequestSupported(what: 'status' | 'battery'): void {
+    const fw = this.firmwareVersion;
+    const hw = this.deviceVersion?.hardwareVersion;
+    if (fw == null || hw === undefined) {
+      throw new Error(
+        `Cannot read the ${what} before the handshake has read the firmware and ` +
+          'device versions.',
+      );
+    }
+    const supported =
+      what === 'status'
+        ? shimmer3SupportsStatusRequest(fw, hw)
+        : shimmer3SupportsBatteryRequest(fw, hw);
+    if (supported) return;
+    throw new Error(
+      `This firmware does not serve the ${what} command ` +
+        `(v${fw.major}.${fw.minor}.${fw.internal}, firmware type ${fw.firmwareIdentifier}). ` +
+        `It needs LogAndStream ${what === 'status' ? '0.5.2' : '0.5.9'} or later, ` +
+        'or BtStream 0.8.1 or later.',
+    );
+  }
+
+  /**
+   * Report a STATUS_RESPONSE that nobody asked for on {@link onDeviceStatus}.
+   *
+   * This runs on control-plane messages only, so a push that lands mid-stream
+   * is lost to the stream parser instead, as {@link onDeviceStatus} says. The
+   * framer has already sized the message, so it is never short.
+   *
+   * The ACK that the firmware puts in front of a push arrives as a message of
+   * its own. A command waiting for its ACK at that moment takes this one as its
+   * own, and its real ACK then arrives with nothing waiting for it. Framing the
+   * pair as one message would not prevent that, because the two bytes can
+   * arrive in separate reads.
+   */
+  private _maybeEmitDeviceStatus(msg: Uint8Array): void {
+    if (!this.onDeviceStatus) return;
+    if (msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE || msg[1] !== OPCODES.STATUS_RESPONSE) return;
+    // Somebody's answer, not news: getStatus reports it to its own caller.
+    if (this._statusReadsInFlight > 0) return;
+    try {
+      this.onDeviceStatus(
+        parseShimmer3StatusBytes(msg.subarray(2, 2 + SHIMMER3_STATUS_PAYLOAD_BYTES)),
+      );
+    } catch (e) {
+      // `drainByteStream`'s onMessage must not throw (core/framing.ts).
+      this._log('onDeviceStatus handler error', e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Daughter-card (expansion board) EEPROM memory
   // ---------------------------------------------------------------------------
 
@@ -1662,8 +1852,19 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Resolve on the next control message whose opcode matches `expectedOpcode`.
    * Leading ACKs are ignored (classic firmware may or may not ACK-prefix a
    * response); a NACK rejects.
+   *
+   * @param subOpcode for a reply behind the 0x8A (INSTREAM_CMD_RESPONSE)
+   *   prefix, the byte after it. That byte, not the prefix, says which message
+   *   this is, and a status push shares the prefix with every such reply.
    */
-  private _waitForResponse(expectedOpcode: number, timeoutMs: number): Promise<Uint8Array> {
+  private _waitForResponse(
+    expectedOpcode: number,
+    timeoutMs: number,
+    subOpcode?: number,
+  ): Promise<Uint8Array> {
+    const what =
+      `opcode 0x${expectedOpcode.toString(16)}` +
+      (subOpcode === undefined ? '' : ` 0x${subOpcode.toString(16)}`);
     return new Promise<Uint8Array>((resolve, reject) => {
       // Track that an INQUIRY_RESPONSE is genuinely awaited so _drainControl
       // only frames 0x02 while this window is open. _awaitCmd (bumped for every
@@ -1679,7 +1880,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       const t = setTimeout(() => {
         settleInq();
         this._offTemp(handler);
-        reject(new Error(`Response timeout (opcode 0x${expectedOpcode.toString(16)})`));
+        reject(new Error(`Response timeout (${what})`));
       }, timeoutMs);
       const handler = (msg: Uint8Array): void => {
         if (msg.length === 0) return;
@@ -1691,7 +1892,7 @@ export class Shimmer3Client extends BaseShimmerClient {
           reject(new Error('NACK received'));
           return;
         }
-        if (msg[0] === expectedOpcode) {
+        if (msg[0] === expectedOpcode && (subOpcode === undefined || msg[1] === subOpcode)) {
           clearTimeout(t);
           settleInq();
           this._offTemp(handler);
