@@ -209,6 +209,10 @@ export const PACKET_OVERHEAD_RESPONSE_OTHER = 4;
  * SERIAL_PORT_TIMEOUT = 500 ms (line 69), polled at 100 ms intervals in
  * `waitForResponse` (line 507). Retry is a dock-layer concern
  * (`AbstractDock.READ_MAC_RETRY_ATTEMPTS = 2`), not the comms layer.
+ *
+ * `Object.freeze` keeps each value's literal type (`RESPONSE_TIMEOUT_MS` is
+ * `500`, not `number`), so a parameter that defaults to one of these needs an
+ * explicit `: number`. Without it, no caller can pass any other value.
  */
 export const WIRED_DEFAULTS = Object.freeze({
   /** Per-request response timeout (ms). Matches Java SERIAL_PORT_TIMEOUT. */
