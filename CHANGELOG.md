@@ -27,6 +27,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A 2-byte link CRC no longer risks hardfaulting a Shimmer3R on LogAndStream v1.00.024 to v1.00.049** (DEV-1141). Those releases build the unsolicited status push in a six-byte stack buffer. The push carries the ACK prefix the firmware adds by default, 0x8A 0x71 and two status bytes, so a 2-byte CRC makes seven, and the seventh byte overruns the buffer. The sensor hardfaults (DEV-621, fixed in v1.00.050). The firmware pushes on docking and undocking, on the user button, when a trial duration expires and on a low-battery stop, so the fault can come at any point after `setCrcMode(2)`, mid-stream included.
+
+  On those releases `setCrcMode(2)` now turns the prefix off first (`SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE`, 0xA3), which leaves the push at six bytes. That costs one more round trip, and the client already reads a push with or without the prefix.
+  - **If the device refuses that command or does not answer it,** the 2-byte CRC is refused and SET_CRC is not sent. The error names v1.00.050 and suggests a 1-byte CRC.
+  - **A 1-byte CRC never needs it,** and neither does any other firmware, a Shimmer3 included.
+  - **The prefix stays off for the rest of the link.** The firmware turns it back on only together with the CRC, at startup and on disconnect, so it cannot return while the CRC is on. A reconnect that re-establishes the 2-byte CRC sends the prefix command again first.
+
+  `twoByteCrcOverrunsStatusPush()` and `SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE` are exported. No Shimmer3R in that range has been run against this SDK.
+
 - **Shimmer3R firmware before LogAndStream v1.00.024 no longer loses its status replies and pushes** (DEV-307). `Shimmer3RClient` sized every Shimmer3R STATUS_RESPONSE at two status bytes. The second byte, `usbPluggedIn`, arrived only with LogAndStream v1.00.024 (log-and-stream-common 8377afc, June 2025), and v0.00.002 to v1.00.023 send one.
   - **Byte stream, or BLE with a link CRC on:** the client took the byte after every status from those releases as its second byte. That byte was usually the next command's ACK, so that command timed out.
   - **BLE without a CRC:** once the hardware version had been read, `getStatus()` waited for a byte that never came and timed out, and pushes were dropped as truncated. `setCrcMode(1)` and `setCrcMode(2)` read the hardware version, so turning a CRC on was enough to set this off, and so was a refused attempt.

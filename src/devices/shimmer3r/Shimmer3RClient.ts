@@ -6,10 +6,12 @@ import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './co
 import {
   CRC_MODE,
   SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
+  SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE,
   appendCrc,
   crcTrailerBytes,
   isCrcMode,
   keepsLinkCrcWhenSensingStops,
+  twoByteCrcOverrunsStatusPush,
   verifyCrc,
   type CrcMode,
 } from './crcMode.js';
@@ -880,7 +882,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     /* setCrcMode reads the device and firmware versions first. Both caches are
      * cleared on connect, so this link is judged on its own device: one whose
      * firmware drops the CRC when sensing stops is refused here, reported
-     * below, and the request is kept for the next device. */
+     * below, and the request is kept for the next device. Two bytes on a
+     * release whose status push they would overrun turn the push's ACK prefix
+     * off again first, since the firmware turned it back on at the disconnect
+     * (`_turnPushAckPrefixOff`). */
     try {
       await this.setCrcMode(want);
     } catch (e) {
@@ -1233,7 +1238,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // A push carries the ACK prefix when the firmware's
     // `useAckPrefixForInstreamResponses` flag is on
     // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), and a stray ACK can be
-    // sitting in front of it besides; `withoutLeadingAck` covers both.
+    // sitting in front of it besides; `withoutLeadingAck` covers both. Both
+    // shapes happen: the flag is on by default, and setCrcMode(2) turns it off
+    // on the releases whose push a 2-byte CRC would otherwise overrun.
     const msg = withoutLeadingAck(chunk);
     if (msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
     if (msg[1] !== OPCODES.STATUS_RESPONSE) return;
@@ -3135,6 +3142,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * the device and firmware versions (each cached for the link), and it is
    * refused as well when the firmware version cannot be read. Turning the CRC
    * off is never refused and asks nothing first.
+   *
+   * **Two bytes on Shimmer3R LogAndStream v1.00.024 to v1.00.049 first turn
+   * the status push's ACK prefix off** (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE,
+   * 0xA3). Those releases hardfault when an unsolicited status push carries the
+   * prefix and a 2-byte CRC together, because the push then overruns its buffer
+   * by a byte (DEV-621, fixed in v1.00.050; see
+   * {@link twoByteCrcOverrunsStatusPush}). Without the prefix it fits. When the
+   * device refuses that or does not answer, the 2-byte CRC is refused and
+   * SET_CRC is not sent. A 1-byte CRC never needs it.
    */
   async setCrcMode(mode: CrcMode): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
@@ -3143,9 +3159,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     if (this._streaming) throw new Error(CRC_CHANGE_MID_STREAM);
     if (mode !== CRC_MODE.OFF) {
-      await this._assertFirmwareKeepsLinkCrc();
+      const { hardwareVersion, fw } = await this._assertFirmwareKeepsLinkCrc();
       // Again: a stream may have started while the versions were being read.
       if (this._streaming) throw new Error(CRC_CHANGE_MID_STREAM);
+      if (mode === CRC_MODE.TWO_BYTE && twoByteCrcOverrunsStatusPush(hardwareVersion, fw)) {
+        await this._turnPushAckPrefixOff(fw);
+        // And again after that round trip.
+        if (this._streaming) throw new Error(CRC_CHANGE_MID_STREAM);
+      }
     }
     const label = mode === CRC_MODE.OFF ? 'off' : `${mode} byte${mode === 1 ? '' : 's'}`;
     this._emitStatus(`SET_CRC ${label} → waiting for ACK…`);
@@ -3225,8 +3246,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * on its own (the user button and docking end SD logging), and nothing tells
    * the host that the CRC went with it. See {@link keepsLinkCrcWhenSensingStops}
    * for the firmware side.
+   *
+   * @returns the versions it judged by, for {@link setCrcMode}'s check of the
+   *   status push. Both were read from the device; a failed read throws.
    */
-  private async _assertFirmwareKeepsLinkCrc(): Promise<void> {
+  private async _assertFirmwareKeepsLinkCrc(): Promise<{
+    hardwareVersion: number;
+    fw: { fwId: number; major: number; minor: number; patch: number };
+  }> {
     /* The device version first, which the protocol document requires of any
      * host before SET_CRC_COMMAND (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md`
      * §8.2, constraint 3). It matters twice over here. A CRC turns on the
@@ -3272,6 +3299,58 @@ export class Shimmer3RClient extends BaseShimmerClient {
           `${firmwareTag(fw.major, fw.minor, fw.patch)} turns it off by itself whenever ` +
           `streaming or logging stops, without telling the host, so the reply after every ` +
           `stop would be lost. Update to LogAndStream ${minTag} or later to use a CRC.`,
+      );
+    }
+    return { hardwareVersion, fw };
+  }
+
+  /**
+   * Turn the ACK prefix off on the firmware's unsolicited status pushes
+   * (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE 0xA3, argument 0), which a 2-byte
+   * CRC needs on Shimmer3R LogAndStream v1.00.024 to v1.00.049. With the
+   * prefix on, the CRC's second byte overruns the push's buffer and the sensor
+   * hardfaults (DEV-621; see {@link twoByteCrcOverrunsStatusPush}).
+   *
+   * Throws when the device refuses or does not answer, and the caller then
+   * sends nothing more. The prefix may still be on, and a 2-byte CRC on top of
+   * it is the overrun itself.
+   *
+   * Nothing has to be undone afterwards. The firmware turns the prefix back on
+   * in one place, `ShimBt_resetBtResponseVars`, called at startup and on every
+   * disconnect (`ShimBt_btCommsProtocolInit` and
+   * `ShimBt_handleBtRfCommStateChange`, `Comms/shimmer_bt_uart.c:140,2351` at
+   * f39be8c1f). Each call comes straight after the CRC has been set to off
+   * (`:108,2349`). So the prefix cannot return while the CRC is on, and the next
+   * link's {@link _reestablishCrcMode} sends this again before its SET_CRC, as
+   * the protocol document asks of a host that relies on the prefix being off
+   * (`SHIMMER3_BT_COMMUNICATION_PROTOCOL.md` §5.4, rule 3). Turning the CRC down
+   * or off later leaves the prefix off until the link ends. That is harmless,
+   * because this client reads a push with or without it.
+   */
+  private async _turnPushAckPrefixOff(fw: {
+    major: number;
+    minor: number;
+    patch: number;
+  }): Promise<void> {
+    const tag = firmwareTag(fw.major, fw.minor, fw.patch);
+    const fix = SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE;
+    const fixTag = firmwareTag(fix.major, fix.minor, fix.internal);
+    this._emitStatus(
+      `SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE off (a 2-byte CRC behind the prefix ` +
+        `overruns LogAndStream ${tag}'s status push) → waiting for ACK…`,
+    );
+    try {
+      await this._writeExpectingAck(
+        new Uint8Array([OPCODES.SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0]),
+        1500,
+      );
+    } catch (e) {
+      throw new Error(
+        `Cannot turn the 2-byte link CRC on: Shimmer3R LogAndStream ${tag} hardfaults when ` +
+          `a status push carries a 2-byte CRC behind its ACK prefix, and turning the prefix ` +
+          `off failed (${(e as Error).message}). Use a 1-byte CRC, or update to ` +
+          `LogAndStream ${fixTag} or later.`,
+        { cause: e },
       );
     }
   }

@@ -7,7 +7,12 @@ import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
 import { appendCrc } from '../../src/devices/shimmer3r/crcMode.js';
 import { SD_TRANSFER_OPCODES } from '../../src/devices/shimmer3r/sdTransfer/protocol.js';
 // Every device asked for a CRC answers the two version reads setCrcMode makes
-// first, as a Shimmer3R whose firmware keeps the CRC when sensing stops.
+// first, as a Shimmer3R whose firmware keeps the CRC when sensing stops. One
+// asked for two bytes also ACKs SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE: the
+// firmware those reads report, LogAndStream v1.00.040, is one whose status push
+// a 2-byte CRC overruns behind the ACK prefix, so setCrcMode(2) turns the
+// prefix off first. None of these devices pushes a status, so answering is all
+// they have to do.
 import { versionReply } from './configFirmware.js';
 
 // SET_CRC_COMMAND makes the firmware append 1 or 2 CRC bytes to every packet,
@@ -18,6 +23,7 @@ import { versionReply } from './configFirmware.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 const INQ_RSP = OPCODES.INQUIRY_RESPONSE;
+const ACK_PREFIX = OPCODES.SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE;
 
 const CHANNELS = [0x00, 0x01, 0x02, 0x0a, 0x0b, 0x0c]; // LN accel + gyro
 const INQUIRY_BODY = [
@@ -81,6 +87,7 @@ async function session(crcBytes: 0 | 1 | 2): Promise<{
     const version = versionReply(op);
     if (version) send(version);
     else if (op === OPCODES.INQUIRY_COMMAND) send([ACK, ...INQUIRY_BODY]);
+    else if (op === ACK_PREFIX) send([ACK]);
     else if (op === OPCODES.SET_CRC_COMMAND) {
       mode = bytes[1] as 0 | 1 | 2;
       send([ACK]);
@@ -191,6 +198,8 @@ describe('Shimmer3R link CRC', () => {
       const version = versionReply(op);
       if (version) {
         setTimeout(() => tr.notify(version), 0);
+      } else if (op === ACK_PREFIX) {
+        setTimeout(() => tr.notify([ACK]), 0);
       } else if (op === OPCODES.SET_CRC_COMMAND) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), 0)), 0);
       } else if (op === OPCODES.INQUIRY_COMMAND) {
@@ -223,6 +232,7 @@ describe('Shimmer3R link CRC', () => {
       const op = bytes[0];
       const version = versionReply(op);
       if (version) setTimeout(() => tr.notify(version), 0);
+      else if (op === ACK_PREFIX) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.INQUIRY_COMMAND) {
         const pkt = appendCrc(new Uint8Array([ACK, ...INQUIRY_BODY]), CRC_MODE.TWO_BYTE);
@@ -252,6 +262,7 @@ describe('Shimmer3R link CRC', () => {
       const op = bytes[0];
       const version = versionReply(op);
       if (version) setTimeout(() => tr.notify(version), 0);
+      else if (op === ACK_PREFIX) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       else if (op === OPCODES.GET_INFOMEM_COMMAND) {
         const pkt = appendCrc(
@@ -282,6 +293,7 @@ describe('Shimmer3R link CRC', () => {
       t.setOnWrite((bytes, tr) => {
         const version = versionReply(bytes[0]);
         if (version) setTimeout(() => tr.notify(version), 0);
+        else if (bytes[0] === ACK_PREFIX) setTimeout(() => tr.notify([ACK]), 0);
         else if (bytes[0] === OPCODES.SET_CRC_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
       });
       return t;
@@ -304,10 +316,12 @@ describe('Shimmer3R link CRC', () => {
   it('does not re-attempt a mode the device refused', async () => {
     // The wish is recorded only once the device agrees, so a firmware that
     // NACKs SET_CRC is not asked again on every reconnect.
-    const t = new LoopbackTransport(); // answers the version reads, never SET_CRC
+    // Answers the version reads and the prefix command, never SET_CRC
+    const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
       const version = versionReply(bytes[0]);
       if (version) setTimeout(() => tr.notify(version), 0);
+      else if (bytes[0] === ACK_PREFIX) setTimeout(() => tr.notify([ACK]), 0);
     });
     const client = new Shimmer3RClient({ debug: false });
     await client.connect(t);
@@ -339,6 +353,8 @@ describe('Shimmer3R link CRC', () => {
       const version = versionReply(bytes[0]);
       if (version) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (bytes[0] === ACK_PREFIX) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
       } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         mode = bytes[1] as 0 | 1 | 2;
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
@@ -393,6 +409,8 @@ describe('Shimmer3R link CRC', () => {
       const version = versionReply(bytes[0]);
       if (version) {
         setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode)), 0);
+      } else if (bytes[0] === ACK_PREFIX) {
+        setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
       } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         mode = bytes[1] as 0 | 1 | 2;
         setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode)), 0);
@@ -457,6 +475,8 @@ describe('a link that drops under us gives up the CRC mode', () => {
         const version = versionReply(bytes[0]);
         if (version) {
           setTimeout(() => tr.notify(appendCrc(new Uint8Array(version), mode as never)), 0);
+        } else if (bytes[0] === ACK_PREFIX) {
+          setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
         } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
           mode = bytes[1];
           setTimeout(() => tr.notify(appendCrc(new Uint8Array([ACK]), mode as never)), 0);
@@ -564,6 +584,9 @@ describe('switching the CRC width, in either direction', () => {
       const version = versionReply(bytes[0]);
       if (version) {
         reply(version);
+      } else if (bytes[0] === ACK_PREFIX) {
+        // In the mode current now: one byte of CRC on the way from 1 to 2.
+        reply([ACK]);
       } else if (bytes[0] === OPCODES.SET_CRC_COMMAND) {
         if (device.ignoreSetCrc) return;
         if (device.refuseSetCrc) return reply([NACK]);

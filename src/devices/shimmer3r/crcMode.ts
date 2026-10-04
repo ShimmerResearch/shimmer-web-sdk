@@ -35,6 +35,7 @@
 
 import { shimmerUartCrcCalc } from '../dock/crc.js';
 import { FW_ID, HW_ID } from '../infomem/layout.js';
+import { statusPayloadBytesFor } from './protocol.js';
 
 /** CRC modes the firmware accepts as `SET_CRC_COMMAND`'s only argument. */
 export const CRC_MODE = Object.freeze({
@@ -74,7 +75,12 @@ export const CRC_MODE = Object.freeze({
   OFF: 0,
   /** Low byte of the CRC-16 appended to everything the device sends. */
   ONE_BYTE: 1,
-  /** Both bytes appended, low first. */
+  /**
+   * Both bytes appended, low first.
+   *
+   * On Shimmer3R LogAndStream v1.00.024 to v1.00.049 this overruns the status
+   * push unless its ACK prefix is off: see {@link twoByteCrcOverrunsStatusPush}.
+   */
   TWO_BYTE: 2,
 } as const);
 
@@ -209,7 +215,89 @@ export function keepsLinkCrcWhenSensingStops(
   fw: Readonly<{ fwId: number; major: number; minor: number; patch: number }>,
 ): boolean {
   if (hardwareVersion !== HW_ID.SHIMMER_3R || fw.fwId !== FW_ID.LOGANDSTREAM) return true;
-  const min = SHIMMER3R_LINK_CRC_MIN_FIRMWARE;
+  return isAtLeast(fw, SHIMMER3R_LINK_CRC_MIN_FIRMWARE);
+}
+
+/**
+ * The Shimmer3R firmware that made room for a 2-byte CRC in its unsolicited
+ * status push: LogAndStream v1.00.050.
+ *
+ * Before it, the firmware builds the push in a six-byte stack buffer,
+ * `uint8_t selfcmd[6]` (`ShimBt_instreamStatusRespSend`, log-and-stream-common
+ * `Comms/shimmer_bt_uart.c:2262` at f39be8c1f, which v1.00.049 pins). The push
+ * is the ACK prefix, 0x8A 0x71, the status bytes and the CRC. From v1.00.024 the
+ * status is two bytes (`SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE`), so a 2-byte
+ * CRC makes seven, and `calculateCrcAndInsert` (`:2275`) writes the seventh past
+ * the end of the buffer. The sensor hardfaults: DEV-621, "Streaming + SDLogging
+ * (Triggered on Undock) with 2 bytes CRC enabled causing hardfaults".
+ *
+ * v1.00.050 sizes the buffer `3 + STATUS_BYTE_COUNT + CRC_MAX_SUPPORTED_BYTES`
+ * (log-and-stream-common merge 4fb8696). It resized no other buffer, and none
+ * needed it.
+ */
+export const SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE = Object.freeze({
+  major: 1,
+  minor: 0,
+  internal: 50,
+} as const);
+
+/**
+ * True when a 2-byte link CRC overruns this firmware's unsolicited status push
+ * for as long as the push carries its ACK prefix: Shimmer3R LogAndStream
+ * v1.00.024 to v1.00.049. See {@link SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE}
+ * for the overrun.
+ *
+ * The overrun needs all three of the prefix, two status bytes and a 2-byte CRC.
+ * Take any one away and the push is six bytes, which fits:
+ *
+ *  - **A 1-byte CRC.**
+ *  - **One status byte.** v1.00.023 and earlier send one, and so does every
+ *    Shimmer3 release. The width comes from {@link statusPayloadBytesFor}, so
+ *    this boundary and the status framing's cannot drift apart.
+ *  - **The prefix off.** It is on by default: `ShimBt_resetBtResponseVars` sets
+ *    `useAckPrefixForInstreamResponses = 1` (`Comms/shimmer_bt_uart.c:185` at
+ *    f39be8c1f). SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE (0xA3) sets it from its
+ *    argument (`:867`), and `Shimmer3RClient.setCrcMode` sends it, with 0,
+ *    before a 2-byte CRC wherever this is true.
+ *
+ * The firmware pushes whenever its state changes for a reason the host did not
+ * cause:
+ *
+ *  - docking and undocking (`log_and_stream_common.c:297,314`);
+ *  - sensing starting or stopping because of the user button, a trial-duration
+ *    expiry or a low battery (`ShimBt_instreamStatusRespSendIfNotBtCmd`,
+ *    `:2242`, called from `TaskList/shimmer_taskList.c:127,131`).
+ *
+ * The host's own starts and stops do not push. So the overrun waits for an
+ * event that can come at any point in a session, mid-stream included, and long
+ * after the CRC went on.
+ *
+ * Any hardware but a Shimmer3R returns false, as does firmware other than
+ * LogAndStream.
+ *
+ * Read off the firmware source at every Shimmer3R tag from v1.00.011 to
+ * v1.00.051.
+ *
+ * @param hardwareVersion The DEVICE_VERSION_RESPONSE hardware id: 10 for a
+ *   Shimmer3R, 3 for a Shimmer3.
+ * @param fw The FW_VERSION_RESPONSE, as `Shimmer3RClient.readFwVersion()`
+ *   returns it. `patch` is the firmware's internal version number.
+ */
+export function twoByteCrcOverrunsStatusPush(
+  hardwareVersion: number,
+  fw: Readonly<{ fwId: number; major: number; minor: number; patch: number }>,
+): boolean {
+  return (
+    statusPayloadBytesFor(hardwareVersion, fw) === 2 &&
+    !isAtLeast(fw, SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE)
+  );
+}
+
+/** True when `fw` is `min` or later. `patch` is the firmware's internal number. */
+function isAtLeast(
+  fw: Readonly<{ major: number; minor: number; patch: number }>,
+  min: Readonly<{ major: number; minor: number; internal: number }>,
+): boolean {
   return (
     fw.major > min.major ||
     (fw.major === min.major &&
