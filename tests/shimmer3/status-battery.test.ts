@@ -402,19 +402,126 @@ describe('Shimmer3Client.onDeviceStatus', () => {
     await expect(client.setGSRRange(3)).resolves.toEqual({ gsrRange: 3 });
   });
 
-  it('is not silenced on the next link by a status read the drop stranded', async () => {
-    // The read is still waiting when the link goes. Its count must not carry
-    // over and hide the new link's pushes until its timeout fires.
+  it('reports a push that follows the reply in the same read', async () => {
+    // The reply is consumed as it goes past, not when getStatus's caller
+    // resumes, so the push right behind it is still news.
+    const pushed = vi.fn();
+    const { client } = await connected(
+      (bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
+          setTimeout(() => tr.notify([ACK, INSTREAM, STATUS, RECORDING, ...PUSH_DOCKED]), 0);
+        }
+      },
+      { onDeviceStatus: pushed },
+    );
+    await expect(client.getStatus()).resolves.toMatchObject(RECORDING_STATUS);
+    expect(pushed).toHaveBeenCalledTimes(1);
+    expect(pushed.mock.calls[0][0]).toMatchObject({ docked: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reads in flight together, early replies, and a link that goes
+// ---------------------------------------------------------------------------
+
+describe('Shimmer3Client status and battery reads', () => {
+  /** Let a read's write go out and its waiter register. */
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
+
+  it('runs status reads made together one after another, each with its own reply', async () => {
+    // Every waiter sees every message, so two reads in flight together would
+    // both take the first reply, and the second reply would be reported as a
+    // push.
+    const events: string[] = [];
+    const replies = [DOCKED, UNDOCKED];
+    let sent = 0;
+    const pushed = vi.fn();
+    const { client } = await connected(
+      (bytes, tr) => {
+        if (bytes[0] !== OPCODES.GET_STATUS_COMMAND) return;
+        const i = sent++;
+        events.push(`GET_STATUS ${i}`);
+        setTimeout(() => {
+          events.push(`reply ${i}`);
+          tr.notify([ACK, INSTREAM, STATUS, replies[i]]);
+        }, 5);
+      },
+      { onDeviceStatus: pushed },
+    );
+
+    const [first, second] = await Promise.all([client.getStatus(), client.getStatus()]);
+    expect(first.docked).toBe(true);
+    expect(second.docked).toBe(false);
+    expect(events).toEqual(['GET_STATUS 0', 'reply 0', 'GET_STATUS 1', 'reply 1']);
+    expect(pushed).not.toHaveBeenCalled();
+  });
+
+  it('runs battery reads made together one after another too', async () => {
+    const adc = [0x00, 0x10];
+    let sent = 0;
+    const { client } = await connected((bytes, tr) => {
+      if (bytes[0] !== OPCODES.GET_VBATT_COMMAND) return;
+      const i = sent++;
+      setTimeout(() => tr.notify([ACK, INSTREAM, VBATT, adc[i], 0x0a, 0x40]), 5);
+    });
+    const [first, second] = await Promise.all([client.getBattery(), client.getBattery()]);
+    expect(first.adcValue).toBe(0x0a00);
+    expect(second.adcValue).toBe(0x0a10);
+  });
+
+  it('takes a reply that lands before its write has finished', async () => {
+    // The waiter is registered before the write. Registered after it, this
+    // reply reached nobody and the read timed out.
+    const pushed = vi.fn();
+    const { t, client } = await connected(undefined, { onDeviceStatus: pushed });
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) tr.notify([ACK, INSTREAM, STATUS, DOCKED]);
+    });
+    await expect(client.getStatus(200)).resolves.toMatchObject({ docked: true });
+    expect(pushed).not.toHaveBeenCalled();
+  });
+
+  it('is cancelled at once by a disconnect, and leaves the next link alone', async () => {
     const pushed = vi.fn();
     const { client } = await connected(undefined, { onDeviceStatus: pushed });
-    const stranded = client.getStatus(500).catch(() => undefined);
-    await new Promise((r) => setTimeout(r, 10));
+    const started = Date.now();
+    const stranded = client.getStatus(5000);
+    await settle();
     await client.disconnect();
+    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    expect(Date.now() - started).toBeLessThan(1000);
 
+    // Nothing from the old link is left waiting to take this push as its reply.
     const t2 = new LoopbackTransport({ capabilities: { framed: false } });
     await connected(undefined, { t: t2, client });
     t2.notify(PUSH_DOCKED);
-    expect(pushed).toHaveBeenCalled();
-    await stranded;
+    expect(pushed).toHaveBeenCalledTimes(1);
+  });
+
+  it('is cancelled at once when the transport drops', async () => {
+    const { t, client } = await connected();
+    const started = Date.now();
+    const stranded = client.getBattery(5000);
+    await settle();
+    t.emitDisconnect(new Error('link lost'));
+    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('fails at once when its write fails, and leaves nothing waiting', async () => {
+    const pushed = vi.fn();
+    const { t, client } = await connected(undefined, { onDeviceStatus: pushed });
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) throw new Error('port closed');
+      ackGsrRange(bytes, tr);
+    });
+    const started = Date.now();
+    await expect(client.getStatus(5000)).rejects.toThrow(/port closed/);
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // No reply is owed, so a status is a push. And the next command runs.
+    t.notify(PUSH_DOCKED);
+    expect(pushed).toHaveBeenCalledTimes(1);
+    await expect(client.setGSRRange(2)).resolves.toEqual({ gsrRange: 2 });
   });
 });

@@ -185,11 +185,19 @@ export class Shimmer3Client extends BaseShimmerClient {
    */
   private _awaitCmd = 0;
   /**
-   * Non-zero while a {@link getStatus} round trip is outstanding, so its answer
-   * is not also reported as an unsolicited push. Counted rather than flagged:
-   * two callers may be awaiting at once.
+   * The chain the status and battery reads queue on, so they run one at a
+   * time. See {@link _readInstream}.
    */
-  private _statusReadsInFlight = 0;
+  private _instreamReads: Promise<unknown> = Promise.resolve();
+  /** Cancels the status or battery read in flight, when the link goes. */
+  private _instreamReadAbort: AbortController | null = null;
+  /**
+   * True from just before a GET_STATUS is written until a status message
+   * arrives or the read gives up. The status message that clears it is the
+   * reply, which goes to {@link getStatus}'s caller. Any other status message
+   * is a push, which goes to {@link onDeviceStatus}.
+   */
+  private _statusReplyOwed = false;
 
   // Cached device info from the connect handshake
   deviceVersion: Shimmer3DeviceVersion | null = null;
@@ -445,9 +453,9 @@ export class Shimmer3Client extends BaseShimmerClient {
       this.schema = null;
       this._streaming = false;
       this._streamStarting = false;
-      // A status read still waiting when the link goes must not hide the next
-      // link's pushes until its own timeout fires.
-      this._statusReadsInFlight = 0;
+      // A status or battery read still waiting must not take the next link's
+      // status, or hide its pushes, until its own timeout fires.
+      this._instreamReadAbort?.abort();
       this.ExpPower = 0;
       this._resetCalibrationState();
       this._timeline.reset();
@@ -459,6 +467,8 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _handleTransportDisconnect = (reason?: Error): void => {
     this._streaming = false;
     this._streamStarting = false;
+    // No reply is coming on a link that has gone.
+    this._instreamReadAbort?.abort();
     this._emitStatus('Device disconnected');
     this._emitDisconnect(reason);
   };
@@ -1153,39 +1163,27 @@ export class Shimmer3Client extends BaseShimmerClient {
    * `usbPluggedIn` is always `null`. A Shimmer3 sends one status byte, and the
    * USB flag is the second byte, which only a Shimmer3R sends.
    *
+   * Calls made together run one after another, each with its own round trip,
+   * so every caller gets a reply to its own request.
+   *
    * HARDWARE-VERIFY: exercised against a scripted device only. No Shimmer3 has
    * answered it.
    *
    * @throws Error when not connected, while streaming (the stream parser owns
-   *   every byte then), on firmware without the command, or on timeout.
+   *   every byte then), on firmware without the command, on timeout, or when
+   *   the link closes before the reply arrives.
    */
   async getStatus(
     timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<Shimmer3DeviceStatus> {
-    if (!this._transport) throw new Error('Not connected');
-    if (this._streaming) throw new Error('Cannot read the status while streaming');
-    this._assertRequestSupported('status');
-    // Claimed before the write, so that a reply landing while the write is
-    // still being awaited is not reported as a push.
-    this._statusReadsInFlight += 1;
-    try {
-      this._emitStatus('GET_STATUS → waiting for response…');
-      await this._write(new Uint8Array([OPCODES.GET_STATUS_COMMAND]));
-      const rsp = await this._waitForResponse(
-        OPCODES.INSTREAM_CMD_RESPONSE,
-        timeoutMs,
-        OPCODES.STATUS_RESPONSE,
-      );
-      const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + SHIMMER3_STATUS_PAYLOAD_BYTES));
-      this._emitStatus(
-        `Status: docked=${status.docked} sensing=${status.sensing} ` +
-          `logging=${status.sdLogging} streaming=${status.streaming} ` +
-          `sdPresent=${status.sdPresent} rtcSet=${status.rtcSet}`,
-      );
-      return status;
-    } finally {
-      this._statusReadsInFlight = Math.max(0, this._statusReadsInFlight - 1);
-    }
+    const rsp = await this._readInstream('status', timeoutMs);
+    const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + SHIMMER3_STATUS_PAYLOAD_BYTES));
+    this._emitStatus(
+      `Status: docked=${status.docked} sensing=${status.sensing} ` +
+        `logging=${status.sdLogging} streaming=${status.streaming} ` +
+        `sdPresent=${status.sdPresent} rtcSet=${status.rtcSet}`,
+    );
+    return status;
   }
 
   /**
@@ -1199,31 +1197,79 @@ export class Shimmer3Client extends BaseShimmerClient {
    * voltage curve and the same refusal to give a percentage for a reading out
    * of range.
    *
+   * Calls made together run one after another, as {@link getStatus}'s do.
+   *
    * HARDWARE-VERIFY: exercised against a scripted device only. No Shimmer3 has
    * answered it.
    *
    * @throws Error when not connected, while streaming, on firmware without the
-   *   command, or on timeout.
+   *   command, on timeout, or when the link closes before the reply arrives.
    */
   async getBattery(
     timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<WiredBatteryStatus> {
-    if (!this._transport) throw new Error('Not connected');
-    if (this._streaming) throw new Error('Cannot read the battery while streaming');
-    this._assertRequestSupported('battery');
-    this._emitStatus('GET_VBATT → waiting for response…');
-    await this._write(new Uint8Array([OPCODES.GET_VBATT_COMMAND]));
-    const rsp = await this._waitForResponse(
-      OPCODES.INSTREAM_CMD_RESPONSE,
-      timeoutMs,
-      OPCODES.VBATT_RESPONSE,
-    );
+    const rsp = await this._readInstream('battery', timeoutMs);
     const batt = parseBatteryStatus(rsp.subarray(2, 5));
     const pct = batt.percentage === null ? 'n/a' : `${batt.percentage.toFixed(1)}%`;
     this._emitStatus(
       `Battery: ${batt.voltage.toFixed(3)} V (${pct}), charger ${batt.chargingStatus}`,
     );
     return batt;
+  }
+
+  /**
+   * Write GET_STATUS or GET_VBATT and return its reply, `[0x8A][0x71|0x94][…]`.
+   *
+   * - **One at a time.** Every waiter sees every message. Two reads in flight
+   *   together would both take the first reply, and the second reply would
+   *   then reach nobody, or be reported as a push. Queued on
+   *   {@link _instreamReads}, each reply has exactly one waiter.
+   * - **Waiter first.** The waiter is registered before the write, so a reply
+   *   that lands while the write is still being awaited is not lost.
+   * - **Cancelled with the link.** {@link disconnect} and a transport drop abort
+   *   the read in flight, so it cannot take the next link's status as its
+   *   reply.
+   *
+   * The connection, streaming and firmware checks run when the read's turn
+   * comes, not when it is queued, because any of them can change in between.
+   */
+  private _readInstream(what: 'status' | 'battery', timeoutMs: number): Promise<Uint8Array> {
+    const [command, subOpcode, label] =
+      what === 'status'
+        ? [OPCODES.GET_STATUS_COMMAND, OPCODES.STATUS_RESPONSE, 'GET_STATUS']
+        : [OPCODES.GET_VBATT_COMMAND, OPCODES.VBATT_RESPONSE, 'GET_VBATT'];
+    const read = async (): Promise<Uint8Array> => {
+      if (!this._transport) throw new Error('Not connected');
+      if (this._streaming) throw new Error(`Cannot read the ${what} while streaming`);
+      this._assertRequestSupported(what);
+      const abort = new AbortController();
+      this._instreamReadAbort = abort;
+      if (what === 'status') this._statusReplyOwed = true;
+      try {
+        this._emitStatus(`${label} → waiting for response…`);
+        const reply = this._waitForResponse(OPCODES.INSTREAM_CMD_RESPONSE, timeoutMs, {
+          subOpcode,
+          signal: abort.signal,
+        });
+        try {
+          await this._write(new Uint8Array([command]));
+        } catch (e) {
+          // Nothing will answer a command that never went out: stop waiting
+          // now rather than at the timeout, and report the write's failure.
+          reply.catch(() => undefined);
+          abort.abort();
+          throw e;
+        }
+        return await reply;
+      } finally {
+        if (this._instreamReadAbort === abort) this._instreamReadAbort = null;
+        // Answered, timed out or cancelled: no reply is owed any more.
+        this._statusReplyOwed = false;
+      }
+    };
+    const result = this._instreamReads.then(read);
+    this._instreamReads = result.catch(() => undefined);
+    return result;
   }
 
   /**
@@ -1262,6 +1308,12 @@ export class Shimmer3Client extends BaseShimmerClient {
    * is lost to the stream parser instead, as {@link onDeviceStatus} says. The
    * framer has already sized the message, so it is never short.
    *
+   * While a GET_STATUS reply is owed, the next status message is taken as that
+   * reply, and every other status message as a push. A push and a reply are
+   * byte-for-byte identical. So a push that lands between a GET_STATUS and its
+   * reply is taken for the reply, and the reply is then reported as the push.
+   * Both carry the sensor's current state.
+   *
    * The ACK that the firmware puts in front of a push arrives as a message of
    * its own. A command waiting for its ACK at that moment takes this one as its
    * own, and its real ACK then arrives with nothing waiting for it. Framing the
@@ -1269,10 +1321,15 @@ export class Shimmer3Client extends BaseShimmerClient {
    * arrive in separate reads.
    */
   private _maybeEmitDeviceStatus(msg: Uint8Array): void {
-    if (!this.onDeviceStatus) return;
     if (msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE || msg[1] !== OPCODES.STATUS_RESPONSE) return;
     // Somebody's answer, not news: getStatus reports it to its own caller.
-    if (this._statusReadsInFlight > 0) return;
+    // Cleared here, as the reply goes past, so that a push right behind it in
+    // the same read is still reported.
+    if (this._statusReplyOwed) {
+      this._statusReplyOwed = false;
+      return;
+    }
+    if (!this.onDeviceStatus) return;
     try {
       this.onDeviceStatus(
         parseShimmer3StatusBytes(msg.subarray(2, 2 + SHIMMER3_STATUS_PAYLOAD_BYTES)),
@@ -1857,15 +1914,18 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Leading ACKs are ignored (classic firmware may or may not ACK-prefix a
    * response); a NACK rejects.
    *
-   * @param subOpcode for a reply behind the 0x8A (INSTREAM_CMD_RESPONSE)
+   * @param opts.subOpcode for a reply behind the 0x8A (INSTREAM_CMD_RESPONSE)
    *   prefix, the byte after it. That byte, not the prefix, says which message
    *   this is, and a status push shares the prefix with every such reply.
+   * @param opts.signal stops the wait early: it rejects at once and stops
+   *   taking messages.
    */
   private _waitForResponse(
     expectedOpcode: number,
     timeoutMs: number,
-    subOpcode?: number,
+    opts: { subOpcode?: number; signal?: AbortSignal } = {},
   ): Promise<Uint8Array> {
+    const { subOpcode, signal } = opts;
     const what =
       `opcode 0x${expectedOpcode.toString(16)}` +
       (subOpcode === undefined ? '' : ` 0x${subOpcode.toString(16)}`);
@@ -1880,12 +1940,19 @@ export class Shimmer3Client extends BaseShimmerClient {
           this._awaitInq = Math.max(0, this._awaitInq - 1);
         }
         this._awaitCmd = Math.max(0, this._awaitCmd - 1);
+        signal?.removeEventListener('abort', onAbort);
       };
       const t = setTimeout(() => {
         settleInq();
         this._offTemp(handler);
         reject(new Error(`Response timeout (${what})`));
       }, timeoutMs);
+      const onAbort = (): void => {
+        clearTimeout(t);
+        settleInq();
+        this._offTemp(handler);
+        reject(new Error(`The link closed while waiting for the response (${what})`));
+      };
       const handler = (msg: Uint8Array): void => {
         if (msg.length === 0) return;
         if (msg[0] === ACK) return; // tolerate optional ACK prefix
@@ -1904,6 +1971,8 @@ export class Shimmer3Client extends BaseShimmerClient {
         }
       };
       this._onTemp(handler);
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort);
     });
   }
 
