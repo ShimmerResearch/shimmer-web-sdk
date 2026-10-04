@@ -64,6 +64,19 @@ export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>
      resync a byte at a time. */
   [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22,
   [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24,
+  /* The six per-sensor calibration replies that `readCalibration` waits for:
+     the opcode, then the SC_DATA_LEN_STD_IMU_CALIB-byte kinematic block that
+     `ShimBt_replySingleSensorCalibCmd` copies in (`Comms/shimmer_bt_uart.c:
+     1752-1825`, sent from `:2277-2289`). They were missing, so a byte stream,
+     or BLE with a link CRC, resynced through every one of them and each group
+     timed out — on a Shimmer3R over classic SPP, all six did. Framed BLE with
+     no CRC never reaches this table, which is why that went unnoticed. */
+  [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x12
+  [OPCODES.GYRO_CALIBRATION_RESPONSE]: 21, // 0x15
+  [OPCODES.MAG_CALIBRATION_RESPONSE]: 21, // 0x18
+  [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
+  [OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE]: 21, // 0xAA
+  [OPCODES.ALT_MAG_CALIBRATION_RESPONSE]: 21, // 0xB0
 });
 
 /**
@@ -265,12 +278,15 @@ export function shimmer3rControlMessageLength(
            Anything else is the next message, so the status had one byte. That
            byte has to arrive before the status can be sized, so a one-byte
            status waits for whatever comes next, rather than eating it or
-           leaving a two-byte status's tail behind.
+           leaving a two-byte status's tail behind. That suits a push, which is
+           followed by the next command's reply. A reply the client waits for is
+           followed by nothing, so the client reads the versions before asking,
+           and fails the request rather than sending it without them.
 
            Under a link CRC the byte after status0 can be the CRC's low byte
-           instead, and a one-byte status whose CRC begins 0x00 or 0x01 is
-           then sized a byte too long. The client knows the width whenever a
-           CRC is on, unless the device version could not be read.
+           instead, and a one-byte status whose CRC begins 0x00 or 0x01 would
+           be sized a byte too long. The client never asks that of this branch:
+           it turns a CRC on only once both versions have been read.
 
            HARDWARE-VERIFY: only scripted devices have sent a status through
            this branch, on both widths. */

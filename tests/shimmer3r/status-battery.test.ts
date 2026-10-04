@@ -345,10 +345,11 @@ describe('Shimmer3RClient.getStatus', () => {
     expect(spy.mock.calls[0][0]).toMatchObject({ docked: true, usbPluggedIn: false });
   });
 
-  it('accepts a one-byte answer when the versions cannot be read', async () => {
+  it('accepts a one-byte answer over BLE when the versions cannot be read', async () => {
     // With the width unknown, one byte may be the whole status: a Shimmer3
     // sends one, and so does a Shimmer3R before LogAndStream v1.00.024. A
-    // waiter demanding two would time out on a valid reply.
+    // waiter demanding two would time out on a valid reply. Over BLE without a
+    // CRC the reply arrives whole, so nothing needs the width to find its end.
     const { client } = await framed((bytes, tr) => {
       if (bytes[0] === OPCODES.GET_STATUS_COMMAND) {
         setTimeout(() => tr.notify([ACK]), 0);
@@ -383,6 +384,48 @@ describe('Shimmer3RClient.getStatus', () => {
     // …and once learnt, the width holds: no third round of version reads.
     await client.getStatus();
     expect(written(t).slice(5)).toEqual([OPCODES.GET_STATUS_COMMAND]);
+  });
+
+  it('fails a status read over a byte stream at once when the versions cannot be read', async () => {
+    // There a one-byte reply cannot be told from the first byte of a two-byte
+    // one until the byte after it arrives, and nothing follows a reply the
+    // client is waiting for. Sending GET_STATUS would time out, and leave the
+    // reply to surface later as a push. So nothing is sent, and the caller is
+    // told why.
+    const { t, client } = await unframed((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_STATUS_COMMAND) dribble3(tr, [ACK, INSTREAM, STATUS, S0]);
+      else dribble3(tr, [OPCODES.NACK_COMMAND_PROCESSED]);
+    });
+    const pushes = vi.fn();
+    client.onDeviceStatus = pushes;
+    const started = Date.now();
+    await expect(client.getStatus()).rejects.toThrow(
+      /versions that set its length failed \(.*NACK received/,
+    );
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(written(t)).toEqual([OPCODES.GET_DEVICE_VERSION_COMMAND]);
+    expect(pushes).not.toHaveBeenCalled();
+  });
+
+  it('reads the status over a byte stream once the versions answer again', async () => {
+    let refusals = 0;
+    const { t, client } = await unframed((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DEVICE_VERSION_COMMAND && refusals++ === 0) {
+        dribble3(tr, [OPCODES.NACK_COMMAND_PROCESSED]);
+        return;
+      }
+      withVersions((b, r) => {
+        if (b[0] === OPCODES.GET_STATUS_COMMAND) dribble3(r, [ACK, INSTREAM, STATUS, S0, 1]);
+      })(bytes, tr);
+    });
+    await expect(client.getStatus()).rejects.toThrow(/versions that set its length failed/);
+    expect(await client.getStatus()).toMatchObject(RECORDING);
+    expect(written(t)).toEqual([
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_DEVICE_VERSION_COMMAND,
+      OPCODES.GET_FW_VERSION_COMMAND,
+      OPCODES.GET_STATUS_COMMAND,
+    ]);
   });
 
   it('splits a Shimmer3 one-byte status correctly on a byte stream', async () => {
