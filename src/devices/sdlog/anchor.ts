@@ -8,10 +8,12 @@
  * the header time, which is only right if the header holds the first record's
  * time. LogAndStream does not write that: the header carries the RTC at the
  * moment the file was *created* (`sdFileSyncTs`), and records buffered when the
- * file opened were sampled before it. File 000 is created after sampling starts
- * (SD power-up, directory, header), so its first records predate the header by
- * roughly 160 ms more than at a mid-stream split — a permanent step back at the
- * 000 → 001 boundary.
+ * file opened were sampled before it. On a Shimmer3R, file 000 is created after
+ * sampling starts (SD power-up, directory, header), so its first records predate
+ * the header by roughly 160 ms more than at a mid-stream split — a permanent
+ * step back at the 000 → 001 boundary. A Shimmer3 (LogAndStream v1.1.5) takes
+ * file 000's header 1.8 ms before its first record instead, so the same split
+ * steps forward by 2.7 ms.
  *
  * A record's 3-byte timestamp is the low 24 bits of the same 32768 Hz counter
  * as the header's initial timestamp, so the first record's full counter value
@@ -26,11 +28,12 @@
  * first packet 162.72 ms and 3.94 ms before its header, and anchored this way
  * the 000 → 001 split is exactly one sample period (tests/sdlog/anchor.test.ts).
  *
- * HARDWARE-VERIFY: Shimmer3 (MSP430) is not yet verified. Its RTC difference
- * is an offset from the free-running counter to real time rather than the
- * counter's high bytes, so confirm on a Shimmer3 session's raw 000/001 files
- * that the first packet's low 24 bits share the header's counter domain and
- * that its splits close to one sample period.
+ * Verified on Shimmer3 (MSP430) too, where the RTC difference is an offset to
+ * real time rather than the counter's high bytes: the raw files of a 33-file
+ * LogAndStream v1.1.5 recording at 1024 Hz put file 000's first packet 1.831 ms
+ * after its header and every later file's 0.885 ms before, so the first
+ * packet's low 24 bits share the header's counter domain, and all 32 splits
+ * close to exactly one sample period.
  */
 
 /** 2^24: modulo of the 3-byte tick counter (512 s at 32768 Hz). */

@@ -8,12 +8,16 @@ import {
   shimmer3ControlMessageLength,
   deriveShimmer3FirmwareVersionCode,
   shimmer3SupportsExg,
+  shimmer3SupportsStatusRequest,
+  shimmer3SupportsBatteryRequest,
+  SHIMMER3_STATUS_PAYLOAD_BYTES,
   FW_ID,
   ACK,
   NACK,
   NEED_MORE,
   RESYNC,
 } from '../../src/devices/shimmer3/protocol.js';
+import { drainByteStream } from '../../src/core/framing.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 
@@ -353,6 +357,94 @@ describe('shimmer3ControlMessageLength (unframed-stream framing primitive)', () 
     // A count above one bank cannot be real — resync rather than swallow it.
     expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 11]))).toBe(RESYNC);
     expect(shimmer3ControlMessageLength(new Uint8Array([rsp, 0xff]))).toBe(RESYNC);
+  });
+
+  describe('behind the 0x8A (INSTREAM_CMD_RESPONSE) prefix', () => {
+    const INSTREAM = OPCODES.INSTREAM_CMD_RESPONSE;
+    const STATUS = OPCODES.STATUS_RESPONSE;
+    const VBATT = OPCODES.VBATT_RESPONSE;
+    /** Docked, RTC set, SD card in — and, as a byte, DEVICE_VERSION_RESPONSE. */
+    const DOCKED = 0x25;
+
+    it('needs the byte after the prefix to say which message it is', () => {
+      expect(shimmer3ControlMessageLength(new Uint8Array([INSTREAM]))).toBe(NEED_MORE);
+    });
+
+    it('sizes a status at one status byte, on every Shimmer3', () => {
+      expect(SHIMMER3_STATUS_PAYLOAD_BYTES).toBe(1);
+      expect(shimmer3ControlMessageLength(new Uint8Array([INSTREAM, STATUS]))).toBe(3);
+      expect(shimmer3ControlMessageLength(new Uint8Array([INSTREAM, STATUS, DOCKED, ACK]))).toBe(3);
+    });
+
+    it('sizes the battery reply at three payload bytes', () => {
+      expect(shimmer3ControlMessageLength(new Uint8Array([INSTREAM, VBATT]))).toBe(5);
+    });
+
+    it('resyncs past the rest of the prefix space, which no Shimmer3 sends this client', () => {
+      // 0x88 answers GET_DIR, which this client never sends. 0xC5 and 0xC6 are
+      // the SD-transfer frames, built for the Shimmer3R only.
+      for (const sub of [0x88, 0xc5, 0xc6, 0x00, ACK]) {
+        expect(shimmer3ControlMessageLength(new Uint8Array([INSTREAM, sub]))).toBe(RESYNC);
+      }
+    });
+
+    it('frames a status push whole, so the ACK behind it survives', () => {
+      // The defect this pins: with 0x8A unsized, 0x8A and 0x71 were resynced
+      // past, and 0x25 was framed as DEVICE_VERSION_RESPONSE with the
+      // following ACK taken as its payload.
+      const { messages, rest } = drainByteStream(
+        new Uint8Array([ACK, INSTREAM, STATUS, DOCKED, ACK]),
+        { messageLength: shimmer3ControlMessageLength },
+      );
+      expect(messages.map((m) => Array.from(m))).toEqual([
+        [ACK],
+        [INSTREAM, STATUS, DOCKED],
+        [ACK],
+      ]);
+      expect(rest).toHaveLength(0);
+    });
+  });
+});
+
+describe('shimmer3SupportsStatusRequest / shimmer3SupportsBatteryRequest (the Java gates)', () => {
+  const fw = (id: number, major: number, minor: number, internal: number) => ({
+    firmwareIdentifier: id,
+    major,
+    minor,
+    internal,
+  });
+
+  it('serves the status from LogAndStream 0.5.2 and BtStream 0.8.1', () => {
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 0, 5, 2), 3)).toBe(true);
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 0, 5, 1), 3)).toBe(false);
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.BTSTREAM, 0, 8, 1), 3)).toBe(true);
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.BTSTREAM, 0, 8, 0), 3)).toBe(false);
+  });
+
+  it('serves the battery from LogAndStream 0.5.9 and BtStream 0.8.1', () => {
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.LOGANDSTREAM, 0, 5, 9), 3)).toBe(true);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.LOGANDSTREAM, 0, 5, 8), 3)).toBe(false);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.BTSTREAM, 0, 8, 1), 3)).toBe(true);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.BTSTREAM, 0, 8, 0), 3)).toBe(false);
+  });
+
+  it('compares major first, so a later release passes whatever its minor', () => {
+    // LogAndStream_Shimmer3_v1.01.005: major 1, minor 1, internal 5.
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 1, 1, 5), 3)).toBe(true);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.LOGANDSTREAM, 1, 0, 0), 3)).toBe(true);
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 0, 16, 0), 3)).toBe(true);
+  });
+
+  it('refuses SDLog, which the Java driver never asks', () => {
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.SDLOG, 0, 22, 0), 3)).toBe(false);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.SDLOG, 0, 22, 0), 3)).toBe(false);
+  });
+
+  it('is hardware-gated: any Shimmer3R, never a Shimmer2R', () => {
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 0, 0, 1), 10)).toBe(true);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.LOGANDSTREAM, 0, 0, 1), 10)).toBe(true);
+    expect(shimmer3SupportsStatusRequest(fw(FW_ID.BTSTREAM, 0, 8, 1), 2)).toBe(false);
+    expect(shimmer3SupportsBatteryRequest(fw(FW_ID.BTSTREAM, 0, 8, 1), 2)).toBe(false);
   });
 });
 

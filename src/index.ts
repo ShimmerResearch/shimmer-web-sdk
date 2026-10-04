@@ -343,6 +343,7 @@ export {
   NEED_MORE as SHIMMER3_NEED_MORE,
   RESYNC as SHIMMER3_RESYNC,
   SHIMMER3_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3_STATUS_PAYLOAD_BYTES,
   SHIMMER3_INQ_CONFIG_OFFSET,
   SHIMMER3_INQ_CONFIG_LENGTH,
   SHIMMER3_INQ_NUM_CHANNELS_OFFSET,
@@ -357,6 +358,10 @@ export {
   // the Shimmer3 client applies with it.
   deriveShimmer3FirmwareVersionCode,
   shimmer3SupportsExg,
+  // The Java driver's gates on the status and battery reads, which
+  // Shimmer3Client.getStatus and getBattery apply.
+  shimmer3SupportsStatusRequest,
+  shimmer3SupportsBatteryRequest,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,

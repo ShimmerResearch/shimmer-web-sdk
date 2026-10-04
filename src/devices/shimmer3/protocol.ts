@@ -427,6 +427,62 @@ export function shimmer3SupportsExg(fw: Shimmer3FwVersion, hardwareVersion: numb
   return (fw.internal >= 8 && code === 2) || code > 2;
 }
 
+/**
+ * `compareVersions` against one target, with the semantics described at
+ * {@link deriveShimmer3FirmwareVersionCode}: the same hardware id and firmware
+ * type, at the target version or later.
+ */
+function isVersionAtLeast(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+  tHw: number,
+  tId: number,
+  tMaj: number,
+  tMin: number,
+  tInt: number,
+): boolean {
+  if (hardwareVersion !== tHw || fw.firmwareIdentifier !== tId) return false;
+  const { major, minor, internal } = fw;
+  return major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)));
+}
+
+/**
+ * Whether this firmware answers GET_STATUS. This is the gate the Java driver
+ * applies before asking (`ShimmerVerObject.isSupportedBtStatusRequest`,
+ * `ShimmerVerObject.java:734-738`): LogAndStream 0.5.2 or later, or BtStream
+ * 0.8.1 or later, on a Shimmer3, and any Shimmer3R.
+ *
+ * Firmware without the command does not answer it, so asking would cost a
+ * timeout rather than fail at once.
+ */
+export function shimmer3SupportsStatusRequest(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    hardwareVersion === HW_ID.SHIMMER_3R ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 0, 5, 2) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.BTSTREAM, 0, 8, 1)
+  );
+}
+
+/**
+ * Whether this firmware answers GET_VBATT, by the Java driver's gate
+ * (`ShimmerVerObject.isSupportedBtBatteryRequest`, `ShimmerVerObject.java:740-744`).
+ * It is the same as {@link shimmer3SupportsStatusRequest} except that
+ * LogAndStream needs 0.5.9.
+ */
+export function shimmer3SupportsBatteryRequest(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    hardwareVersion === HW_ID.SHIMMER_3R ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 0, 5, 9) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.BTSTREAM, 0, 8, 1)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -465,6 +521,19 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
   [OPCODES.RWC_RESPONSE]: 8, // 0x90 64-bit ticks, LSB first
 });
 
+/**
+ * How many status bytes follow `[0x8A][0x71]` in a Shimmer3's STATUS_RESPONSE:
+ * always one.
+ *
+ * The firmware's `STATUS_BYTE_COUNT` is 1 under `SHIMMER3`, and 2 only under
+ * `SHIMMER3R`, whose second byte is `usbPluggedIn` (log-and-stream-common
+ * `Comms/shimmer_bt_uart.h:275-279`). LogAndStream releases older than that
+ * shared code built the one byte inline, back to v0.8.0. So unlike
+ * `shimmer3rControlMessageLength`, this framer needs no hardware or firmware
+ * version to size a status.
+ */
+export const SHIMMER3_STATUS_PAYLOAD_BYTES = 1;
+
 /** Sentinel: need more bytes before the message length can be determined. */
 export const NEED_MORE = -1;
 /** Sentinel: leading byte is not a recognised control opcode — caller resyncs. */
@@ -487,13 +556,46 @@ export const RESYNC = 0;
  *
  * ACK (0xFF) and NACK (0xFE) are 1-byte messages. INQUIRY_RESPONSE (0x02) is
  * `9 + numChannels` bytes, and numChannels lives at index 7, so at least 8 bytes
- * are needed to compute the length.
+ * are needed to compute the length. A message behind the 0x8A prefix is sized
+ * by the byte after the prefix, so it needs two.
  */
 export function shimmer3ControlMessageLength(buf: Uint8Array): number {
   if (buf.length === 0) return NEED_MORE;
   const opcode = buf[0];
 
   if (opcode === ACK || opcode === NACK) return 1;
+
+  /*
+   * 0x8A (INSTREAM_CMD_RESPONSE) is a shared prefix, not an opcode: the byte
+   * after it selects the message. Two of the messages under it reach this
+   * client, the status and the battery reading. The status also arrives
+   * unasked. The firmware pushes `[ACK][0x8A][0x71][status0]` when the sensor
+   * is docked or undocked (`log_and_stream_common.c:514,533`), and when sensing
+   * starts or stops for any reason other than a host command, such as the
+   * button, the end of a trial, or a low battery
+   * (`TaskList/shimmer_taskList.c:130,134`). Line numbers here are
+   * log-and-stream-common at the commit LogAndStream_Shimmer3_v1.01.005 pins.
+   *
+   * Before this branch existed, a push resynced past 0x8A and 0x71, and the
+   * status byte was then framed as whichever opcode it equalled. Status 0x25
+   * (docked, RTC set, SD card in) is DEVICE_VERSION_RESPONSE, whose payload
+   * byte swallowed the next command's ACK.
+   */
+  if (opcode === OPCODES.INSTREAM_CMD_RESPONSE) {
+    if (buf.length < 2) return NEED_MORE;
+    // [0x8A][0x71][status0]: GET_STATUS's reply and the push alike
+    // (`Comms/shimmer_bt_uart.c:1915-1921,2526-2551`).
+    if (buf[1] === OPCODES.STATUS_RESPONSE) return 2 + SHIMMER3_STATUS_PAYLOAD_BYTES;
+    // [0x8A][0x94][BattStatusRaw x3]: GET_VBATT's reply, the 12-bit battery
+    // reading little-endian and then the charger's STAT bits (`:1922-1934`).
+    if (buf[1] === OPCODES.VBATT_RESPONSE) return 5;
+    /* Nothing else under the prefix reaches this client. The firmware also
+       answers GET_DIR_COMMAND here, which this client never sends. The
+       SD-transfer frames that share the prefix are built for the Shimmer3R
+       only, because every SD-transfer command sits under
+       `#if defined(SHIMMER3R)`. */
+    return RESYNC;
+  }
 
   if (opcode === OPCODES.INQUIRY_RESPONSE) {
     if (buf.length <= SHIMMER3_INQ_NUM_CHANNELS_OFFSET) return NEED_MORE; // need index 7 present
