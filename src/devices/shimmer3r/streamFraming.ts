@@ -265,12 +265,15 @@ export function shimmer3rControlMessageLength(
            Anything else is the next message, so the status had one byte. That
            byte has to arrive before the status can be sized, so a one-byte
            status waits for whatever comes next, rather than eating it or
-           leaving a two-byte status's tail behind.
+           leaving a two-byte status's tail behind. That suits a push, which is
+           followed by the next command's reply. A reply the client waits for is
+           followed by nothing, so the client reads the versions before asking,
+           and fails the request rather than sending it without them.
 
            Under a link CRC the byte after status0 can be the CRC's low byte
-           instead, and a one-byte status whose CRC begins 0x00 or 0x01 is
-           then sized a byte too long. The client knows the width whenever a
-           CRC is on, unless the device version could not be read.
+           instead, and a one-byte status whose CRC begins 0x00 or 0x01 would
+           be sized a byte too long. The client never asks that of this branch:
+           it turns a CRC on only once both versions have been read.
 
            HARDWARE-VERIFY: only scripted devices have sent a status through
            this branch, on both widths. */

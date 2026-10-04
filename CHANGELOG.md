@@ -28,7 +28,10 @@ This project follows [Semantic Versioning](https://semver.org/).
   The width now comes from the hardware and the firmware together: two bytes only from a Shimmer3R running LogAndStream v1.00.024 or later, and one from anything else. The Java driver (`isSupportedUSBPluggedInStatus`) and the C# API (`IsTwoByteStatusResponseSupported`) already apply this rule. `getStatus()` now reads both versions first when the width is not known yet:
   - The versions are cached per link once read, as `readDeviceVersion()` and `readFwVersion()` cache them, so they cost a round trip each once per link. Status reads made together share the reads, and the next status read tries again after a failure.
   - They are not read while streaming.
+  - If they cannot be read, a byte stream fails the status read at once with that reason and sends nothing. There a one-byte reply cannot be told from the start of a two-byte one until the byte after it arrives, and nothing follows a reply the client waits for, so it would only time out. Over BLE without a CRC the reply arrives whole, so the status is still read, and one byte is accepted.
   - This also fixes a Shimmer3 read over a byte stream with no `readDeviceVersion()` first, which was framed at two bytes too.
+
+  `setCrcMode(1)` and `setCrcMode(2)` now also refuse when the hardware version cannot be read, as they already did for the firmware version. A CRC sends every reply through the framer, which needs the status width. Every firmware that implements `SET_CRC_COMMAND` answers `GET_DEVICE_VERSION_COMMAND` too, so only a read that failed is refused.
 
   Until the width is known, one status byte counts as a whole status. Over a byte stream the framer sizes a status by the byte after its first: `0x00` or `0x01` is the `usbPluggedIn` byte, and anything else starts the next message. A one-byte push therefore waits for that next byte instead of taking it. `statusPayloadBytesFor()` and `SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE` are exported, and `shimmer3rControlMessageLength` accepts `statusPayloadBytes: 'unknown'`.
 

@@ -525,10 +525,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * The version reads {@link getStatus} has in flight to learn
    * {@link _statusPayloadBytes}, shared so that status reads made together
-   * read the versions once. Cleared when they settle, so the next status read
-   * tries again after a failure, and with the version caches at connect.
+   * read the versions once. Resolves to why they failed, or `null`. Cleared
+   * when they settle, so the next status read tries again after a failure,
+   * and with the version caches at connect.
    */
-  private _statusWidthReads: Promise<void> | null = null;
+  private _statusWidthReads: Promise<Error | null> | null = null;
   /**
    * Non-zero while a {@link getStatus} round trip is outstanding, so its answer
    * is not also reported as an unsolicited push. Counted rather than flagged:
@@ -3226,17 +3227,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * reads here settle it (`_settleStatusWidth`). And Shimmer3 and Shimmer3R
      * version numbers overlap, so the firmware version below means nothing
      * without it. Both caches are cleared on connect, so each costs a round trip
-     * once per link. */
-    let hardwareVersion: number = HW_ID.SHIMMER_3R;
-    try {
-      hardwareVersion = (await this.readDeviceVersion()).hardwareVersion;
-    } catch {
-      /* Old firmware may not answer. The firmware version is then judged as a
-       * Shimmer3R's, this client's documented assumption (`generation`). The
-       * status width stays unknown, so the framer sizes each status from the
-       * byte after it (`shimmer3rControlMessageLength`), which under a CRC can
-       * be the CRC's. */
-    }
+     * once per link.
+     *
+     * So a hardware version that cannot be read refuses the CRC, as a firmware
+     * version does. Without it the width stays unknown, and the framer would
+     * size each status from the byte after its first, which under a CRC can be
+     * the CRC's own. Every firmware that implements SET_CRC_COMMAND answers
+     * GET_DEVICE_VERSION_COMMAND too (shimmer3-firmware from LogAndStream
+     * v0.8.0, and every Shimmer3R release), so this refuses only a read that
+     * failed. */
+    const hardwareVersion = await this.readDeviceVersion().then(
+      (v) => v.hardwareVersion,
+      (e: unknown) => {
+        throw new Error(
+          `Cannot turn the link CRC on: the hardware version could not be read ` +
+            `(${(e as Error).message}). The firmware version cannot be judged without it, ` +
+            `and a status reply under a CRC could not be sized.`,
+        );
+      },
+    );
     const min = SHIMMER3R_LINK_CRC_MIN_FIRMWARE;
     const minTag = firmwareTag(min.major, min.minor, min.internal);
     const fw = await this.readFwVersion().catch((e: unknown) => {
@@ -4384,35 +4393,39 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * a notification with the ACK, and a byte stream hands every byte to the
    * stream parser anyway.
    *
-   * A read that fails leaves the width unknown, and the status is then read
-   * leniently, as before the width depended on the firmware. The next status
-   * read tries again ({@link _statusWidthReads}): a timeout, or a refusal
-   * while a factory test holds the link, remembered for the rest of the link
-   * would leave every later status read on a byte stream guessing at the
-   * width. Real firmware answers both reads. A link reset is the exception:
-   * the read that failed with it was the old link's, so the caller is failed
-   * too.
+   * A read that fails leaves the width unknown, and its error is returned for
+   * {@link getStatus} to decide what that costs. The next status read tries
+   * again ({@link _statusWidthReads}): a timeout, or a refusal while a factory
+   * test holds the link, remembered for the rest of the link would leave every
+   * later status read without the width. Real firmware answers both reads. A
+   * link reset is the exception: the read that failed with it was the old
+   * link's, so it is thrown, failing the caller too.
+   *
+   * @returns why the width could not be learnt, or `null` when it is known or
+   *   was not asked for.
    */
-  private async _learnStatusWidth(): Promise<void> {
-    if (this._statusPayloadBytes !== null || this._streaming) return;
+  private async _learnStatusWidth(): Promise<Error | null> {
+    if (this._statusPayloadBytes !== null || this._streaming) return null;
     if (!this._statusWidthReads) {
       const reads = this._readStatusWidth().finally(() => {
         if (this._statusWidthReads === reads) this._statusWidthReads = null;
       });
       this._statusWidthReads = reads;
     }
-    await this._statusWidthReads;
+    return this._statusWidthReads;
   }
 
   /** The reads behind {@link _learnStatusWidth}. */
-  private async _readStatusWidth(): Promise<void> {
+  private async _readStatusWidth(): Promise<Error | null> {
     const link = this._linkGeneration;
     try {
       await this.readDeviceVersion();
       if (this._statusPayloadBytes === null) await this.readFwVersion();
+      return null;
     } catch (e) {
       if (this._linkGeneration !== link) throw e;
-      this._log('Status width not learnt; reading the status leniently:', (e as Error).message);
+      this._log('Status width not learnt:', (e as Error).message);
+      return e instanceof Error ? e : new Error(String(e));
     }
   }
 
@@ -4442,17 +4455,32 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * With the width known, an answer shorter than it is a truncated message,
    * and this rejects on timeout rather than returning a status whose
-   * `usbPluggedIn` is `null`. While it is unknown a one-byte answer is still
-   * accepted, because it may be complete. That happens when the version reads
-   * fail, or while streaming, when they are not attempted.
+   * `usbPluggedIn` is `null`.
+   *
+   * When the version reads fail, a link that splits replies by length rejects
+   * at once with their error, and sends nothing. That means a byte stream, or a
+   * link with a CRC on. There a one-byte reply cannot be told from the first
+   * byte of a two-byte one until the byte after it arrives, and nothing would
+   * follow a reply this method waits for: it would time out, and its bytes
+   * would reach {@link onDeviceStatus} as a push when the next command's
+   * reply arrived. Over BLE without a CRC each reply arrives whole, so the
+   * status is read anyway, and a one-byte answer is accepted because it may be
+   * complete. So it is while streaming, when the versions are not read.
    */
   async getStatus(): Promise<Shimmer3DeviceStatus> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const link = this._linkGeneration;
     /* Before the read is claimed below, so a push that lands during the version
      * reads is still reported as one. */
-    await this._learnStatusWidth();
+    const unlearnt = await this._learnStatusWidth();
     if (this._linkGeneration !== link) throw this._linkResetError('the status');
+    if (unlearnt && this._statusPayloadBytes === null && this._reframing) {
+      throw new Error(
+        `Cannot read the status: reading the versions that set its length failed ` +
+          `(${unlearnt.message}), and without them this link cannot tell where a status ` +
+          `reply ends.`,
+      );
+    }
     // Claimed before the write, not after the ACK: the reply can arrive while
     // this method is still between awaits, and it must not be mistaken for an
     // unsolicited push in that window.

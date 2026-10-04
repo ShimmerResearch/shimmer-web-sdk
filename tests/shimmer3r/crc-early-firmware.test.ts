@@ -86,6 +86,8 @@ interface DeviceOptions {
   clearsCrcAtStop?: boolean;
   /** Leave GET_FW_VERSION unanswered. */
   ignoreFwVersion?: boolean;
+  /** Leave GET_DEVICE_VERSION unanswered. */
+  ignoreDeviceVersion?: boolean;
 }
 
 /**
@@ -127,6 +129,7 @@ function device(opts: DeviceOptions) {
     const version = versionReply(op, hardwareVersion, opts.firmware);
     if (version) {
       if (op === OPCODES.GET_FW_VERSION_COMMAND && opts.ignoreFwVersion) return;
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND && opts.ignoreDeviceVersion) return;
       reply(version);
     } else if (op === OPCODES.SET_CRC_COMMAND) {
       state.mode = bytes[1] as CrcMode;
@@ -268,6 +271,28 @@ describe('a link CRC on Shimmer3R firmware that drops it when sensing stops', ()
       vi.useRealTimers();
     }
     expect(sent(dev.t)).not.toContain(OPCODES.SET_CRC_COMMAND);
+    expect(client.crcMode).toBe(CRC_MODE.OFF);
+  });
+
+  it('refuses when the hardware version cannot be read, since nothing could be sized', async () => {
+    /* The firmware version means nothing without it, and neither can the
+       status width be known. A status under a CRC would then be sized by the
+       byte after its first, which can be the CRC's own. */
+    const dev = device({ link: LINKS[1], firmware: V1_00_011, ignoreDeviceVersion: true });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(dev.t);
+
+    vi.useFakeTimers();
+    try {
+      const refused = expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow(
+        /hardware version could not be read/,
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      await refused;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(sent(dev.t)).toEqual([OPCODES.GET_DEVICE_VERSION_COMMAND]);
     expect(client.crcMode).toBe(CRC_MODE.OFF);
   });
 
