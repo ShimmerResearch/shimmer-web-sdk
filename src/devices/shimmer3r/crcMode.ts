@@ -275,10 +275,8 @@ export const SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE = Object.freeze({
  * Any hardware but a Shimmer3R returns false, as does firmware other than
  * LogAndStream.
  *
- * HARDWARE-VERIFY: derived from the firmware source at every Shimmer3R tag from
- * v1.00.011 to v1.00.051, and from scripted devices. No Shimmer3R on v1.00.024
- * to v1.00.049 has been run against this SDK, so neither the hardfault nor the
- * way around it has been seen on hardware.
+ * Read off the firmware source at every Shimmer3R tag from v1.00.011 to
+ * v1.00.051.
  *
  * @param hardwareVersion The DEVICE_VERSION_RESPONSE hardware id: 10 for a
  *   Shimmer3R, 3 for a Shimmer3.

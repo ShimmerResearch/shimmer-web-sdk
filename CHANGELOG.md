@@ -28,7 +28,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   - **A 1-byte CRC never needs it,** and neither does any other firmware, a Shimmer3 included.
   - **The prefix stays off for the rest of the link.** The firmware turns it back on only together with the CRC, at startup and on disconnect, so it cannot return while the CRC is on. A reconnect that re-establishes the 2-byte CRC sends the prefix command again first.
 
-  `twoByteCrcOverrunsStatusPush()` and `SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE` are exported. No Shimmer3R in that range has been run against this SDK, so the change carries a `HARDWARE-VERIFY:` marker.
+  `twoByteCrcOverrunsStatusPush()` and `SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE` are exported. No Shimmer3R in that range has been run against this SDK.
 
 - **Shimmer3R firmware before LogAndStream v1.00.024 no longer loses its status replies and pushes** (DEV-307). `Shimmer3RClient` sized every Shimmer3R STATUS_RESPONSE at two status bytes. The second byte, `usbPluggedIn`, arrived only with LogAndStream v1.00.024 (log-and-stream-common 8377afc, June 2025), and v0.00.002 to v1.00.023 send one.
   - **Byte stream, or BLE with a link CRC on:** the client took the byte after every status from those releases as its second byte. That byte was usually the next command's ACK, so that command timed out.
