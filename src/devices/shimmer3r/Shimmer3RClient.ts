@@ -2834,9 +2834,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * per-sensor commands + 21-byte responses are unambiguous in the Java oracle,
    * whereas the chunked dump read sequence is not verifiable for this transport.
    *
-   * HARDWARE-VERIFY: no real Shimmer3R radio has exercised this path; the
-   * command/response opcodes and 21-byte block layout are ported from the Java
-   * driver but not confirmed end-to-end against hardware.
+   * Run on a Shimmer3R (LogAndStream v1.01.017, SR48-8-2) over classic SPP,
+   * with the link CRC off, one byte and two: all six replies framed, and the
+   * lnAccel, gyro, mag and wrAccel blocks were the ones the device sent. Its
+   * altAccel and altMag replies were all zeros, which is what the firmware sends
+   * when its calibration dump holds no record for that sensor at that range
+   * (`ShimCalib_singleSensorRead`, `Calibration/shimmer_calibration.c:288-313`).
+   * Those two groups rightly kept their defaults.
+   *
+   * HARDWARE-VERIFY: two things that run did not cover. No real altAccel or
+   * altMag block has been adopted, and BLE has not been run, with or without a
+   * link CRC.
    *
    * @returns the set of groups whose calibration was successfully read.
    */
