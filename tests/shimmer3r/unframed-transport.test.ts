@@ -158,6 +158,24 @@ describe('shimmer3rControlMessageLength', () => {
     expect(len([OPCODES.GYRO_RANGE_RESPONSE])).toBe(NEED_MORE);
   });
 
+  it('sizes the six per-sensor calibration replies at their 21-byte block', () => {
+    /* [opcode][21-byte block]: `ShimBt_replySingleSensorCalibCmd` copies
+       SC_DATA_LEN_STD_IMU_CALIB bytes behind the opcode. None of the six was
+       here, so over a byte stream, or BLE with a link CRC, every
+       readCalibration group resynced through its reply and timed out. */
+    for (const opcode of [
+      OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
+      OPCODES.GYRO_CALIBRATION_RESPONSE,
+      OPCODES.MAG_CALIBRATION_RESPONSE,
+      OPCODES.WR_ACCEL_CALIBRATION_RESPONSE,
+      OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE,
+      OPCODES.ALT_MAG_CALIBRATION_RESPONSE,
+    ]) {
+      expect(len([opcode, ...Array(21).fill(0x64)])).toBe(22);
+      expect(len([opcode, ...Array(20).fill(0x64)])).toBe(NEED_MORE);
+    }
+  });
+
   describe('instream responses ([0x8A] prefix)', () => {
     const INSTREAM = OPCODES.INSTREAM_CMD_RESPONSE; // 0x8A
     const STATUS = OPCODES.STATUS_RESPONSE; // 0x71
