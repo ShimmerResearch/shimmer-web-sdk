@@ -552,6 +552,37 @@ describe('Shimmer3Client read timeouts', () => {
   });
 });
 
+describe('Shimmer3Client real-world clock over RFCOMM', () => {
+  // The firmware's tick count, as `[0x90][u64 LSB first]` sends it:
+  // 2026-10-02T12:00:00Z in 32768 Hz ticks.
+  const TICKS = (BigInt(Date.UTC(2026, 9, 2, 12)) * 32768n) / 1000n;
+  const RWC = [
+    OPCODES.RWC_RESPONSE,
+    ...Array.from({ length: 8 }, (_, i) => Number((TICKS >> BigInt(8 * i)) & 0xffn)),
+  ];
+
+  it.each([
+    { link: 'one read', perByte: false },
+    { link: 'a byte per read', perByte: true },
+  ])('reads the clock from $link', async ({ perByte }) => {
+    // The framer could not size RWC_RESPONSE, so this always timed out.
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      replyHandshake(bytes, tr);
+      if (bytes[0] !== OPCODES.GET_RWC_COMMAND) return;
+      if (perByte) dribble(tr, [ACK, ...RWC]);
+      else setTimeout(() => tr.notify([ACK, ...RWC]), 0);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+
+    const { ticks, unixMs } = await client.getRtcTime();
+
+    expect(ticks).toBe(TICKS);
+    expect(unixMs).toBeCloseTo(Date.UTC(2026, 9, 2, 12), -1);
+  });
+});
+
 describe('Shimmer3Client daughter-card memory', () => {
   const DCMEM_RSP = OPCODES.DAUGHTER_CARD_MEM_RESPONSE;
   // Brand record host offset 1936 = 0x0790 little-endian → offLSB 0x90, offMSB 0x07.
