@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
@@ -498,6 +498,88 @@ describe('Shimmer3Client drain quiescence timing (fake timers)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Each of these reads takes a timeout that defaults to
+// SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS. That object is frozen, so while the
+// parameter had no annotation it was inferred as the literal type 2000, and
+// passing any other value failed to compile (TS2345). `npm run typecheck`
+// covers tests/, so it fails if the literal type ever comes back.
+describe('Shimmer3Client read timeouts', () => {
+  it('readPressureCalibration honours a timeout other than the 2 s default', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite(() => {
+      /* never reply */
+    });
+    const sentBefore = t.writes.length;
+    vi.useFakeTimers();
+    try {
+      let resolved = false;
+      const p = client.readPressureCalibration(100).then((cal) => {
+        resolved = true;
+        return cal;
+      });
+      // Three commands are tried in turn, each waiting the 100 ms it was given,
+      // so the third is still waiting at 250 ms...
+      await vi.advanceTimersByTimeAsync(250);
+      expect(resolved).toBe(false);
+      // ...and has given up by 350 ms. At the default, the first alone waits 2 s.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolved).toBe(true);
+      expect(await p).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(t.writes.slice(sentBefore).map((w) => w.bytes[0])).toEqual([
+      OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND,
+      OPCODES.GET_BMP280_CALIBRATION_COEFFICIENTS_COMMAND,
+      OPCODES.GET_BMP180_CALIBRATION_COEFFICIENTS_COMMAND,
+    ]);
+  });
+
+  it('types every read timeout as a number, not the literal default', () => {
+    expectTypeOf<Shimmer3Client['readExgConfig']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['getRtcTime']>().parameter(0).toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['readPressureCalibration']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['readCalibration']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+  });
+});
+
+describe('Shimmer3Client real-world clock over RFCOMM', () => {
+  // The firmware's tick count, as `[0x90][u64 LSB first]` sends it:
+  // 2026-10-02T12:00:00Z in 32768 Hz ticks.
+  const TICKS = (BigInt(Date.UTC(2026, 9, 2, 12)) * 32768n) / 1000n;
+  const RWC = [
+    OPCODES.RWC_RESPONSE,
+    ...Array.from({ length: 8 }, (_, i) => Number((TICKS >> BigInt(8 * i)) & 0xffn)),
+  ];
+
+  it.each([
+    { link: 'one read', perByte: false },
+    { link: 'a byte per read', perByte: true },
+  ])('reads the clock from $link', async ({ perByte }) => {
+    // The framer could not size RWC_RESPONSE, so this always timed out.
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      replyHandshake(bytes, tr);
+      if (bytes[0] !== OPCODES.GET_RWC_COMMAND) return;
+      if (perByte) dribble(tr, [ACK, ...RWC]);
+      else setTimeout(() => tr.notify([ACK, ...RWC]), 0);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+
+    const { ticks, unixMs } = await client.getRtcTime();
+
+    expect(ticks).toBe(TICKS);
+    expect(unixMs).toBeCloseTo(Date.UTC(2026, 9, 2, 12), -1);
   });
 });
 

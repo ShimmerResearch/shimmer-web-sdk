@@ -708,7 +708,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    *   while streaming (the control plane belongs to the stream parser then).
    */
   async readExgConfig(
-    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
     this._assertExgSupported();
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
@@ -755,11 +755,15 @@ export class Shimmer3Client extends BaseShimmerClient {
    * anchors the stream timeline accordingly — `rwc-estimated`, carrying half
    * the round trip as its uncertainty.
    *
+   * HARDWARE-VERIFY: not run on a real Shimmer3. Until DEV-1135 this client's
+   * framer could not size RWC_RESPONSE, so the call has never completed against
+   * a device.
+   *
    * @throws Error when not connected, while streaming, or when the firmware
    *   does not serve the command.
    */
   async getRtcTime(
-    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<{ ticks: bigint; unixMs: number }> {
     if (!this._transport) throw new Error('Not connected');
     if (this._streaming) throw new Error('Cannot read the real-world clock while streaming');
@@ -880,7 +884,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    * @throws Error only when not connected.
    */
   async readPressureCalibration(
-    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<PressureCalibration | null> {
     if (!this._transport) throw new Error('Not connected');
     if (this._streaming) throw new Error('Cannot read the pressure calibration while streaming');
@@ -1756,7 +1760,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    * @returns the groups whose calibration was successfully read.
    */
   async readCalibration(
-    timeoutMs = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<InertialGroup[]> {
     if (!this._transport) throw new Error('Not connected');
     const plan: Array<{ group: InertialGroup; get: number; resp: number }> = [
