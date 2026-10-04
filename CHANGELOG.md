@@ -27,6 +27,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Shimmer3R firmware before LogAndStream v1.00.024 no longer loses its status replies and pushes** (DEV-307). `Shimmer3RClient` sized every Shimmer3R STATUS_RESPONSE at two status bytes. The second byte, `usbPluggedIn`, arrived only with LogAndStream v1.00.024 (log-and-stream-common 8377afc, June 2025), and v0.00.002 to v1.00.023 send one.
+  - **Byte stream, or BLE with a link CRC on:** the client took the byte after every status from those releases as its second byte. That byte was usually the next command's ACK, so that command timed out.
+  - **BLE without a CRC:** once the hardware version had been read, `getStatus()` waited for a byte that never came and timed out, and pushes were dropped as truncated. `setCrcMode(1)` and `setCrcMode(2)` read the hardware version, so turning a CRC on was enough to set this off, and so was a refused attempt.
+
+  The width now comes from the hardware and the firmware together: two bytes only from a Shimmer3R running LogAndStream v1.00.024 or later, and one from anything else. The Java driver (`isSupportedUSBPluggedInStatus`) and the C# API (`IsTwoByteStatusResponseSupported`) already apply this rule. `getStatus()` now reads both versions first when the width is not known yet:
+  - The versions are cached per link once read, as `readDeviceVersion()` and `readFwVersion()` cache them, so they cost a round trip each once per link. Status reads made together share the reads, and the next status read tries again after a failure.
+  - They are not read while streaming.
+  - If they cannot be read, a byte stream fails the status read at once with that reason and sends nothing. There a one-byte reply cannot be told from the start of a two-byte one until the byte after it arrives, and nothing follows a reply the client waits for, so it would only time out. Over BLE without a CRC the reply arrives whole, so the status is still read, and one byte is accepted.
+  - This also fixes a Shimmer3 read over a byte stream with no `readDeviceVersion()` first, which was framed at two bytes too.
+
+  `setCrcMode(1)` and `setCrcMode(2)` now also refuse when the hardware version cannot be read, as they already did for the firmware version. A CRC sends every reply through the framer, which needs the status width. Every firmware that implements `SET_CRC_COMMAND` answers `GET_DEVICE_VERSION_COMMAND` too, so only a read that failed is refused.
+
+  Until the width is known, one status byte counts as a whole status. Over a byte stream the framer sizes a status by the byte after its first: `0x00` or `0x01` is the `usbPluggedIn` byte, and anything else starts the next message. A one-byte push therefore waits for that next byte instead of taking it. `statusPayloadBytesFor()` and `SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE` are exported, and `shimmer3rControlMessageLength` accepts `statusPayloadBytes: 'unknown'`.
+
+  `STATUS_BYTE_COUNT`, which appeared in v1.00.050 with DEV-621, is not the boundary: it replaced a count that v1.00.024 already returned. No Shimmer3R older than v1.00.024 has been run against this SDK, so the one-byte path carries a `HARDWARE-VERIFY:` marker.
+
 - **A Shimmer3's status push no longer corrupts `Shimmer3Client`'s control stream** (DEV-1142). A Shimmer3 sends `[ACK][0x8A][0x71][status]` unasked when it is docked or undocked, and when sensing starts or stops for a reason other than a host command, such as the button, the end of a trial, or a low battery. `Shimmer3Client`'s framer could not size anything behind the 0x8A prefix. It dropped 0x8A and 0x71, then framed the status byte as whichever opcode it equalled. Status 0x25 (docked, RTC set, SD card in) is DEVICE_VERSION_RESPONSE, whose one-byte payload took the byte after it:
   - **While idle,** that byte was the next command's ACK, so the command timed out.
   - **During `connect()`,** a push just ahead of the GET_DEVICE_VERSION reply was taken for that reply, and the reply's own ACK became the hardware version, 255. ExG and the real-world clock were then refused until the next connect.

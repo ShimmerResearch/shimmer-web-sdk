@@ -165,20 +165,24 @@ export function messageCarriesLinkCrc(msg: Uint8Array): boolean {
 
 /**
  * How many status bytes a STATUS_RESPONSE carries — the one length in this
- * protocol that depends on which platform answered rather than on the bytes
- * themselves.
+ * protocol that depends on which device answered, and on what firmware it runs,
+ * rather than on the bytes themselves.
  */
 export interface Shimmer3RFramingOptions {
   /**
-   * 2 on a Shimmer3R, 1 on a Shimmer3 (`STATUS_BYTE_COUNT`,
-   * log-and-stream-common `Comms/shimmer_bt_uart.h:259-263`). Defaults to 2:
-   * this framer belongs to the Shimmer3R client, and a client that has not yet
-   * asked for the hardware version is talking to a Shimmer3R until told
-   * otherwise. Get it wrong on a Shimmer3 and the framer eats the byte after
-   * the status — an ACK, usually — so the client should pass 1 as soon as
-   * `readDeviceVersion` reports hardware 3.
+   * 2 on a Shimmer3R running LogAndStream v1.00.024 or later, 1 on anything
+   * else (`STATUS_BYTE_COUNT`, log-and-stream-common
+   * `Comms/shimmer_bt_uart.h:259-263`, and `statusPayloadBytesFor`, which
+   * decides it from the hardware and firmware versions). Get it wrong and the
+   * framer either eats the byte after a one-byte status, an ACK usually, or
+   * leaves a two-byte status's second byte to be framed as a message of its own.
+   *
+   * `'unknown'` is for a caller that has not read both versions yet: the byte
+   * after the first status byte decides, as described at the status branch of
+   * {@link shimmer3rControlMessageLength}. Defaults to 2, the width every
+   * Shimmer3R release from v1.00.024 sends.
    */
-  statusPayloadBytes?: 1 | 2;
+  statusPayloadBytes?: 1 | 2 | 'unknown';
 }
 
 /**
@@ -260,7 +264,36 @@ export function shimmer3rControlMessageLength(
     if (buf[1] === OPCODES.STATUS_RESPONSE) {
       // [0x8A][0x71][status0]{[status1]} — ShimBt_assembleStatusBytes,
       // `Comms/shimmer_bt_uart.c:2920-2932`.
-      const total = 2 + (opts.statusPayloadBytes ?? 2);
+      const width = opts.statusPayloadBytes ?? 2;
+      if (width === 'unknown') {
+        /* Not known yet, so the byte after status0 decides. A second status
+           byte carries usbPluggedIn in bit 0 with bits 1-7 zero
+           (`ShimBt_assembleStatusBytes`), so it is 0x00 or 0x01. No message the
+           firmware sends starts with 0x01, which is the inquiry command, and
+           0x00 starts only a data packet, which does not follow a status here:
+           the client routes stream data past this framer, and the firmware
+           does not push a status for a start the host commanded
+           (`ShimBt_instreamStatusRespSendIfNotBtCmd`).
+
+           Anything else is the next message, so the status had one byte. That
+           byte has to arrive before the status can be sized, so a one-byte
+           status waits for whatever comes next, rather than eating it or
+           leaving a two-byte status's tail behind. That suits a push, which is
+           followed by the next command's reply. A reply the client waits for is
+           followed by nothing, so the client reads the versions before asking,
+           and fails the request rather than sending it without them.
+
+           Under a link CRC the byte after status0 can be the CRC's low byte
+           instead, and a one-byte status whose CRC begins 0x00 or 0x01 would
+           be sized a byte too long. The client never asks that of this branch:
+           it turns a CRC on only once both versions have been read.
+
+           HARDWARE-VERIFY: only scripted devices have sent a status through
+           this branch, on both widths. */
+        if (buf.length < 4) return NEED_MORE;
+        return buf[3] <= 0x01 ? 4 : 3;
+      }
+      const total = 2 + width;
       return buf.length < total ? NEED_MORE : total;
     }
     if (buf[1] === OPCODES.VBATT_RESPONSE) {

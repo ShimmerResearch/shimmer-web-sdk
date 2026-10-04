@@ -186,7 +186,8 @@ describe('shimmer3rControlMessageLength', () => {
     });
 
     it('sizes a status response at 2 + statusPayloadBytes', () => {
-      // Shimmer3R sends two status bytes, Shimmer3 one (STATUS_BYTE_COUNT).
+      // A Shimmer3R from LogAndStream v1.00.024 sends two status bytes, a
+      // Shimmer3 and earlier Shimmer3R firmware one (STATUS_BYTE_COUNT).
       expect(len([INSTREAM, STATUS, 0x21, 0x01])).toBe(4);
       expect(shimmer3rControlMessageLength(new Uint8Array([INSTREAM, STATUS, 0x21, 0x01]))).toBe(4);
       expect(
@@ -198,12 +199,42 @@ describe('shimmer3rControlMessageLength', () => {
 
     it('waits for the second status byte only when one is expected', () => {
       const short = new Uint8Array([INSTREAM, STATUS, 0x21]);
-      // Default (Shimmer3R): the usbPluggedIn byte is still outstanding.
+      // Default (two bytes): the usbPluggedIn byte is still outstanding.
       expect(shimmer3rControlMessageLength(short)).toBe(NEED_MORE);
-      // Told it is a Shimmer3, the same bytes are a whole message. Getting this
-      // wrong is not a stall but a theft: the framer would swallow whatever
-      // followed the status — usually an ACK.
+      // Told the status has one byte, the same bytes are a whole message.
+      // Getting this wrong is not a stall but a theft: the framer would
+      // swallow whatever followed the status — usually an ACK.
       expect(shimmer3rControlMessageLength(short, { statusPayloadBytes: 1 })).toBe(3);
+    });
+
+    describe("while the width is 'unknown'", () => {
+      const unknown = (bytes: number[]): number =>
+        shimmer3rControlMessageLength(new Uint8Array(bytes), { statusPayloadBytes: 'unknown' });
+
+      it('waits for the byte after status0, which decides', () => {
+        expect(unknown([INSTREAM, STATUS, 0x21])).toBe(NEED_MORE);
+      });
+
+      it('takes 0x00 or 0x01 after status0 as the usbPluggedIn byte', () => {
+        // Bit 0 is usbPluggedIn and bits 1-7 are zero, so the second byte is
+        // only ever one of these two.
+        expect(unknown([INSTREAM, STATUS, 0x21, 0x00])).toBe(4);
+        expect(unknown([INSTREAM, STATUS, 0x21, 0x01])).toBe(4);
+        expect(unknown([INSTREAM, STATUS, 0x21, 0x01, ACK])).toBe(4);
+      });
+
+      it('takes any other byte as the next message, leaving it whole', () => {
+        // A one-byte status followed by an ACK: sizing it at two bytes stole
+        // that ACK and failed the command it belonged to.
+        expect(unknown([INSTREAM, STATUS, 0x21, ACK])).toBe(3);
+        expect(unknown([INSTREAM, STATUS, 0x21, INSTREAM, STATUS, 0x20])).toBe(3);
+        expect(unknown([INSTREAM, STATUS, 0x21, OPCODES.DEVICE_VERSION_RESPONSE, 10])).toBe(3);
+      });
+
+      it('leaves every other message as it was', () => {
+        expect(unknown([INSTREAM, VBATT, 0x9a, 0x03, 0xc0])).toBe(5);
+        expect(unknown([ACK, INSTREAM, STATUS, 0x21])).toBe(1);
+      });
     });
 
     it('sizes a battery response at the 3-byte BattStatusRaw', () => {

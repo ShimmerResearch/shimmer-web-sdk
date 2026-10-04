@@ -6,19 +6,26 @@ import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { versionReply } from './configFirmware.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 
 /**
  * A sensor that models the firmware's own bookkeeping: TOGGLE_LED flips
  * `shimmerStatus.toggleLedRedCmd`, and GET_STATUS reports it as bit 7
- * (`ShimBt_assembleStatusBytes`).
+ * (`ShimBt_assembleStatusBytes`). It answers the version reads that tell the
+ * client how wide that status is, as a Shimmer3R on LogAndStream v1.00.040.
  */
 async function connectedSensor(initialRedLedOn = false) {
   const t = new LoopbackTransport({ capabilities: { framed: true } });
   const state = { redLedOn: initialRedLedOn, toggles: 0, statusReads: 0 };
   t.setOnWrite((raw) => {
     const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    const version = versionReply(cmd[0]);
+    if (version) {
+      setTimeout(() => t.notify(new Uint8Array(version)), 0);
+      return;
+    }
     if (cmd[0] === OPCODES.TOGGLE_LED_COMMAND) {
       state.redLedOn = !state.redLedOn;
       state.toggles += 1;
@@ -109,6 +116,11 @@ describe('Shimmer3RClient.setRedLed', () => {
     const t = new LoopbackTransport({ capabilities: { framed: true } });
     t.setOnWrite((raw) => {
       const cmd = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      const version = versionReply(cmd[0]);
+      if (version) {
+        setTimeout(() => t.notify(new Uint8Array(version)), 0);
+        return;
+      }
       if (cmd[0] === OPCODES.GET_STATUS_COMMAND) {
         setTimeout(
           () =>
