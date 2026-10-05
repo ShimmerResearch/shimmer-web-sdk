@@ -57,9 +57,15 @@ describe('nudgeGsrResistance', () => {
     expect(nudgeGsrResistance(30, 0)).toBe(30);
   });
 
-  it('does not clamp for auto-range (setting=4)', () => {
-    expect(nudgeGsrResistance(1, 4)).toBe(1);
+  it('clamps only the LOWER bound for auto-range (setting=4)', () => {
+    // The circuit cannot measure below the smallest range's floor whatever
+    // resistor auto-range selected, but the ceiling depends on which one it
+    // picked — and the per-sample range bits have already chosen it. Matches
+    // SensorGSR.nudgeGsrResistance (:415-421). This SDK previously returned an
+    // auto-range value unclamped.
+    expect(nudgeGsrResistance(1, 4)).toBe(8.0);
     expect(nudgeGsrResistance(99999, 4)).toBe(99999);
+    expect(nudgeGsrResistance(30, 4)).toBe(30);
   });
 });
 

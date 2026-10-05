@@ -1,0 +1,742 @@
+/**
+ * Turning a stream's 24-bit tick counter into a monotonic device clock, and
+ * then into wall-clock time.
+ *
+ * Two problems, and they are separable.
+ *
+ * **The counter wraps.** It runs at 32768 Hz in 24 bits, so it returns to zero
+ * every 512 seconds exactly — and in 16 bits, on Shimmer3 firmware older than
+ * LogAndStream 0.5.4, every **2 seconds**. Plotting the raw value against time
+ * draws a sawtooth. Unwrapping it is a matter of counting the wraps, and the
+ * naive rule ("the value went down, so it wrapped") is wrong for a duplicated
+ * or reordered packet: it adds 512 s permanently, which is what the Java
+ * driver's `unwrapTimeStamp` does (`ShimmerObject.java:3830-3848`).
+ *
+ * **The counter has no origin.** It says nothing about what time it is. To place
+ * samples on a wall clock a host has to anchor the counter against something,
+ * and there are three ways of doing that, in descending order of how well they
+ * work:
+ *
+ * | Anchor | When | Accuracy |
+ * |---|---|---|
+ * | `rwc-aligned` | Shimmer3R | exact, to the tick |
+ * | `rwc-estimated` | Shimmer3 | ± half the round trip |
+ * | `host` | no real-world clock set, or firmware without the command | ± half the round trip, and wrong by however wrong the sensor's clock is |
+ *
+ * The first is available because on a Shimmer3R the stream's timestamp **is**
+ * the low 24 bits of the same 64-bit counter `GET_RWC` returns: the packet
+ * timestamp comes from `RTC_get32()` and the real-world clock from
+ * `RTC_get64()` (`Sensing/shimmer_sensing.c:445-476`; `RTC/shimmer_rtc.h:25-28`
+ * defines `RTC_getRwcTime` as `RTC_get64`, and `Core/Src/rtc.c` gives the two
+ * functions identical bodies). So one `GET_RWC` reply pins every subsequent
+ * sample exactly, with no clock-comparison error at all: the host only has to
+ * decide *which* wrap of the counter a sample belongs to, and elapsed host time
+ * settles that with hundreds of seconds of slack.
+ *
+ * A Shimmer3's counter cannot be set. Its real-world clock is that free-running
+ * counter plus a stored offset — `RTC_getRwcTime()` returns
+ * `rwcTimeDiff64 + RTC_get64()` (`Shimmer_Driver/5xx_HAL/hal_RTC.c:73-76`) —
+ * and the offset is not sent over Bluetooth, only into an SD header. So a host
+ * can only estimate where the counter stood when the reply was composed, which
+ * is what `rwc-estimated` does and why it carries the round trip as its
+ * uncertainty.
+ *
+ * `host` is the Consensys method: the host's own clock at the first packet,
+ * carried forward by the device's counter
+ * (`SystemTimestampPlot.java:19-42`). It is the fallback rather than the
+ * default because it inherits the host's clock error rather than the sensor's,
+ * and a sensor whose clock is set is the better reference for its own data.
+ */
+
+/** The sample counter's frequency, on every Shimmer3-family device. */
+export const TICKS_PER_SECOND = 32768;
+
+/** Ticks per millisecond — 32.768, as the firmware and the Java driver have it. */
+export const TICKS_PER_MS = TICKS_PER_SECOND / 1000;
+
+/**
+ * How close to the top of the 24-bit range the previous sample must have been
+ * for a drop to exactly zero to be believed as a roll-over.
+ *
+ * One second. Firmware stamps a packet when the sample tick starts it and does
+ * not publish a packet it never stamped, so `0x000000` in the counter field
+ * means the record is invalid rather than that the counter reached its origin.
+ * LogAndStream v1.00.x–v1.01.003 could emit one under SD write back-pressure.
+ * A genuine wrap onto zero means the counter advanced to its very last tick, so
+ * its predecessor is within a sample or two of the maximum — a second is a
+ * generous allowance for a gap in the data, and nine orders of magnitude away
+ * from the mid-range predecessors the invalid records have.
+ *
+ * Only the 24-bit counter is judged this way. The 16-bit one's whole range is
+ * 2 s, so a stall really can cross it, and it keeps its existing behaviour.
+ */
+export const INVALID_ZERO_WINDOW_TICKS = TICKS_PER_SECOND;
+
+/**
+ * How many sample periods behind its predecessor a value may be and still be
+ * read as a reordered packet rather than as forward motion across a wrap.
+ *
+ * A reorder swaps packets that are adjacent in time, so it spans a handful of
+ * sample periods; a dropout spans whatever the link lost. Eight periods sits
+ * orders of magnitude clear of both at any rate the hardware offers.
+ */
+export const REORDER_PERIODS = 8;
+
+/**
+ * The largest fraction of the counter's range a reorder window may occupy.
+ *
+ * At 1 Hz on the 16-bit counter eight sample periods is four whole modulos, and
+ * a window at or above the modulo leaves no backward step large enough to be a
+ * wrap — the unwrap would stop counting them altogether.
+ */
+export const MAX_WINDOW_DIVISOR = 8;
+
+/**
+ * The reorder window for a stream at a known sampling rate, in counter ticks.
+ *
+ * Sized in **sample periods**, not as a fraction of the counter's range. The
+ * two are easy to confuse and behave very differently: a reorder swaps adjacent
+ * packets, whereas a dropout that happens to span the wrap point is most of a
+ * modulo. Sizing the window by the modulo puts the boundary between them in the
+ * middle of ordinary dropout territory — at 2^16 every gap between 1.75 s and
+ * 2.0 s reads as a reorder and the wrap is silently lost, and 1.75 s is a gap a
+ * Bluetooth link produces on a bad afternoon. Eight sample periods shrinks that
+ * misread band to about 16 ms.
+ *
+ * `0` — the branch disabled — when the rate is not a positive finite number.
+ * Never guess: an unknown rate must not become an infinite window, which would
+ * read every backward step as a reorder and lose every wrap. That is a worse
+ * failure than no reorder detection at all, and it is how a parallel fix for
+ * this same defect reverted itself whenever the rate happened to read zero.
+ *
+ * @param samplingRateHz Samples per second. **The counter's own 32768 Hz tick
+ *   domain is what the answer is in** — pass the rate in Hz, never a rate
+ *   expressed against a TCXO sampling clock.
+ * @param modulo The counter's range, `2 ** timestampBits`.
+ */
+export function reorderWindowTicks(
+  samplingRateHz: number | null | undefined,
+  modulo: number,
+): number {
+  if (samplingRateHz == null || !Number.isFinite(samplingRateHz) || samplingRateHz <= 0) return 0;
+  return Math.min(
+    (REORDER_PERIODS * TICKS_PER_SECOND) / samplingRateHz,
+    modulo / MAX_WINDOW_DIVISOR,
+  );
+}
+
+/**
+ * Relative drift assumed between the sensor's clock and the host's, in parts
+ * per million, when an anchor is bound to a stream some time after the reading
+ * that produced it.
+ *
+ * An assumption, not a measurement: it turns the age of a reading into an
+ * uncertainty a caller can see, and nothing here corrects for it. Twenty ppm
+ * is a plain 32768 Hz crystal's order of magnitude, so an hour-old reading is
+ * reported as good to about 72 ms rather than to the round trip that took it.
+ */
+export const CLOCK_DRIFT_PPM_ASSUMED = 20;
+
+/** Where a timeline's wall-clock time came from. See the module docblock. */
+export type TimelineSource = 'rwc-aligned' | 'rwc-estimated' | 'host';
+
+/** How wide the device's sample counter is. */
+export type TimestampBits = 16 | 24;
+
+/** One stamped sample. */
+export interface StreamStamp {
+  /**
+   * The counter with its wraps added back.
+   *
+   * **Not monotonic.** A reordered or duplicated packet reports the position it
+   * actually holds, which is behind the sample before it — that is the honest
+   * answer for a consumer plotting samples against their own times, and the
+   * alternative (clamping to the running maximum) would place a late packet at
+   * a time it was not taken. {@link TimelineState.wraps} *is* monotonic,
+   * because a session's wrap count is not a property of one sample.
+   */
+  unwrappedTicks: number;
+  /**
+   * Milliseconds on the device's own clock: `unwrappedTicks / 32.768`.
+   *
+   * Not zeroed at stream start — it begins wherever the counter stood, which is
+   * what the Java driver emits on its `TIMESTAMP` CAL channel. Subtract the
+   * first sample's value for "seconds since start".
+   */
+  deviceMs: number;
+  /** Unix milliseconds, or `null` when the timeline has no anchor yet. */
+  unixMs: number | null;
+  /** Which anchor produced `unixMs`; `null` when there is none. */
+  source: TimelineSource | null;
+  /**
+   * True when the packet's counter field was an invalid `0x000000` rather than
+   * a real reading — see {@link INVALID_ZERO_WINDOW_TICKS}.
+   *
+   * The timeline is held where it was, so the other three fields repeat the
+   * previous sample's and say nothing about when this one was taken. The
+   * sensor values on the frame are real; only its time is missing. Consumers
+   * that need a true time axis should drop the sample.
+   */
+  invalid: boolean;
+}
+
+/** What a host should be told about a timeline's anchor. */
+export interface TimelineState {
+  source: TimelineSource | null;
+  /** Host clock reading the anchor was taken at, or `null`. */
+  anchorHostMs: number | null;
+  /** Unix time the anchor assigned, or `null`. */
+  anchorUnixMs: number | null;
+  /**
+   * How far out the anchor could be, in milliseconds.
+   *
+   * Zero for `rwc-aligned` — the arithmetic is exact. Half the measured round
+   * trip for the other two, which is the best a single request/response
+   * exchange can say about when the far end read its clock.
+   */
+  anchorUncertaintyMs: number;
+  /**
+   * Device-minus-host at the moment of anchoring, or `null` — including while
+   * the anchor is still waiting for its first sample.
+   */
+  skewMs: number | null;
+  /**
+   * For an aligned anchor, how far this host's clock could have been wrong and
+   * still have selected the same wrap of the counter, in milliseconds. `null`
+   * for the other sources, which do not choose a wrap.
+   *
+   * Read it beside `anchorUncertaintyMs`, which is zero for an aligned anchor
+   * and honestly so: the value is exact to the tick once the wrap is right.
+   * This is the size of the assumption that makes it right. A margin of
+   * minutes is comfortable; one of seconds means a host clock that stepped
+   * (a resumed laptop, an NTP correction) could have placed the whole stream a
+   * clean 512 seconds out.
+   */
+  wrapMarginMs: number | null;
+  /** How many counter wraps have been counted this session. Never decreases. */
+  wraps: number;
+  /** The counter width in use. */
+  timestampBits: TimestampBits;
+  /**
+   * The reorder window in force, in counter ticks — how far behind its
+   * predecessor a sample may be and still be placed where it was taken rather
+   * than read as a wrap.
+   *
+   * Reported so a host can see that its sampling rate reached the timeline.
+   * See {@link reorderWindowTicks} and
+   * {@link StreamTimeline.setSamplingRateHz}.
+   */
+  reorderWindowTicks: number;
+}
+
+interface PendingAnchor {
+  kind: 'rwc-aligned' | 'rwc-estimated' | 'host';
+  /** The device's real-world clock, in ticks. Absent for a host anchor. */
+  rwcTicks?: bigint;
+  /** Host clock at the midpoint of the exchange that produced it. */
+  hostMs: number;
+  uncertaintyMs: number;
+}
+
+interface ResolvedAnchor {
+  source: TimelineSource;
+  /** Unwrapped tick value this anchor is bound to. */
+  unwrappedTicks: number;
+  /** Unix milliseconds at that tick value. */
+  unixMs: number;
+  hostMs: number;
+  uncertaintyMs: number;
+  /** See {@link TimelineState.wrapMarginMs}. */
+  wrapMarginMs: number | null;
+  skewMs: number | null;
+}
+
+/** Options for {@link StreamTimeline}. */
+export interface StreamTimelineOptions {
+  /** Counter width. Default 24. */
+  timestampBits?: TimestampBits;
+  /**
+   * The stream's sampling rate, which sizes the reorder window. Omit, or pass
+   * `null`, when it is not known yet — a client normally learns it from an
+   * inquiry and calls {@link StreamTimeline.setSamplingRateHz} later.
+   */
+  samplingRateHz?: number | null;
+  /**
+   * The reorder window outright, in ticks, overriding the rate. For a caller
+   * that knows better than the derivation — and for the shared conformance
+   * vectors, which specify the window rather than the rate so that every host
+   * API runs them identically.
+   */
+  reorderWindowTicks?: number | null;
+}
+
+/**
+ * Unwraps a device sample counter and, once anchored, reports wall-clock time
+ * for every sample.
+ *
+ * One instance per stream. A client resets it at stream start and re-anchors
+ * whenever the device's clock is written, because that steps the very counter
+ * the samples are timed by.
+ */
+export class StreamTimeline {
+  private _bits: TimestampBits;
+  private _modulo: number;
+  private _lastRaw: number | null = null;
+  private _lastUnwrapped = 0;
+  private _lastHostMs: number | null = null;
+  private _wraps = 0;
+  /**
+   * How far behind the previous sample a value may be and still be read as a
+   * reordered packet rather than as forward motion across a wrap, in ticks.
+   * Derived — see {@link _recomputeReorderWindow}.
+   */
+  private _reorderWindow = 0;
+  /** The stream's sampling rate, or `null` when it is not known. */
+  private _samplingRateHz: number | null = null;
+  /** A window set outright by the caller, overriding the derivation. */
+  private _reorderWindowOverride: number | null = null;
+  private _pending: PendingAnchor | null = null;
+  private _anchor: ResolvedAnchor | null = null;
+  /**
+   * The last anchor REQUEST, kept so it can be re-bound to a new stream's first
+   * sample. A request is durable in a way a binding is not: it says what the
+   * device's clock read at a known host time, which stays true across a stream
+   * restart, whereas the binding is to an unwrapped tick origin that does not.
+   */
+  private _request: PendingAnchor | null = null;
+
+  constructor(opts: StreamTimelineOptions = {}) {
+    this._bits = opts.timestampBits ?? 24;
+    this._modulo = 2 ** this._bits;
+    this.setSamplingRateHz(opts.samplingRateHz ?? null);
+    this.setReorderWindowTicks(opts.reorderWindowTicks ?? null);
+  }
+
+  /**
+   * Tell the timeline the stream's sampling rate, so that it can size the
+   * reorder window in sample periods.
+   *
+   * `null` — or anything that is not a positive finite number — means "not
+   * known", and the window falls back to an eighth of the modulo, which is what
+   * this class has always used. That fallback is a compromise this SDK can
+   * afford and a file importer cannot: on a live link the host-clock recovery
+   * in {@link _unwrap} is a second witness, whereas an SD file has no clock to
+   * appeal to and the other Shimmer host APIs therefore disable the branch
+   * outright when the rate is unknown. Pass the rate and the question does not
+   * arise: the derived window is better in every case.
+   *
+   * Cheap and idempotent. Both clients call it once per stream, from the rate
+   * the inquiry reported; calling it mid-stream is allowed and the next sample
+   * is judged by the new window.
+   */
+  setSamplingRateHz(samplingRateHz: number | null): void {
+    this._samplingRateHz =
+      samplingRateHz !== null && Number.isFinite(samplingRateHz) && samplingRateHz > 0
+        ? samplingRateHz
+        : null;
+    this._recomputeReorderWindow();
+  }
+
+  /**
+   * Set the reorder window outright, in ticks, or `null` to go back to deriving
+   * it from the sampling rate. `0` disables the branch.
+   *
+   * Clamped to an eighth of the counter's range, as a derived window is — see
+   * {@link _recomputeReorderWindow}. {@link reorderWindowTicks} reports what is
+   * actually in force.
+   */
+  setReorderWindowTicks(ticks: number | null): void {
+    this._reorderWindowOverride =
+      ticks !== null && Number.isFinite(ticks) && ticks >= 0 ? ticks : null;
+    this._recomputeReorderWindow();
+  }
+
+  /** The reorder window in force, in counter ticks. */
+  get reorderWindowTicks(): number {
+    return this._reorderWindow;
+  }
+
+  /**
+   * True when the window in force is a reorder-scale one — derived from a known
+   * rate, or set outright by the caller — rather than the rate-unknown
+   * fallback.
+   *
+   * It decides whether a reorder is allowed to overrule the invalid-zero test
+   * (see {@link _unwrap}). A window of a few sample periods can: a zero that
+   * close to an origin really is ambiguous, and the cost of choosing wrong is
+   * about 16 ms. An eighth of the modulo cannot: it is 64 s on the 24-bit
+   * counter, and reading an unstamped record as a packet 64 s late would place
+   * it 64 s early and call it valid, which is worse than either answer the rule
+   * is choosing between.
+   */
+  private get _windowIsReorderScale(): boolean {
+    return this._reorderWindowOverride !== null || this._samplingRateHz !== null;
+  }
+
+  /** Explicit window, else the rate-derived one, else the legacy fallback. */
+  private _recomputeReorderWindow(): void {
+    if (this._reorderWindowOverride !== null) {
+      /* Clamped like a derived window, and for the same reason: a window at or
+         above the modulo leaves no backward step large enough to be a wrap, so
+         the unwrap stops counting them and a recording quietly runs short. That
+         must not be expressible, whether the number came from a rate or from a
+         caller. Clamped here rather than in the setter because
+         {@link setTimestampBits} can change the modulo afterwards. */
+      this._reorderWindow = Math.min(
+        this._reorderWindowOverride,
+        this._modulo / MAX_WINDOW_DIVISOR,
+      );
+    } else if (this._samplingRateHz !== null) {
+      this._reorderWindow = reorderWindowTicks(this._samplingRateHz, this._modulo);
+    } else {
+      this._reorderWindow = this._modulo / MAX_WINDOW_DIVISOR;
+    }
+  }
+
+  /** The counter width this timeline is unwrapping. */
+  get timestampBits(): TimestampBits {
+    return this._bits;
+  }
+
+  /**
+   * Change the counter width.
+   *
+   * A Shimmer3 client learns this from the firmware version during its
+   * handshake, which happens after the timeline exists. Resets everything: a
+   * wrap count means nothing against a different modulo, and an anchor is
+   * bound to an unwrapped tick value that is about to start again.
+   */
+  setTimestampBits(bits: TimestampBits): void {
+    if (bits === this._bits) return;
+    this._bits = bits;
+    this._modulo = 2 ** bits;
+    /* The window is clamped against the modulo and may be derived from it, so
+       it has to be recomputed here. The sampling rate is not a property of the
+       counter width and is deliberately kept. */
+    this._recomputeReorderWindow();
+    this.reset();
+  }
+
+  /**
+   * Start again: new stream, new counter origin.
+   *
+   * Any anchor is dropped rather than carried over. Between two streams the
+   * counter has kept running, so an anchor bound to the old stream's unwrapped
+   * origin says nothing about the new one, and a host re-reads the clock.
+   */
+  reset(): void {
+    this._lastRaw = null;
+    this._lastUnwrapped = 0;
+    this._lastHostMs = null;
+    this._wraps = 0;
+    this._anchor = null;
+    /* The binding goes; the request stays, to be re-bound to this stream's
+       first sample. So a host that read the clock once, on connect, gets a
+       wall-clock axis on every later stream without asking again — and for an
+       aligned anchor it is still exact, because the answer comes from each
+       sample's own counter bits rather than from elapsed time. */
+    this._pending = this._request;
+  }
+
+  /**
+   * Anchor against the device's real-world clock.
+   *
+   * @param rwcTicks  The 64-bit tick count `GET_RWC` returned.
+   * @param hostMs    The host clock at the **midpoint** of the exchange —
+   *   `(before + after) / 2` — which is the best single estimate of when the
+   *   device composed its reply.
+   * @param opts.rttMs  The exchange's round-trip time. Half of it is the
+   *   uncertainty, and it is ignored for an aligned anchor, which does not
+   *   depend on when the reply was composed.
+   * @param opts.aligned  True when the stream timestamp is the low bits of this
+   *   same counter — a Shimmer3R. False for a Shimmer3, whose counter and
+   *   real-world clock differ by a stored offset the host cannot read.
+   */
+  anchorToRwc(rwcTicks: bigint, hostMs: number, opts: { rttMs?: number; aligned: boolean }): void {
+    this._pending = {
+      kind: opts.aligned ? 'rwc-aligned' : 'rwc-estimated',
+      rwcTicks,
+      hostMs,
+      uncertaintyMs: opts.aligned ? 0 : (opts.rttMs ?? 0) / 2,
+    };
+    this._request = this._pending;
+    this._anchor = null;
+  }
+
+  /**
+   * Anchor against the host's own clock, the Consensys method: the next sample
+   * is taken to have happened now, and the device's counter carries time
+   * forward from there.
+   */
+  anchorToHost(hostMs: number, opts: { rttMs?: number } = {}): void {
+    this._pending = {
+      kind: 'host',
+      hostMs,
+      uncertaintyMs: (opts.rttMs ?? 0) / 2,
+    };
+    this._request = this._pending;
+    this._anchor = null;
+  }
+
+  /** Drop any anchor and any standing request, leaving the unwrap running. */
+  clearAnchor(): void {
+    this._pending = null;
+    this._request = null;
+    this._anchor = null;
+  }
+
+  /**
+   * True when this timeline has been told how to place samples on a wall clock
+   * — whether or not a sample has arrived to bind it to yet.
+   *
+   * A client checks this before spending a round trip on the clock: one reading
+   * serves every stream of a session.
+   */
+  get hasAnchorRequest(): boolean {
+    return this._request !== null;
+  }
+
+  /**
+   * Unwrap one sample's counter value and, if anchored, place it on a wall
+   * clock.
+   *
+   * @param raw    The counter value from the packet, wraps included.
+   * @param hostMs The host clock when the packet arrived. Used only to recover
+   *   wraps that went by unseen — see below — never to time the sample, which
+   *   the device's own counter does far better.
+   * @returns the sample's place on the timeline, or, for a packet whose counter
+   *   field is an invalid `0x000000`, the previous sample's place with
+   *   {@link StreamStamp.invalid} set and the timeline untouched.
+   */
+  stamp(raw: number, hostMs?: number): StreamStamp {
+    const unwrapped = this._unwrap(raw, hostMs);
+
+    /* An invalid record. Every piece of timeline state holds where it is —
+       `_lastRaw` above all, so the next sample is compared against the last
+       value the firmware actually stamped and reads as the ordinary step
+       forward it is, rather than as a second wrap. `_lastHostMs` holds for the
+       same reason: the elapsed time the missed-wrap recovery works from must
+       span from that sample, not from this one. Nothing about a packet with no
+       timestamp is allowed to move the timeline, including binding an anchor
+       to it. */
+    if (unwrapped === null) return this._describe(this._lastUnwrapped, true);
+
+    this._lastRaw = ((raw % this._modulo) + this._modulo) % this._modulo;
+    this._lastUnwrapped = unwrapped;
+    /* How many counter boundaries this session has crossed. The unwrapped value
+       starts below one modulo (it starts AT a raw counter value), so flooring
+       the division counts crossings directly. Clamped at zero because a
+       reordered packet arriving first can carry the value slightly negative,
+       and never allowed to fall: a reordered packet that lands just before a
+       boundary would otherwise un-count a crossing the session really made. */
+    this._wraps = Math.max(this._wraps, Math.max(0, Math.floor(unwrapped / this._modulo)));
+    if (hostMs !== undefined) this._lastHostMs = hostMs;
+
+    if (this._pending) this._resolveAnchor(unwrapped, hostMs);
+
+    return this._describe(unwrapped, false);
+  }
+
+  /** Places an unwrapped tick value on the wall clock, if there is one. */
+  private _describe(unwrapped: number, invalid: boolean): StreamStamp {
+    const deviceMs = unwrapped / TICKS_PER_MS;
+    if (!this._anchor) {
+      return { unwrappedTicks: unwrapped, deviceMs, unixMs: null, source: null, invalid };
+    }
+    const unixMs = this._anchor.unixMs + (unwrapped - this._anchor.unwrappedTicks) / TICKS_PER_MS;
+    return { unwrappedTicks: unwrapped, deviceMs, unixMs, source: this._anchor.source, invalid };
+  }
+
+  /** @returns the unwrapped tick value, or `null` when the sample is invalid. */
+  private _unwrap(raw: number, hostMs?: number): number | null {
+    const value = ((raw % this._modulo) + this._modulo) % this._modulo;
+    if (this._lastRaw === null) return value;
+
+    /* Everything below is decided on the MODULAR forward distance from the last
+       sample — never by comparing candidate unwrapped values, which looks
+       equivalent and is not. A packet arriving late from just before a wrap
+       boundary has an unwrapped candidate ABOVE its predecessor, so a
+       comparison accepts it as forward motion of nearly a whole modulo, and
+       then reads the next real sample as a second wrap: `[2^24 - 10, 5,
+       2^24 - 10, 70]` lands at 33554502, two modulos out, from one out-of-order
+       packet. The modular distance sees it for what it is.
+
+       A duplicate (`forward === 0`) holds the timeline exactly where it is, and
+       falls out of the arithmetic below without a branch of its own.
+
+       Forward motion is the DEFAULT. That is what keeps a wrap preceded by a
+       long dropout classified as a wrap: however much was lost, the counter
+       still rolled over. A rule that defaults the other way — "a backward step
+       is corrupt unless it clears some threshold" — fails exactly there. */
+    const forward = (value - this._lastRaw + this._modulo) % this._modulo;
+    const backwards = this._modulo - forward;
+    const reordered = forward !== 0 && backwards <= this._reorderWindow;
+
+    /* A counter of exactly zero arriving from mid-range is not a roll-over: it
+       is a record the firmware never stamped. Read as a wrap it would put every
+       later sample in the session a clean 512 s late, which is how a customer's
+       9 minute 30 second recording imported as 43 minutes 38. The test is
+       deliberately narrow — the 24-bit counter, an exact zero, and a
+       predecessor further than {@link INVALID_ZERO_WINDOW_TICKS} from the top
+       of the range — so a genuine wrap onto zero is still accepted and the
+       16-bit counter is untouched. See the constant for why.
+
+       A reorder comes first, so a zero within a window of an origin is placed
+       rather than rejected: that is the order every Shimmer host API uses. It
+       only applies to a reorder-scale window — see
+       {@link _windowIsReorderScale}. */
+    if (
+      !(reordered && this._windowIsReorderScale) &&
+      this._bits === 24 &&
+      value === 0 &&
+      this._lastRaw < this._modulo - INVALID_ZERO_WINDOW_TICKS
+    ) {
+      return null;
+    }
+
+    const half = this._modulo / 2;
+    let unwrapped = reordered ? this._lastUnwrapped - backwards : this._lastUnwrapped + forward;
+
+    /* The rule above cannot see a wrap that went by entirely — more than a
+       whole modulo of samples missed, which is 512 s on a 24-bit counter but
+       only 2 s on the 16-bit one older Shimmer3 firmware uses. The host clock
+       is the only witness. Its jitter is irrelevant at this scale: it is being
+       asked how many whole modulos went by, not when the sample happened. */
+    if (hostMs !== undefined && this._lastHostMs !== null) {
+      const elapsedTicks = (hostMs - this._lastHostMs) * TICKS_PER_MS;
+      if (elapsedTicks > half) {
+        const expected = this._lastUnwrapped + elapsedTicks;
+        const missed = Math.round((expected - unwrapped) / this._modulo);
+        if (missed > 0) unwrapped += missed * this._modulo;
+      }
+    }
+
+    return unwrapped;
+  }
+
+  /**
+   * How much the sensor's clock and this host's may have separated between a
+   * clock reading and the sample that binds it.
+   *
+   * Zero for the aligned source, whose value does not depend on the age of the
+   * reading. For the others it is the elapsed time at
+   * {@link CLOCK_DRIFT_PPM_ASSUMED} — a stated assumption rather than a
+   * measurement, which is why it is an uncertainty and not a correction. A
+   * host that wants better should read the clock again.
+   */
+  private _staleAnchorDriftMs(
+    kind: TimelineSource,
+    readAtHostMs: number,
+    boundAtHostMs: number,
+  ): number {
+    if (kind === 'rwc-aligned') return 0;
+    const ageMs = Math.abs(boundAtHostMs - readAtHostMs);
+    return (ageMs * CLOCK_DRIFT_PPM_ASSUMED) / 1e6;
+  }
+
+  /**
+   * Turn a pending anchor into a resolved one, now that a sample's unwrapped
+   * tick value is known to bind it to.
+   */
+  private _resolveAnchor(unwrapped: number, hostMs?: number): void {
+    const pending = this._pending;
+    if (!pending) return;
+    const at = hostMs ?? pending.hostMs;
+
+    if (pending.kind === 'host') {
+      this._pending = null;
+      this._anchor = {
+        source: 'host',
+        unwrappedTicks: unwrapped,
+        unixMs: at,
+        hostMs: at,
+        uncertaintyMs: pending.uncertaintyMs + this._staleAnchorDriftMs('host', pending.hostMs, at),
+        wrapMarginMs: null,
+        skewMs: null,
+      };
+      return;
+    }
+
+    const rwcTicks = pending.rwcTicks;
+    if (rwcTicks === undefined) {
+      this._pending = null;
+      return;
+    }
+
+    /* Where the device's clock stood when this sample was taken, estimated from
+       the anchor plus however long the host says has passed since. Good to tens
+       of milliseconds, which is all that is needed below. */
+    const elapsedSinceAnchorTicks = (at - pending.hostMs) * TICKS_PER_MS;
+    const approxTicks = Number(rwcTicks) + elapsedSinceAnchorTicks;
+
+    let absoluteTicks: number;
+    let wrapMarginMs: number | null = null;
+    if (pending.kind === 'rwc-aligned') {
+      /* The sample's counter value IS the low bits of the device's real-world
+         clock, so the answer is the value congruent to it that lies nearest the
+         estimate above. Exact to the tick — but only once the right wrap is
+         chosen, and it is the host clock that chooses it. Get that wrong and
+         the error is a clean multiple of 512 s, not a small one.
+         `wrapMarginMs` is how far the host clock could have been out and still
+         have picked this wrap, so a caller can tell a comfortable choice from
+         a marginal one instead of reading `anchorUncertaintyMs: 0` as a
+         promise the host clock cannot make. */
+      const low = ((unwrapped % this._modulo) + this._modulo) % this._modulo;
+      const wraps = (approxTicks - low) / this._modulo;
+      const base = Math.round(wraps) * this._modulo;
+      absoluteTicks = base + low;
+      wrapMarginMs = ((0.5 - Math.abs(wraps - Math.round(wraps))) * this._modulo) / TICKS_PER_MS;
+    } else {
+      /* No congruence to exploit: a Shimmer3's counter and its real-world clock
+         differ by an offset only the device knows. The estimate is the answer,
+         and its error is the link's latency asymmetry. */
+      absoluteTicks = approxTicks;
+    }
+
+    const unixMs = absoluteTicks / TICKS_PER_MS;
+    this._pending = null;
+    this._anchor = {
+      source: pending.kind,
+      unwrappedTicks: unwrapped,
+      unixMs,
+      hostMs: at,
+      /* An anchor request survives a stream restart, so the reading being
+         bound here can be hours old, and over hours the two clocks separate.
+         The aligned case is immune — the congruence re-derives the value from
+         the sample itself, and what age costs there is wrap margin, reported
+         above — but an estimated anchor carries the whole of that drift into
+         its offset. */
+      uncertaintyMs:
+        pending.uncertaintyMs + this._staleAnchorDriftMs(pending.kind, pending.hostMs, at),
+      wrapMarginMs,
+      skewMs: unixMs - at,
+    };
+  }
+
+  /**
+   * What a host should show about this timeline.
+   *
+   * `source` reports what *will* place these samples as soon as one arrives,
+   * not only what already has: a host wants to label its time axis when the
+   * stream starts, not one packet later. {@link anchored} is the narrower
+   * question of whether a sample has bound the anchor yet.
+   */
+  get state(): TimelineState {
+    return {
+      source: this._anchor?.source ?? this._pending?.kind ?? this._request?.kind ?? null,
+      anchorHostMs: this._anchor?.hostMs ?? null,
+      anchorUnixMs: this._anchor?.unixMs ?? null,
+      anchorUncertaintyMs: this._anchor?.uncertaintyMs ?? 0,
+      wrapMarginMs: this._anchor?.wrapMarginMs ?? null,
+      skewMs: this._anchor?.skewMs ?? null,
+      wraps: this._wraps,
+      timestampBits: this._bits,
+      reorderWindowTicks: this._reorderWindow,
+    };
+  }
+
+  /** True once wall-clock time is available. */
+  get anchored(): boolean {
+    return this._anchor !== null;
+  }
+}

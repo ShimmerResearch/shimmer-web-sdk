@@ -6,6 +6,7 @@ import {
   applyImuCalibration,
   CalibSensorId,
   CalibQuality,
+  SC_CALIB_FORMAT_VERSION,
   SC_GLOBAL_HEADER_BYTES,
   SC_BLOCK_HEADER_BYTES,
   SC_DATA_LEN_IMU,
@@ -50,7 +51,7 @@ describe('Verisense calibration TLV codec', () => {
     const blob = serializeCalibrationBlob(sampleInput());
     const set = parseCalibrationBlob(blob);
 
-    expect(set.formatVersion).toBe(1);
+    expect(set.formatVersion).toBe(SC_CALIB_FORMAT_VERSION);
     expect(set.hwVerMajor).toBe(68);
     expect(set.hwVerMinor).toBe(8);
     expect(set.fwVerMajor).toBe(1);
@@ -103,12 +104,30 @@ describe('Verisense calibration TLV codec', () => {
     expect(set.getImu(CalibSensorId.LSM6DSV_ACCEL, 3)!.bias).toEqual([-1.5, 2.25, -3.75]);
   });
 
+  it('preserves an explicit formatVersion so writes to older firmware are not re-seeded', () => {
+    // A device running pre-v2 firmware rejects any blob whose version byte does
+    // not match its own and silently falls back to the seeded defaults, so a
+    // read-modify-write round trip must carry the device's version through.
+    const blob = serializeCalibrationBlob({ ...sampleInput(), formatVersion: 1 });
+    expect(blob[2]).toBe(1);
+    expect(parseCalibrationBlob(blob).formatVersion).toBe(1);
+
+    // Absent an explicit version, new blobs are stamped with the current one.
+    expect(serializeCalibrationBlob(sampleInput())[2]).toBe(SC_CALIB_FORMAT_VERSION);
+  });
+
+  // Every expectation in this test is a hard-coded literal on purpose: it pins
+  // the on-the-wire layout against the spec, so a change to any constant has to
+  // show up here as a deliberate edit. Do not swap these for the exported
+  // constants - an assertion written in terms of the value it is checking would
+  // pass no matter what that value became. The round-trip test above uses
+  // SC_CALIB_FORMAT_VERSION because it checks fidelity, not the spec.
   it('writes a spec-exact byte layout (offsets, totalLen, block headers)', () => {
     const blob = serializeCalibrationBlob(sampleInput());
 
     // totalLen field = blob.length - 2.
     expect(blob[0] | (blob[1] << 8)).toBe(blob.length - 2);
-    expect(blob[2]).toBe(1); // calibFormatVersion
+    expect(blob[2]).toBe(2); // calibFormatVersion
     expect(blob[9]).toBe(2); // sensorBlockCount
 
     // First block header at offset 12.

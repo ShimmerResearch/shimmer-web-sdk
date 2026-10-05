@@ -133,6 +133,31 @@ export function nowMillis(): number {
 }
 
 /**
+ * Convert a UTC unix-ms instant to the "local civil" timestamp domain used by
+ * the Verisense real-world clock: unix ms with the host's local timezone
+ * offset baked in, so that hour-of-day of the raw value equals the wall-clock
+ * hour where the base station is.
+ *
+ * This is the documented time-sync contract ("synchronises the sensor's
+ * real-world clock with the Base Station's local time" - Verisense
+ * communication protocol) and what the downstream file parser assumes: it
+ * evaluates midnight/midday CSV-split boundaries on the raw RWC value in a
+ * pinned GMT+0 calendar, and labels CSV timestamp columns
+ * "Unix_ms_plus_local_time_zone_offset".
+ *
+ * Note `getTimezoneOffset()` is evaluated at `utcMillis` itself, so the DST
+ * rule in effect at that instant is applied.
+ */
+export function utcToLocalCivilMillis(utcMillis: number = Date.now()): number {
+  return utcMillis - new Date(utcMillis).getTimezoneOffset() * 60_000;
+}
+
+/** Current time in the Verisense local-civil RWC domain, in whole unix seconds. */
+export function localCivilUnixSecondsNow(): number {
+  return Math.floor(utcToLocalCivilMillis() / 1000);
+}
+
+/**
  * Compute CRC-16/CCITT-FALSE over `bytes`.
  *
  * Parameters: poly=0x1021, init=0xFFFF, xorOut=0x0000.
@@ -315,6 +340,14 @@ export interface VerisenseStatusPayload {
     | 'CHARGER_STATUS_NOT_READ'
     | 'CHARGER_STATUS_UNKNOWN'
     | null;
+  /**
+   * Byte 65 bit0 (second status-flags byte — byte 26's flags are full): the
+   * installed bootloader's DFU mode has the USB CDC transport (settings page
+   * reports bootloader version >= 3), so USB DFU is available on this unit.
+   * Null when the firmware predates the field (payload < 66 bytes) — treat
+   * as unknown, not as unsupported.
+   */
+  usbDfuBootloader: boolean | null;
 }
 
 export interface VerisenseUnixAndHumanTimestamp {
@@ -510,7 +543,20 @@ export interface VerisenseEventLogEntry {
   batteryMilliVolts: number | null;
 }
 
-/** Format unix seconds as raw + human-readable local datetime for logging. */
+/** Upper bound for a plausible device timestamp (2100-01-01 UTC in unix
+ * seconds). Values beyond this are uninitialised/garbage bytes, not dates. */
+export const VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS = 4102444800;
+
+/**
+ * Format a device-RWC timestamp (unix seconds) as raw + human-readable datetime.
+ *
+ * The device RWC lives in the "local civil" domain (unix seconds with the
+ * base station's timezone offset already baked in - see
+ * {@link utcToLocalCivilMillis}), so the value is rendered VERBATIM via the
+ * Date UTC accessors: the wall-clock time shown is exactly what the device's
+ * clock reads. Rendering with the local-time accessors would apply the
+ * browser's timezone offset a second time.
+ */
 export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixAndHumanTimestamp {
   const unix = Number(unixSeconds);
   if (!Number.isFinite(unix)) {
@@ -519,16 +565,16 @@ export function formatVerisenseUnixAndHuman(unixSeconds: number): VerisenseUnixA
   if (unix <= 0) {
     return { unix, human: '1970-01-01 00:00:00 (epoch)' };
   }
-  if (unix > 4102444800) {
+  if (unix > VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS) {
     return { unix, human: 'not-valid' };
   }
   const d = new Date(unix * 1000);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const HH = String(d.getHours()).padStart(2, '0');
-  const MM = String(d.getMinutes()).padStart(2, '0');
-  const SS = String(d.getSeconds()).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const HH = String(d.getUTCHours()).padStart(2, '0');
+  const MM = String(d.getUTCMinutes()).padStart(2, '0');
+  const SS = String(d.getUTCSeconds()).padStart(2, '0');
   return {
     unix,
     human: `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`,
@@ -985,6 +1031,11 @@ export function parseStatusPayload(
                   : 'CHARGER_STATUS_UNKNOWN';
   }
 
+  // Second status-flags byte (byte 65; the byte-26 flags are full). Null
+  // (unknown) when the firmware predates it — never defaulted to false, which
+  // would wrongly steer users away from USB DFU on a capable unit.
+  const usbDfuBootloader = response.length >= 66 ? (response[65] & 0x01) !== 0 : null;
+
   return {
     uniqueIdentifier,
     sourceStatusProperty,
@@ -1004,6 +1055,7 @@ export function parseStatusPayload(
     chargerPresent,
     chargerStatusCode,
     chargerStatusName,
+    usbDfuBootloader,
   };
 }
 
@@ -1092,6 +1144,34 @@ export function parseSchedulerDebugPayload(payload: Uint8Array): VerisenseSchedu
   }
 
   return out;
+}
+
+/** Decoded view of the BLE-link `optimizationResult` byte returned by the
+ * optimize debug command: bit 7 = device reports "not connected" (the other
+ * bits are then meaningless), bit 0 = a PHY change was requested, bit 1 = a
+ * connection-interval change was requested, bit 2 = a data-length change was
+ * requested. */
+export interface VerisenseBleOptimizationResult {
+  notConnected: boolean;
+  phyRequested: boolean;
+  connIntervalRequested: boolean;
+  dataLengthRequested: boolean;
+  resultMask: number;
+}
+
+/** Decode the `optimizationResult` byte from {@link parseBleLinkDebugPayload}
+ * (see {@link VerisenseBleOptimizationResult} for the bit meanings). */
+export function decodeVerisenseBleOptimizationResult(
+  resultByte: number,
+): VerisenseBleOptimizationResult {
+  const mask = Number(resultByte ?? 0) & 0xff;
+  return {
+    notConnected: (mask & 0x80) !== 0,
+    phyRequested: (mask & 0x01) !== 0,
+    connIntervalRequested: (mask & 0x02) !== 0,
+    dataLengthRequested: (mask & 0x04) !== 0,
+    resultMask: mask,
+  };
 }
 
 /** Parse debug payload from BLE link read/optimize commands. */
@@ -1273,4 +1353,96 @@ export function parseProductionConfigPayload(response: Uint8Array): ProductionCo
     revFwMinor,
     revFwInternal,
   };
+}
+
+/**
+ * Firmware default passkeys by passkey ID: a production config programmed
+ * with passkey ID "01" pairs with the fixed PIN "123456". Other IDs have no
+ * fixed default (ID "00" uses the per-device derived PIN — see
+ * {@link computeVerisensePairingPin}).
+ */
+export const VERISENSE_DEFAULT_PASSKEY_BY_ID: Readonly<Record<string, string>> = Object.freeze({
+  '01': '123456',
+});
+
+/** The fixed passkey for a passkey ID, or undefined when the ID has none
+ * (leave the passkey bytes unset in the production config). */
+export function defaultVerisensePasskeyForId(
+  passkeyId: string | null | undefined,
+): string | undefined {
+  return VERISENSE_DEFAULT_PASSKEY_BY_ID[String(passkeyId ?? '').trim()];
+}
+
+/** Component parts of a Verisense advertised BLE name. */
+export interface VerisenseAdvertisedNameParts {
+  /** Name prefix from the production config (normally "Verisense"). */
+  prefix: string;
+  /** 2-char passkey ID from the production config. */
+  passkeyId: string;
+  /** 12-hex unique identifier (8-hex manufacturing order + 4-hex MAC ID). */
+  uniqueId: string;
+}
+
+/**
+ * Build the name a Verisense sensor advertises over BLE:
+ * `<prefix>-<passkeyId>-<uniqueId>` (e.g. "Verisense-01-25112101B10F").
+ * Returns null when any part is missing — matches how apps derive the name
+ * from a parsed production config that may be blank/erased.
+ */
+export function buildVerisenseAdvertisedName(
+  parts: Partial<VerisenseAdvertisedNameParts>,
+): string | null {
+  const prefix = String(parts.prefix ?? '').trim();
+  const passkeyId = String(parts.passkeyId ?? '').trim();
+  const uniqueId = String(parts.uniqueId ?? '').trim();
+  if (!prefix || !passkeyId || !uniqueId) return null;
+  return `${prefix}-${passkeyId}-${uniqueId}`;
+}
+
+/**
+ * Split a Verisense advertised name back into its parts. The unique ID is the
+ * final `-`-separated token; the passkey ID the token before it; anything
+ * earlier (which may itself contain `-`) is the prefix. Returns null when the
+ * name does not have at least three tokens.
+ */
+export function parseVerisenseAdvertisedName(
+  name: string | null | undefined,
+): VerisenseAdvertisedNameParts | null {
+  const tokens = String(name ?? '')
+    .trim()
+    .split('-');
+  if (tokens.length < 3) return null;
+  const uniqueId = tokens[tokens.length - 1];
+  const passkeyId = tokens[tokens.length - 2];
+  const prefix = tokens.slice(0, -2).join('-');
+  if (!prefix || !passkeyId || !uniqueId) return null;
+  return { prefix, passkeyId, uniqueId };
+}
+
+/**
+ * The 4-hex MAC ID from a Verisense advertised name (the advertised name ends
+ * with the unique ID = manufacturing order + MAC; its last 4 hex chars are
+ * the MAC ID). Returns null when the tail is not valid hex.
+ */
+export function deriveVerisenseMacIdFromName(name: string | null | undefined): string | null {
+  const tail = (
+    String(name ?? '')
+      .trim()
+      .split('-')
+      .pop() ?? ''
+  )
+    .replace(/[^0-9A-Fa-f]/g, '')
+    .toUpperCase()
+    .slice(-4);
+  return /^[0-9A-F]{4}$/.test(tail) ? tail : null;
+}
+
+/**
+ * Short device tag for file names (e.g. "…-B10F-…"): the last 4 hex chars of
+ * a device unique ID or advertised name. Returns "" when unknown so callers
+ * can omit it cleanly.
+ */
+export function verisenseDeviceFileTag(idOrName: string | null | undefined): string {
+  const hex = String(idOrName ?? '').replace(/[^0-9A-Fa-f]/g, '');
+  return hex.length >= 4 ? hex.slice(-4).toUpperCase() : '';
 }

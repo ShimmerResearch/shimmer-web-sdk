@@ -1,0 +1,356 @@
+/**
+ * Message framing for a Shimmer3R reached over an **unframed** byte stream.
+ *
+ * Over BLE the module hands the client one notification per firmware message,
+ * so {@link Shimmer3RClient} can assume `chunk[0]` is an opcode and the rest of
+ * the chunk is that message. A byte stream — Web Serial over USB, or over the
+ * virtual COM port Windows/macOS create for a Shimmer paired via classic
+ * Bluetooth (RFCOMM/SPP) — offers no such guarantee: messages arrive split
+ * across reads and coalesced with their neighbours.
+ *
+ * {@link shimmer3rControlMessageLength} restores those boundaries the way
+ * `shimmer3ControlMessageLength` does for the classic Shimmer3: as a pure
+ * length function the client's drain loop can consult, expressing the same
+ * length knowledge the Java driver encodes in its blocking `readBytes(n)`
+ * calls.
+ *
+ * SD-transfer traffic is delegated to {@link sdMessageSpan} so the frame layout
+ * has exactly one definition.
+ */
+
+import { PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD } from '../pressure/types.js';
+import { NEED_MORE, RESYNC } from '../../core/framing.js';
+import { OPCODES } from './constants.js';
+import { EXG_BANK_LENGTH } from '../exg/registers.js';
+import { sdMessageSpan, SD_TRANSFER_OPCODES, SD_INSTREAM_BYTE } from './sdTransfer/protocol.js';
+
+/**
+ * Offset of the `numChannels` byte within an opcode-prefixed
+ * INQUIRY_RESPONSE. Shimmer3R's config word is 7 bytes at [3..9] (Shimmer3's is
+ * 4 at [3..6]) which pushes numChannels to [10] and bufferSize to [11].
+ */
+export const SHIMMER3R_INQ_NUM_CHANNELS_OFFSET = 10;
+/** Offset of the first channel-ID byte within an INQUIRY_RESPONSE. */
+export const SHIMMER3R_INQ_CHANNELS_OFFSET = SHIMMER3R_INQ_NUM_CHANNELS_OFFSET + 2; // 12
+
+/**
+ * Fixed payload lengths (bytes AFTER the opcode) for the fixed-width control
+ * responses. Variable-length responses (INQUIRY_RESPONSE, DAUGHTER_CARD_MEM_
+ * RESPONSE, everything SD) are handled explicitly in
+ * {@link shimmer3rControlMessageLength}.
+ *
+ * **Extension point.** An opcode absent from here — and from the special cases
+ * below — cannot be framed, so the drain loop resynchronises past it one byte at
+ * a time and whatever command was awaiting it times out. Add an entry when
+ * teaching the client a new GET over an unframed transport; the value is the
+ * response's `response_size` in the LiteProtocol instruction set, minus the
+ * opcode byte.
+ */
+export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>> = Object.freeze({
+  [OPCODES.SAMPLING_RATE_RESPONSE]: 2, // 0x04
+  [OPCODES.WR_ACCEL_RANGE_RESPONSE]: 1, // 0x0A
+  [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
+  [OPCODES.GYRO_RANGE_RESPONSE]: 1, // 0x4A
+  [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
+  [OPCODES.FW_VERSION_RESPONSE]: 6, // 0x2F fwId u16, major u16, minor u8, patch u8
+  [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
+  [OPCODES.RWC_RESPONSE]: 8, // 0x90 64-bit ticks, LSB first
+  // 0xA5 — DATA_RATE_TEST_PACKET_SIZE is 5 in the firmware: header + u32 counter
+  [OPCODES.DATA_RATE_TEST_RESPONSE]: 4,
+  /* The two legacy pressure-coefficient replies: a bare fixed-length block
+     with no length byte, 22 bytes for a BMP180 and 24 for a BMP280. Only
+     firmware old enough to lack 0xA7 serves them, and this client also drives
+     a classic Shimmer3 over RFCOMM, where an unframed reply would otherwise
+     resync a byte at a time. */
+  [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22,
+  [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24,
+  /* The six per-sensor calibration replies that `readCalibration` waits for:
+     the opcode, then the SC_DATA_LEN_STD_IMU_CALIB-byte kinematic block that
+     `ShimBt_replySingleSensorCalibCmd` copies in (`Comms/shimmer_bt_uart.c:
+     1752-1825`, sent from `:2277-2289`). They were missing, so a byte stream,
+     or BLE with a link CRC, resynced through every one of them and each group
+     timed out — on a Shimmer3R over classic SPP, all six did. Framed BLE with
+     no CRC never reaches this table, which is why that went unnoticed. */
+  [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x12
+  [OPCODES.GYRO_CALIBRATION_RESPONSE]: 21, // 0x15
+  [OPCODES.MAG_CALIBRATION_RESPONSE]: 21, // 0x18
+  [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
+  [OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE]: 21, // 0xAA
+  [OPCODES.ALT_MAG_CALIBRATION_RESPONSE]: 21, // 0xB0
+});
+
+/**
+ * SD-transfer response opcodes, which {@link sdMessageSpan} owns.
+ *
+ * All four are ordinary COMMAND RESPONSES: the firmware builds them inside
+ * `ShimBt_sendRsp`'s switch (`Comms/shimmer_bt_uart.c:2379-2399`) and the
+ * function CRCs whatever it composed on the way out (`:2421-2427`). So they
+ * carry the link CRC and must not be exempt from it — see
+ * {@link CRC_EXEMPT_RESPONSE_OPCODES}. Only the file-transfer FRAMES skip it.
+ */
+const SD_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
+  SD_TRANSFER_OPCODES.LIST_DIR_RESPONSE,
+  SD_TRANSFER_OPCODES.FILE_STAT_RESPONSE,
+  SD_TRANSFER_OPCODES.FREE_SPACE_RESPONSE,
+  SD_TRANSFER_OPCODES.DELETE_RESPONSE,
+]);
+
+/**
+ * Message types the firmware sends WITHOUT the link CRC, even when a host has
+ * turned one on with SET_CRC_COMMAND.
+ *
+ * `btCrcMode` is honoured in exactly three places — the command response path
+ * (`ShimBt_sendRspOrAck`, `Comms/shimmer_bt_uart.c:2422`), the instream status
+ * push (`:2545`) and the stream data packet (`Sensing/shimmer_sensing.c:680`).
+ * Everything else that reaches the host reaches it another way:
+ *
+ *  - **The data-rate test** builds its own batch of `[0xA5][counter]` packets
+ *    and calls `BtTransmit()` directly, bypassing the ring and the CRC both
+ *    (`:2987`). It is a raw throughput flood by design.
+ *  - **SD file transfer** writes its status frames and data blocks straight to
+ *    the TX buffer (`Comms/shimmer_sd_file_transfer.c:342,636`). Those blocks
+ *    carry their own CRC-16 per block instead (`:160`). This covers the
+ *    `0x8A`-prefixed FRAMES only, and not the four one-shot SD command
+ *    responses — list-dir, stat, free-space and delete — which are built
+ *    inside `ShimBt_sendRsp` and CRC'd with every other command response
+ *    (`Comms/shimmer_bt_uart.c:2379-2399` then `:2421-2427`). Those four were
+ *    exempt here and should not have been — though nothing in practice reached
+ *    the mistake, because the firmware stages an ACK into the front of the same
+ *    packet (`sendAck = 1`, `:1692-1698`) and the ACK branch of
+ *    `Shimmer3RClient`'s framer measures `[ACK][body][CRC]` as ONE packet
+ *    without consulting this set, so the CRC was verified anyway. The case it
+ *    did reach is a reply arriving on its own, which this firmware does not
+ *    send for these opcodes. `sdMessageSpan` still sizes them, which is a
+ *    separate question from whether they are verified.
+ *  - **SD sync** appends a CRC of its own at a FIXED width
+ *    (`SDSync/shimmer_sd_sync.c:441`, `BT_SD_SYNC_CRC_MODE`) that has nothing
+ *    to do with the mode the host selected.
+ *
+ * A host that verifies these anyway rejects every one of them — which is how
+ * enabling a CRC broke the link-speed test, and would have broken SD downloads
+ * next.
+ */
+export const CRC_EXEMPT_RESPONSE_OPCODES: ReadonlySet<number> = new Set<number>([
+  OPCODES.DATA_RATE_TEST_RESPONSE,
+  OPCODES.SD_SYNC_RESPONSE,
+]);
+
+/**
+ * Whether a whole message carries the link CRC.
+ *
+ * `INSTREAM_CMD_RESPONSE` (0x8A) is the awkward one: it prefixes both the
+ * status push, which IS CRC'd, and the SD-transfer frames, which are not — so
+ * the second byte decides, and a one-byte buffer cannot be judged yet. The
+ * battery reply under the same prefix is CRC'd too, being an ordinary command
+ * response, and reaches the `true` below.
+ *
+ * The four one-shot SD replies (list-dir, stat, free-space, delete) are NOT
+ * exempt, whatever their name suggests: they are command responses built
+ * inside `ShimBt_sendRsp` and CRC'd with the rest. Only the frames under 0x8A
+ * skip the link CRC.
+ *
+ * @param msg a complete message, opcode first
+ * @returns true when the firmware would have appended the CRC to it
+ */
+export function messageCarriesLinkCrc(msg: Uint8Array): boolean {
+  if (msg.length === 0) return false;
+  const opcode = msg[0];
+  if (CRC_EXEMPT_RESPONSE_OPCODES.has(opcode)) return false;
+  if (opcode === SD_INSTREAM_BYTE) {
+    // Only the status push under this prefix is CRC'd; the SD frames are not.
+    return msg.length >= 2 && msg[1] === OPCODES.STATUS_RESPONSE;
+  }
+  return true;
+}
+
+/**
+ * How many status bytes a STATUS_RESPONSE carries — the one length in this
+ * protocol that depends on which device answered, and on what firmware it runs,
+ * rather than on the bytes themselves.
+ */
+export interface Shimmer3RFramingOptions {
+  /**
+   * 2 on a Shimmer3R running LogAndStream v1.00.024 or later, 1 on anything
+   * else (`STATUS_BYTE_COUNT`, log-and-stream-common
+   * `Comms/shimmer_bt_uart.h:259-263`, and `statusPayloadBytesFor`, which
+   * decides it from the hardware and firmware versions). Get it wrong and the
+   * framer either eats the byte after a one-byte status, an ACK usually, or
+   * leaves a two-byte status's second byte to be framed as a message of its own.
+   *
+   * `'unknown'` is for a caller that has not read both versions yet: the byte
+   * after the first status byte decides, as described at the status branch of
+   * {@link shimmer3rControlMessageLength}. Defaults to 2, the width every
+   * Shimmer3R release from v1.00.024 sends.
+   */
+  statusPayloadBytes?: 1 | 2 | 'unknown';
+}
+
+/**
+ * Responses shaped `[opcode][length][data…]`, and the largest payload length
+ * the firmware will report for each — the value that separates a real response
+ * from a stray byte that happens to equal the opcode.
+ *
+ * - daughter-card memory and InfoMem: the handlers refuse a read above 128
+ *   bytes (`Comms/shimmer_bt_uart.c`, the SET/GET_INFOMEM and
+ *   GET_DAUGHTER_CARD_MEM arg checks)
+ * - the daughter-card id page: 16 bytes, one EEPROM page
+ * - the Bluetooth module version: whatever the module replied. The firmware
+ *   sends `strlen()` of `char btVerStrResponse[100]`, so 99 is the most it can
+ *   report — the hundredth byte is the terminator. The cap is what separates a
+ *   real response from a stray byte equal to the opcode, so it is worth being
+ *   the true maximum rather than the buffer size
+ *
+ * A response missing from this table cannot be reassembled on a byte stream —
+ * the drain has no way to know where it ends, so it resyncs through it one
+ * byte at a time and the read times out. That is invisible over BLE, where a
+ * notification is already one whole message, and shows up only over classic
+ * Bluetooth or the USB serial link.
+ */
+export const DECLARED_LENGTH_RESPONSE_CAPS: Readonly<Partial<Record<number, number>>> =
+  Object.freeze({
+    [OPCODES.DAUGHTER_CARD_MEM_RESPONSE]: 128,
+    [OPCODES.INFOMEM_RESPONSE]: 128,
+    [OPCODES.DAUGHTER_CARD_ID_RESPONSE]: 16,
+    [OPCODES.BT_VERSION_STR_RESPONSE]: 99,
+    /* [0xA6][1 + n][sensorId][coeffs…]: the id plus the largest coefficient
+       block any part sends (the BMP280's 24). A BMP581 answers with the id
+       alone, length 1, which this cap admits. */
+    [OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE]: PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD,
+    /* [0x62][count][regs…]: the count is echoed from the request
+       (`Comms/shimmer_bt_uart.c:2223-2225`) and one ADS1292R bank is
+       `EXG_BANK_LENGTH` registers, which is the most this SDK ever asks for.
+
+       This entry was missing, and the gap only showed with a link CRC on. With
+       the CRC off a BLE notification is taken as one whole message and the
+       reply parses; with it on, every inbound chunk goes through this framer
+       (verifying a CRC means knowing where the message ends), and an opcode it
+       cannot size falls through to a resync. The ExG install then failed its
+       CRC check against a mis-sized chunk and timed out — so ExG could not be
+       configured at all on a link with a CRC, which is the default this page
+       connects with. `Shimmer3Client`'s framer has always known this reply
+       (`devices/shimmer3/protocol.ts`); this one did not. */
+    [OPCODES.EXG_REGS_RESPONSE]: EXG_BANK_LENGTH,
+  });
+
+/**
+ * Total length (INCLUDING the leading opcode) of the control message at the
+ * head of `buf`, or {@link NEED_MORE} when more bytes are required to tell, or
+ * {@link RESYNC} when the leading byte starts nothing we recognise.
+ *
+ * Deliberately does NOT frame DATA_PACKET (0x00): stream data is length-defined
+ * by the negotiated schema rather than by the protocol, so the client routes it
+ * to its schema parser instead of through this function.
+ */
+export function shimmer3rControlMessageLength(
+  buf: Uint8Array,
+  opts: Shimmer3RFramingOptions = {},
+): number {
+  if (buf.length === 0) return NEED_MORE;
+  const opcode = buf[0];
+
+  if (opcode === OPCODES.ACK_COMMAND_PROCESSED || opcode === OPCODES.NACK_COMMAND_PROCESSED) {
+    return 1;
+  }
+
+  /*
+   * 0x8A (INSTREAM_CMD_RESPONSE) is a shared prefix, not an opcode: the byte
+   * after it selects the message. SD transfer owns most of that space, but the
+   * firmware also answers GET_STATUS and GET_VBATT through it, and those two
+   * predate the SD frames — so they are decided here before the rest is handed
+   * to sdMessageSpan.
+   */
+  if (opcode === SD_INSTREAM_BYTE) {
+    if (buf.length < 2) return NEED_MORE;
+    if (buf[1] === OPCODES.STATUS_RESPONSE) {
+      // [0x8A][0x71][status0]{[status1]} — ShimBt_assembleStatusBytes,
+      // `Comms/shimmer_bt_uart.c:2920-2932`.
+      const width = opts.statusPayloadBytes ?? 2;
+      if (width === 'unknown') {
+        /* Not known yet, so the byte after status0 decides. A second status
+           byte carries usbPluggedIn in bit 0 with bits 1-7 zero
+           (`ShimBt_assembleStatusBytes`), so it is 0x00 or 0x01. No message the
+           firmware sends starts with 0x01, which is the inquiry command, and
+           0x00 starts only a data packet, which does not follow a status here:
+           the client routes stream data past this framer, and the firmware
+           does not push a status for a start the host commanded
+           (`ShimBt_instreamStatusRespSendIfNotBtCmd`).
+
+           Anything else is the next message, so the status had one byte. That
+           byte has to arrive before the status can be sized, so a one-byte
+           status waits for whatever comes next, rather than eating it or
+           leaving a two-byte status's tail behind. That suits a push, which is
+           followed by the next command's reply. A reply the client waits for is
+           followed by nothing, so the client reads the versions before asking,
+           and fails the request rather than sending it without them.
+
+           Under a link CRC the byte after status0 can be the CRC's low byte
+           instead, and a one-byte status whose CRC begins 0x00 or 0x01 would
+           be sized a byte too long. The client never asks that of this branch:
+           it turns a CRC on only once both versions have been read.
+
+           HARDWARE-VERIFY: only scripted devices have sent a status through
+           this branch, on both widths. */
+        if (buf.length < 4) return NEED_MORE;
+        return buf[3] <= 0x01 ? 4 : 3;
+      }
+      const total = 2 + width;
+      return buf.length < total ? NEED_MORE : total;
+    }
+    if (buf[1] === OPCODES.VBATT_RESPONSE) {
+      // [0x8A][0x94][BattStatusRaw x3] — `Comms/shimmer_bt_uart.c:1848-1859`.
+      return buf.length < 5 ? NEED_MORE : 5;
+    }
+    return sdMessageSpan(buf);
+  }
+
+  // SD-transfer one-shot responses: one definition, in sdMessageSpan.
+  if (SD_RESPONSE_OPCODES.has(opcode)) {
+    return sdMessageSpan(buf);
+  }
+
+  if (opcode === OPCODES.RSP_CALIB_DUMP_COMMAND) {
+    // [0x99][length][offsetLo][offsetHi][data…] — the length byte counts the
+    // data only, and the firmware reads at most 128 bytes of calibration RAM
+    // per request (`Comms/shimmer_bt_uart.c:2241-2249`), so a larger one is a
+    // stray byte rather than a giant response.
+    if (buf.length < 2) return NEED_MORE;
+    const dataLen = buf[1];
+    if (dataLen > 128) return RESYNC;
+    const total = 4 + dataLen;
+    return buf.length < total ? NEED_MORE : total;
+  }
+
+  if (opcode === OPCODES.INQUIRY_RESPONSE) {
+    if (buf.length <= SHIMMER3R_INQ_NUM_CHANNELS_OFFSET) return NEED_MORE;
+    const numChannels = buf[SHIMMER3R_INQ_NUM_CHANNELS_OFFSET];
+    // A stray stream byte 0x02 can masquerade as an INQUIRY_RESPONSE whose
+    // "numChannels" is garbage, swallowing real control traffic (ACK included).
+    // No Shimmer3R comes close to 32 channels — treat the rest as garbage.
+    if (numChannels > 32) return RESYNC;
+    const total = SHIMMER3R_INQ_CHANNELS_OFFSET + numChannels;
+    return buf.length < total ? NEED_MORE : total;
+  }
+
+  const declaredCap = DECLARED_LENGTH_RESPONSE_CAPS[opcode];
+  if (declaredCap !== undefined) {
+    // [opcode][length][data…]; each response's cap is the largest payload the
+    // firmware will produce for it, so a larger "length" is a stray byte
+    // rather than a giant response.
+    //
+    // Framing these means the whole response arrives as ONE message, so
+    // `_readLengthPrefixedResponse`'s continuation path — which treats later
+    // chunks as raw opcode-less payload — never engages on a byte stream. That
+    // matters: those continuation bytes have no opcode, so the drain could not
+    // frame them and would resync straight past the tail of the record.
+    if (buf.length < 2) return NEED_MORE;
+    const declaredLen = buf[1];
+    if (declaredLen > declaredCap) return RESYNC;
+    const total = 2 + declaredLen;
+    return buf.length < total ? NEED_MORE : total;
+  }
+
+  const payload = SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS[opcode];
+  if (payload === undefined) return RESYNC;
+  const total = 1 + payload;
+  return buf.length < total ? NEED_MORE : total;
+}

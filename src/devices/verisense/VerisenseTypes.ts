@@ -1,4 +1,5 @@
 import type { AsmCommand, AsmProperty } from './constants.js';
+import type { ShimmerTransport } from '../../core/transport/types.js';
 import type { VerisenseBleLinkDebugPayload } from './protocol.js';
 import type { SensorADC } from './sensors/SensorADC.js';
 import type { SensorLIS2DW12 } from './sensors/SensorLIS2DW12.js';
@@ -74,9 +75,16 @@ export interface VerisenseClientOptions {
    */
   stripStreamCrc?: boolean;
   debug?: boolean;
+  /**
+   * Inject a transport (byte pipe) instead of the default web ones. Lets
+   * non-browser runtimes (React Native, Bluetooth Classic) or tests drive the
+   * client. When omitted, `connect()` builds a Web Bluetooth transport and
+   * `connectSerial()` a Web Serial transport, so browser usage is unchanged.
+   */
+  transport?: ShimmerTransport;
 }
 
-export interface BleThroughputTestOptions {
+export interface ThroughputTestOptions {
   /** How long the device should saturate the link, in milliseconds. Clamped to [100, 60000]. Default 5000. */
   durationMs?: number;
   /**
@@ -89,13 +97,13 @@ export interface BleThroughputTestOptions {
   /** Abort the test early. */
   signal?: AbortSignal | null;
   /** Called on every received chunk with the running result so far. */
-  onProgress?: ((partial: BleThroughputTestResult) => void) | null;
+  onProgress?: ((partial: ThroughputTestResult) => void) | null;
 }
 
-export interface BleThroughputTestResult {
+export interface ThroughputTestResult {
   /** Total bytes received from the device during the measurement window. */
   bytesReceived: number;
-  /** Number of BLE notification chunks received. */
+  /** Number of chunks received — BLE notifications, or serial reads. */
   packetsReceived: number;
   /** Duration requested of the device, in milliseconds. */
   durationRequestedMs: number;
@@ -108,6 +116,12 @@ export interface BleThroughputTestResult {
   /** Received goodput in kilobits per second (bytes/sec × 8 ÷ 1000). */
   throughputKbps: number;
 }
+
+/** @deprecated Renamed to {@link ThroughputTestOptions}: the test is not BLE-specific. */
+export type BleThroughputTestOptions = ThroughputTestOptions;
+
+/** @deprecated Renamed to {@link ThroughputTestResult}: the test is not BLE-specific. */
+export type BleThroughputTestResult = ThroughputTestResult;
 
 export type VerisenseConnectRetryReason =
   'request-timeout' | 'gatt-disconnected' | 'unexpected-response-property';

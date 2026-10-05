@@ -1,26 +1,33 @@
 name: CI
 
-# Build + test + lint gate for pull requests (and pushes to main). This is the
-# validation the repo previously lacked — dependency bumps and other PRs now get
-# compiled, tested, and linted automatically instead of by hand.
+# Every gate the repo has, in the order that fails fastest. Nothing here needs
+# hardware. The layout matches neurolynq-web-sdk and neurolynq-web, so the
+# three TypeScript repositories gate a pull request the same way.
+#
+# `pull_request` has no branch filter. It used to be limited to main, which
+# left a stacked pull request (one based on another's branch, such as #158 and
+# #159) with no build, test, lint or typecheck at all: only the format job ran.
+# `push` to main tests main as it ends up, since two pull requests each green
+# against an older main can merge into a main no run ever saw.
+# workflow_dispatch runs it by hand on any ref.
 on:
   pull_request:
-    branches:
-      - main
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref (e.g. rapid pushes / Dependabot rebases).
+# Cancel superseded runs on the same ref (rapid pushes, Dependabot rebases),
+# but not on main, where each run is the record of a merged commit.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  build-test-lint:
+  verify:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,13 +35,27 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
+      # The lockfile is the point of a CI run: `npm install` could resolve a
+      # different tree from the one a developer has.
       - name: Install dependencies
         run: npm ci
+
+      # Formatting is not checked here: format-on-commit.yml rewrites it on push
+      # instead.
+      - name: Lint
+        run: npm run lint
+
+      # Nothing else type-checks the tests: tsconfig.json excludes them, vitest
+      # transpiles without checking, and eslint reports lint rules rather than
+      # compile errors. Without this step a test file that does not compile
+      # still goes green.
+      - name: Typecheck
+        run: npm run typecheck
 
       - name: Build
         run: npm run build
@@ -42,5 +63,19 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Lint
-        run: npm run lint
+      # The tests import src/, so this is the only step that loads what the
+      # build produced: dist/ is what every consumer vendors. See the script's
+      # header.
+      - name: Check the built bundles
+        run: npm run test:dist
+
+      # The built bundles are what consumers vendor, so having them to hand
+      # makes a mis-vendored copy easy to tell from a source problem.
+      - name: Upload dist
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+          if-no-files-found: ignore

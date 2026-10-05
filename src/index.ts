@@ -5,6 +5,7 @@
  *
  * Exports:
  * - {@link Shimmer3RClient} — Shimmer3R BLE client
+ * - {@link Shimmer3Client} — Classic-Bluetooth (RFCOMM/SPP) Shimmer3 client
  * - {@link VerisenseBleDevice} — Verisense BLE + Web Serial client
  * - {@link ObjectCluster} — shared sensor data frame container
  * - {@link SensorBitmapShimmer3} — Shimmer3R sensor enable bitmasks
@@ -14,8 +15,43 @@
  */
 
 // Core
+export { SDK_VERSION } from './version.js';
 export { ObjectCluster } from './core/ObjectCluster.js';
 export { BaseShimmerClient } from './core/BaseShimmerClient.js';
+
+// Platform capability + guidance (gate on capability, message on platform)
+export {
+  describePlatformSupport,
+  transportAvailability,
+  transportAdvice,
+} from './core/platformSupport.js';
+export type {
+  PlatformSupport,
+  NavigatorLike,
+  TransportNeed,
+  Availability,
+} from './core/platformSupport.js';
+
+// Transport abstraction (pluggable byte pipes)
+export {
+  WebBluetoothTransport,
+  WebSerialTransport,
+  LoopbackTransport,
+} from './core/transport/index.js';
+export type {
+  ShimmerTransport,
+  ShimmerTransportKind,
+  TransportCapabilities,
+  TransportWriteOptions,
+  Unsubscribe,
+  DiscoveredDevice,
+  DeviceKind,
+  TransportScanner,
+  WebBluetoothTransportOptions,
+  WebSerialTransportOptions,
+  LoopbackTransportOptions,
+  LoopbackWrite,
+} from './core/transport/index.js';
 export { isUniformByteArray } from './core/arrayBuffer.js';
 export type {
   IShimmerClient,
@@ -24,6 +60,50 @@ export type {
   FieldKind,
   InertialCalibration,
 } from './core/types.js';
+// CSV emission for decoded frames. Fix the column set once with
+// `objectClusterColumns`, then project every frame with `objectClusterRow`: a
+// per-frame column set shifts cells the moment a frame's field list differs.
+export { csvCell, csvRow, objectClusterColumns, objectClusterRow } from './core/csv.js';
+export type { ObjectClusterColumn, ObjectClusterColumnOptions } from './core/csv.js';
+// CSV recording of a live stream to a file the user picks (DEV-1116): the
+// ObjectCluster recorder, and the one-file writer every recorder is built on.
+export { createCsvRecorder, createCsvTableWriter, downloadCsvBlob } from './core/csvRecorder.js';
+export type {
+  CsvByteSink,
+  CsvDownload,
+  CsvFileResult,
+  CsvRecorder,
+  CsvRecorderColumn,
+  CsvRecorderFrame,
+  CsvRecorderLog,
+  CsvRecorderOptions,
+  CsvTableWriter,
+  CsvTableWriterOptions,
+} from './core/csvRecorder.js';
+// Verisense streams record one CSV per sensor stream, in a picked folder.
+export {
+  VERISENSE_STREAM_CSV_TIME_COLUMNS,
+  createVerisenseStreamRecorder,
+  verisenseStreamCsvKey,
+  verisenseStreamCsvLayout,
+} from './devices/verisense/streamCsv.js';
+export type {
+  VerisenseStreamCsvColumn,
+  VerisenseStreamCsvFile,
+  VerisenseStreamCsvLayout,
+  VerisenseStreamFileProgress,
+  VerisenseStreamFileResult,
+  VerisenseStreamRecorder,
+  VerisenseStreamRecorderOptions,
+  VerisenseStreamRecordingResult,
+} from './devices/verisense/streamCsv.js';
+export { RtcDriftMonitor } from './core/RtcDriftMonitor.js';
+export type {
+  RtcDriftSampleInput,
+  RtcDriftSample,
+  RtcDriftSampleEvent,
+  RtcDriftMonitorOptions,
+} from './core/RtcDriftMonitor.js';
 export { StreamStatsTracker } from './core/StreamStats.js';
 export type {
   StreamContribution,
@@ -35,17 +115,95 @@ export type {
 // Shimmer3R
 export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
-export { SensorBitmapShimmer3 } from './devices/shimmer3r/SensorBitmap.js';
+export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
 export {
   OPCODES,
+  BT_FEATURE,
   SHIMMER3R_DEFAULTS,
   TIMESTAMP_FIELD,
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
 export type { TimestampFmt, Opcode } from './devices/shimmer3r/constants.js';
-export { CHANNEL_FORMATS } from './devices/shimmer3r/channelFormats.js';
-export type { ChannelFormat } from './devices/shimmer3r/channelFormats.js';
+// Bluetooth link CRC (SET_CRC_COMMAND). Device-to-host only: the firmware never
+// checks a CRC on a command, so a host only has to verify what it receives.
+// The firmware pairs after those say which firmware setCrcMode refuses, and on
+// which it turns the status push's ACK prefix off before a 2-byte CRC, for
+// consumers that want to tell their users why.
+export {
+  CRC_MODE,
+  isCrcMode,
+  crcTrailerBytes,
+  appendCrc,
+  verifyCrc,
+  SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
+  keepsLinkCrcWhenSensingStops,
+  SHIMMER3R_STATUS_PUSH_BUFFER_FIX_FIRMWARE,
+  twoByteCrcOverrunsStatusPush,
+} from './devices/shimmer3r/crcMode.js';
+export type { CrcMode } from './devices/shimmer3r/crcMode.js';
+// Message framing for a Shimmer3R over an unframed byte stream (Web Serial, or
+// the COM port a Classic-Bluetooth pairing creates) — needed only when writing
+// a custom transport; the clients apply it themselves.
+//
+// NEED_MORE / RESYNC are the canonical sentinels every framer returns. The
+// SHIMMER3_* and WIRED_* aliases further down are the older per-device copies,
+// kept for compatibility and identical in value.
+export { NEED_MORE, RESYNC, drainByteStream } from './core/framing.js';
+export type {
+  MessageLengthFn,
+  DrainVerdict,
+  DropReason,
+  DrainOptions,
+  DrainResult,
+} from './core/framing.js';
+export {
+  shimmer3rControlMessageLength,
+  SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
+  SHIMMER3R_INQ_CHANNELS_OFFSET,
+} from './devices/shimmer3r/streamFraming.js';
+/**
+ * Per-device length input the STATUS_RESPONSE span needs: 2 bytes from a
+ * Shimmer3R on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`),
+ * or `'unknown'` before the versions are read.
+ */
+export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
+/**
+ * Decode a STATUS_RESPONSE payload — what the sensor is doing right now
+ * (docked / sensing / logging / streaming / SD present / RTC set). Shared by
+ * both families: `Shimmer3RClient.getStatus` and the unsolicited pushes the
+ * firmware sends when any of those change. The other two say how many status
+ * bytes a device sends, which depends on its firmware as well as its hardware.
+ */
+export {
+  parseShimmer3StatusBytes,
+  SHIMMER3R_TWO_BYTE_STATUS_MIN_FIRMWARE,
+  statusPayloadBytesFor,
+} from './devices/shimmer3r/protocol.js';
+export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
+export {
+  CHANNEL_FORMATS,
+  CHANNEL_FORMAT_OVERRIDES,
+  UNKNOWN_CHANNEL_ASSUMED_BYTES,
+  isGenerationSensitiveChannel,
+  channelLayoutDiffersByGeneration,
+  channelFormatsFor,
+  resolveChannelFormat,
+  generationFromHardwareVersion,
+} from './devices/shimmer3r/channelFormats.js';
+export type { ChannelFormat, ShimmerGeneration } from './devices/shimmer3r/channelFormats.js';
+/**
+ * The generation-aware stream-schema builder both clients use. `trusted` on the
+ * result says whether the byte offsets can be relied on — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export { buildStreamSchema } from './devices/shimmer3r/streamSchema.js';
+export type {
+  StreamSchemaBase,
+  StreamSchemaField,
+  BuildStreamSchemaOptions,
+} from './devices/shimmer3r/streamSchema.js';
 export {
   calibrateU12AdcValue,
   calibrateShimmer3RAdcChannel,
@@ -54,6 +212,708 @@ export {
   getOversamplingRatioADS1292R,
 } from './devices/shimmer3r/calibration.js';
 
+// Factory self-test — the suite the firmware runs at the factory, driven over
+// Bluetooth (`Shimmer3RClient.runFactoryTest`) or the dock UART
+// (`WiredShimmerClient.runFactoryTest`). The type table and the LiteProtocol
+// ACK classifier are pure; the runner state machine is inside the clients.
+export {
+  SHIMMER3_FACTORY_TEST_TYPE,
+  SHIMMER3_FACTORY_TEST_TYPES,
+  shimmer3FactoryTestTypeInfo,
+  requireShimmer3FactoryTestType,
+  buildSetFactoryTestCommand,
+  classifyLiteProtocolAck,
+} from './devices/shimmer3r/factoryTest.js';
+export type {
+  Shimmer3FactoryTestType,
+  Shimmer3FactoryTestTypeInfo,
+} from './devices/shimmer3r/factoryTest.js';
+export {
+  FactoryTestError,
+  FACTORY_TEST_NACK_MESSAGE,
+  FACTORY_TEST_ACK_TIMEOUT_MS,
+  FACTORY_TEST_IDLE_FLOOR_MS,
+  FACTORY_TEST_DRAIN_IDLE_MS,
+} from './devices/factoryTest/capture.js';
+export type {
+  FactoryTestState,
+  FactoryTestFailureReason,
+  FactoryTestRunOptions,
+  AckVerdict,
+} from './devices/factoryTest/capture.js';
+export {
+  VerisensePpgLedTestError,
+  isVerisensePpgLedTestError,
+  classifyPpgLedTestFailure,
+  resolveHardwarePpgSupport,
+} from './devices/verisense/ppgLedTest.js';
+export type { VerisensePpgLedTestFailureReason } from './devices/verisense/ppgLedTest.js';
+
+// EEPROM brand (advertising name) record — shared by Shimmer3/Shimmer3R over
+// BLE/BT (readDaughterCardMem) and the dock UART / USB-C (CARD_MEM)
+export {
+  BRAND_RECORD_HOST_OFFSET,
+  BRAND_RECORD_SIZE,
+  BRAND_RECORD_MAGIC,
+  BRAND_RECORD_LAYOUT_VER,
+  BRAND_BT_CLASSIC_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS,
+  BRAND_BLE_MAX_CHARS_SHIMMER3,
+  BRAND_USB_PRODUCT_MAX_CHARS,
+  BRAND_USB_MANUFACTURER_MAX_CHARS,
+  BRAND_PLATFORM,
+  brandNameProblem,
+  parseBrandRecord,
+  buildBrandRecord,
+  buildBlankBrandRecord,
+} from './devices/brandRecord.js';
+export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
+// Shimmer3R SD-card file transfer (FW >= v1.01.011)
+export {
+  SD_TRANSFER_OPCODES,
+  SD_STATUS,
+  SD_XFER,
+  SD_ATTR_DIR,
+  SD_ATTR_NAME_TRUNCATED,
+  SD_MAX_PATH_LEN,
+  SD_BLOCK_PAYLOAD_MIN,
+  SD_BLOCK_PAYLOAD_MAX,
+  SD_BLOCK_PAYLOAD_DEFAULT,
+  SdTransferError,
+  sdStatusToString,
+  sdXferStatusToString,
+  sdCrc16,
+  fatDateTimeToDate,
+  encodeSdPath,
+  buildListDirCmd,
+  buildStatCmd,
+  buildDeleteCmd,
+  buildFreeSpaceCmd,
+  buildAbortCmd,
+  buildReadCmd,
+  parseListDirRsp,
+  parseStatRsp,
+  parseFreeSpaceRsp,
+  parseDeleteRsp,
+  tryExtractSdMessage,
+  sdMessageSpan,
+} from './devices/shimmer3r/sdTransfer/protocol.js';
+export type {
+  SdDirEntry,
+  SdFileStat,
+  SdCardSpace,
+  SdDataFrame,
+  SdStatusFrame,
+  SdOneShotResponse,
+  SdMessage,
+  SdListDirPage,
+  SdExtractResult,
+} from './devices/shimmer3r/sdTransfer/protocol.js';
+export {
+  enumerateSdTree,
+  downloadSdTree,
+  deleteDownloadedFromCard,
+  formatSdImportStamp,
+  consensysBackupSegments,
+  consensysMacFolderName,
+  CONSENSYS_UNKNOWN_DEVICE,
+} from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
+export type {
+  SdDestinationLayout,
+  SdRemoteFile,
+  SdRemoteTree,
+  SdTransferProgress,
+  DownloadSdTreeOptions,
+  SdTransferSummary,
+} from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
+
+// Host-side directory-tree creation (File System Access API)
+export { ensureDirectoryPath } from './devices/verisense/protocolDataFlow.js';
+
+// Shimmer3 (Classic Bluetooth / RFCOMM)
+export { Shimmer3Client } from './devices/shimmer3/Shimmer3Client.js';
+export type { Shimmer3ClientOptions } from './devices/shimmer3/Shimmer3Client.js';
+export {
+  SHIMMER3_DEFAULTS,
+  SHIMMER3_SPP_UUID,
+  SHIMMER3_SPP_SERIAL_OPTIONS,
+  SHIMMER3_SAMPLING_CLOCK_FREQ,
+} from './devices/shimmer3/constants.js';
+export {
+  FW_ID,
+  ACK as SHIMMER3_ACK,
+  NACK as SHIMMER3_NACK,
+  NEED_MORE as SHIMMER3_NEED_MORE,
+  RESYNC as SHIMMER3_RESYNC,
+  SHIMMER3_RESPONSE_PAYLOAD_LENGTHS,
+  SHIMMER3_STATUS_PAYLOAD_BYTES,
+  SHIMMER3_INQ_CONFIG_OFFSET,
+  SHIMMER3_INQ_CONFIG_LENGTH,
+  SHIMMER3_INQ_NUM_CHANNELS_OFFSET,
+  SHIMMER3_INQ_CHANNELS_OFFSET,
+  interpretShimmer3InquiryResponse,
+  buildShimmer3Schema,
+  parseShimmer3DeviceVersionResponse,
+  parseShimmer3FwVersionResponse,
+  shimmer3UsesThreeByteTimestamp,
+  shimmer3ControlMessageLength,
+  // The ShimmerVerObject firmware-capability ladder, and the ExG command gate
+  // the Shimmer3 client applies with it.
+  deriveShimmer3FirmwareVersionCode,
+  shimmer3SupportsExg,
+  // The Java driver's gates on the status and battery reads, which
+  // Shimmer3Client.getStatus and getBattery apply.
+  shimmer3SupportsStatusRequest,
+  shimmer3SupportsBatteryRequest,
+} from './devices/shimmer3/protocol.js';
+export type {
+  Shimmer3InquiryResult,
+  Shimmer3StreamSchema,
+  Shimmer3ChannelField,
+  Shimmer3DeviceVersion,
+  Shimmer3FwVersion,
+} from './devices/shimmer3/protocol.js';
+
+// Configuration option tables for both Shimmer3 families, ported verbatim from
+// the Java driver (labels AND config values — several are register encodings
+// that are neither contiguous nor monotonic). A table belongs to a chip, not a
+// platform: pick the pair matching the hardware you are configuring.
+export {
+  SHIMMER3_LSM6DSV_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM6DSV_GYRO_RANGE_OPTIONS,
+  SHIMMER3_LSM6DSV_ACCEL_GYRO_RATE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RATE_HPM_OPTIONS,
+  SHIMMER3_LIS2DW12_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
+  SHIMMER3_ADXL371_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LIS2MDL_MAG_RATE_OPTIONS,
+  SHIMMER3_LIS2MDL_MAG_RANGE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RATE_OPTIONS,
+  SHIMMER3_LIS3MDL_ALT_MAG_RANGE_OPTIONS,
+  SHIMMER3_BMP390_PRESSURE_OVERSAMPLING_OPTIONS,
+  SHIMMER3_BMP390_PRESSURE_RATE_OPTIONS,
+  SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS,
+  SHIMMER3_BMP581_PRESSURE_RATE_OPTIONS,
+  SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
+  SHIMMER3_BMP280_PRESSURE_RESOLUTION_OPTIONS,
+  SHIMMER3_GSR_RANGE_RESISTANCE_OPTIONS,
+  SHIMMER3_GSR_RANGE_CONDUCTANCE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303DLHC_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RANGE_OPTIONS,
+  SHIMMER3_LSM303DLHC_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RATE_HR_OPTIONS,
+  SHIMMER3_LSM303AH_ACCEL_RATE_LPM_OPTIONS,
+  SHIMMER3_LSM303AH_MAG_RATE_OPTIONS,
+  SHIMMER3_LSM303AH_MAG_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_GYRO_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_ACCEL_RANGE_OPTIONS,
+  SHIMMER3_MPU9X50_MAG_RATE_OPTIONS,
+  SHIMMER3_BT_BAUD_RATE_OPTIONS,
+  SHIMMER3_SAMPLING_RATES_HZ,
+  samplingRateToDivisor,
+  divisorToSamplingRate,
+  SHIMMER3_SENSOR_LABELS,
+  shimmer3SensorLabel,
+} from './devices/shimmer3/sensorOptions.js';
+export type {
+  Shimmer3SensorOption,
+  Shimmer3SensorLabel,
+} from './devices/shimmer3/sensorOptions.js';
+
+// Wired / dock UART (Shimmer docked in a BasicDock/Base)
+export { WiredShimmerClient } from './devices/dock/WiredShimmerClient.js';
+export type {
+  WiredShimmerClientOptions,
+  WiredIdentity,
+} from './devices/dock/WiredShimmerClient.js';
+export {
+  UART_PACKET_HEADER,
+  UART_DOCK_BAUD_RATE,
+  UART_PACKET_CMD,
+  UART_COMPONENT,
+  UART_PROP,
+  UART_CONFIG_COMMANDS,
+  PACKET_OVERHEAD_RESPONSE_DATA,
+  PACKET_OVERHEAD_RESPONSE_OTHER,
+  WIRED_DEFAULTS,
+  CHARGING_STATUS_BYTE,
+} from './devices/dock/constants.js';
+export type {
+  UartPacketCmd,
+  UartComponent,
+  UartPermission,
+  UartComponentProperty,
+  ChargingStatus,
+} from './devices/dock/constants.js';
+export {
+  SHIMMER_UART_CRC_INIT,
+  shimmerUartCrcByte,
+  shimmerUartCrcCalc,
+  shimmerUartCrcCheck,
+} from './devices/dock/crc.js';
+export {
+  buildUartPacket,
+  buildReadPacket,
+  buildWritePacket,
+  buildMemReadPayload,
+  buildMemWritePayload,
+  parseUartPacket,
+  wiredPacketLength,
+  classifyFactoryTestAckPacket,
+  isBadResponse,
+  badResponseReason,
+  parseMacId,
+  parseVersionInfo,
+  parseBatteryStatus,
+  battAdcToVoltage,
+  battVoltageToPercentage,
+  parseExpansionBoard,
+  msToRtcBytesLE,
+  isSupportedRtcConfigViaUart,
+  NEED_MORE as WIRED_NEED_MORE,
+  RESYNC as WIRED_RESYNC,
+} from './devices/dock/protocol.js';
+export type {
+  UartRxPacket,
+  WiredVersionInfo,
+  WiredBatteryStatus,
+  ExpansionBoardInfo,
+} from './devices/dock/protocol.js';
+
+// SmartDock multi-slot base (Base-6 / Base-15) — phase D2
+export { SmartDockClient } from './devices/dock/SmartDockClient.js';
+export type {
+  SmartDockClientOptions,
+  SmartDockInfo,
+  SlotOccupancy,
+} from './devices/dock/SmartDockClient.js';
+export {
+  SMARTDOCK_LINE_TERMINATOR,
+  SMARTDOCK_CONNECTION_TYPE,
+  SMARTDOCK_BASE_CMD,
+  SMARTDOCK_DEFAULTS,
+  BASE_HARDWARE_IDS,
+  baseHardwareType,
+  buildBaseCommand,
+  buildSelectSlotCommand,
+  extractBaseLine,
+  classifyBaseResponse,
+  parseSmartDockVersion,
+  parseSlotOccupancy,
+  parseActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+export type {
+  SmartDockConnectionType,
+  SmartDockHardwareType,
+  SmartDockResponseKind,
+  SmartDockVersionInfo,
+  SmartDockActiveSlot,
+} from './devices/dock/smartDockProtocol.js';
+
+// InfoMem configuration-memory codec (Shimmer3 / Shimmer3R) — configure-while-docked (phase P2)
+export {
+  parseInfoMem,
+  generateInfoMem,
+  deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
+  resolveInfoMemLayout,
+  checkConfigBytesValid,
+  fwCompare,
+  isSupportedMpl,
+  isSupportedEightByteDerivedSensors,
+  isSupportedSdLogSync,
+  isSdLoggingFirmware,
+  INFOMEM_SIZE,
+  INFOMEM_PAGE_SIZE,
+  INFOMEM_VALIDITY_BYTES,
+  INFOMEM_SAMPLING_CLOCK_FREQ,
+  INFOMEM_ADDR_LEGACY,
+  INFOMEM_ADDR_FLAT,
+  HW_ID as INFOMEM_HW_ID,
+  FW_ID as INFOMEM_FW_ID,
+  ANY_VERSION as INFOMEM_ANY_VERSION,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemContext,
+  InfoMemDeviceConfig,
+  InfoMemLayout,
+  GenerateInfoMemOptions,
+  DeviceWriteDivergentRanges,
+} from './devices/infomem/index.js';
+export {
+  GENERAL_CALIBRATION_LENGTH as INFOMEM_GENERAL_CALIBRATION_LENGTH,
+  MAX_SYNC_NODES as INFOMEM_MAX_SYNC_NODES,
+  BIT_SHIFT as INFOMEM_BIT_SHIFT,
+  MASK as INFOMEM_MASK,
+} from './devices/infomem/index.js';
+export type {
+  InfoMemImuConfig,
+  InfoMemSdConfig,
+  InfoMemCalibrationBlocks,
+} from './devices/infomem/index.js';
+// Derive a sensor's output rate from the packet rate, as the Java driver does:
+// a host that edits the InfoMem fields independently has to reproduce the
+// fan-out Consensys gets from setShimmerAndSensorsSamplingRate /
+// setSensorEnabledState, or it writes pairs the driver never would.
+export {
+  LSM6DSV_ODR,
+  deriveLsm6dsvAccelGyroRate,
+  deriveLsm6dsvRateOnEnableChange,
+} from './devices/infomem/index.js';
+
+// Is the configured sensor output rate fast enough for the configured packet
+// rate? Two independent InfoMem fields that nothing in the firmware relates, so
+// a packet rate above the IMU's ODR makes the device repeat each reading with a
+// fresh timestamp - a perfect-looking stream carrying a staircase.
+export {
+  lsm6dsvAccelGyroRateHz,
+  samplingRateHzFromDivider,
+  checkImuRateCoversPacketRate,
+} from './devices/infomem/index.js';
+export type { ImuRateCoverage } from './devices/infomem/index.js';
+
+// Identity defaults a host applies when it has to invent a configuration
+// (blank/erased InfoMem, or a reset to defaults) — kept in one place so every
+// such path names a device the same way.
+export {
+  DEFAULT_TRIAL_NAME,
+  macShortId,
+  defaultDeviceName,
+  defaultTrialIdentity,
+} from './devices/infomem/index.js';
+export {
+  SHIMMER3_INFOMEM_FIELD_SCHEMA,
+  SHIMMER3_INFOMEM_FIELD_GROUPS,
+  NEW_IMU_EXP_REV,
+  resolveFieldIndex,
+  readInfoMemFieldValue,
+  writeInfoMemFieldValue,
+  infoMemFieldsFor,
+  inferShimmer3Generation,
+} from './devices/infomem/index.js';
+export type {
+  Shimmer3Generation,
+  InfoMemFieldKind,
+  InfoMemFieldOption,
+  InfoMemFieldDefinition,
+  InfoMemFieldGroup,
+  InfoMemFieldSubgroup,
+} from './devices/infomem/index.js';
+
+// ADS1292R ExG register codec (Shimmer3 / Shimmer3R) — the ECG/EMG/respiration
+// expansion board. The two 10-byte per-chip register banks appear in three
+// places — InfoMem (`exg1`/`exg2`), an SD-log header, and the live GET/SET
+// commands — and this is the one codec for all three: `decodeExgRegisters` /
+// `encodeExgRegisters` for a single bank, `detectExgPreset` to name what a pair
+// of banks is, `applyExgPreset` to build the banks AND the sensor bitmap for a
+// chosen preset, and `updateExgSetting` to change one named knob in place. Ported
+// from the Java driver's SensorEXG / ExGConfigBytesDetails / ShimmerObject ExG
+// accessors, with the driver file:line for every byte value in the source.
+//
+// Resolution (16- vs 24-bit) is NOT a register field: it lives in the enabled-
+// sensors bitmap. Use `exgResolutionFromSensors` to read it back.
+//
+// The clients apply this themselves — `Shimmer3RClient` / `Shimmer3Client`
+// expose `readExgConfig`, `writeExgConfig` and `applyExgPresetLive`; the framing
+// exports below are needed only when driving the radio by hand.
+export {
+  EXG_BANK_LENGTH,
+  decodeExgRegisters,
+  encodeExgRegisters,
+  applyExgMustBeBits,
+  readExgField,
+  setExgFieldPreserving,
+  // Option label lists, verbatim from the Java GUI value lists.
+  CONVERSION_MODE_LABELS,
+  DATA_RATE_LABELS,
+  VOLTAGE_REFERENCE_LABELS,
+  TEST_SIGNAL_FREQUENCY_LABELS,
+  COMPARATOR_THRESHOLD_LABELS,
+  LEAD_OFF_CURRENT_LABELS,
+  LEAD_OFF_FREQUENCY_LABELS,
+  LEAD_OFF_DETECTION_LABELS,
+  GAIN_LABELS,
+  GAIN_VALUES,
+  POWER_DOWN_LABELS,
+  INPUT_SELECTION_LABELS,
+  CHOP_FREQUENCY_LABELS,
+  RESPIRATION_PHASE_32KHZ_LABELS,
+  RESPIRATION_PHASE_64KHZ_LABELS,
+  RESPIRATION_FREQUENCY_LABELS,
+  RESPIRATION_CONTROL_LABELS,
+  RLD_REFERENCE_SIGNAL_LABELS,
+  REFERENCE_ELECTRODE_OPTIONS,
+  // Presets: the driver's reference register arrays, detection, and the apply
+  // side (resolution flags, rate coupling, conflicting-sensor clearing).
+  EXG_PRESET_ARRAYS,
+  exgResolutionFromSensors,
+  detectExgPreset,
+  exgPresetLabel,
+  applyExgPreset,
+  clearExgResolutionFlags,
+  exgConflictingSensors,
+  exgRateSettingFromFreq,
+  EXG_CONFLICTING_SENSORS,
+  // Live GET/SET_EXG_REGS framing and read-back comparison.
+  SET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE,
+  GET_EXG_REGS_COMMAND,
+  EXG_REGS_RESPONSE_PAYLOAD_LENGTH,
+  EXG_CHIP1,
+  EXG_CHIP2,
+  EXG_REG8_STATUS_INDEX,
+  buildGetExgRegsCommand,
+  buildSetExgRegsCommand,
+  decodeExgRegsResponse,
+  exgBanksEqualIgnoringStatus,
+  // Per-knob editing: one named setting at a time, with typed errors.
+  EXG_KNOBS,
+  GAIN_OPTIONS,
+  DATA_RATE_OPTIONS,
+  LEAD_OFF_CURRENT_OPTIONS,
+  LEAD_OFF_COMPARATOR_OPTIONS,
+  LEAD_OFF_DETECTION_OPTIONS,
+  RESPIRATION_FREQUENCY_OPTIONS,
+  respirationPhaseOptions,
+  exgKnobOptions,
+  isExgRespirationEnabled,
+  updateExgSetting,
+  applyExgKnobEdits,
+  readExgKnobs,
+  ExgKnobError,
+  UnknownExgKnobError,
+  ExgKnobValueError,
+  ExgRespirationLockedError,
+} from './devices/exg/index.js';
+export type {
+  ExgFieldValue,
+  ExgGainValue,
+  ExgChannelSettings,
+  ExgLeadOffSettings,
+  ExgRespirationSettings,
+  ExgRldSettings,
+  ExgTestSignalSettings,
+  ExgStatusBits,
+  DecodedExgRegisters,
+  ExgFieldName,
+  ExgPreset,
+  ExgResolution,
+  ExgApplyInput,
+  ExgApplyResult,
+  ApplicableExgPreset,
+  ExgChipIndex,
+  ExgBanks,
+  ExgKnobOption,
+  ExgKnobField,
+  ExgKnobEdit,
+} from './devices/exg/index.js';
+
+// Inertial (accel/gyro/mag) calibration — phase P3
+export {
+  matrixInverse3x3,
+  matrixMultiply3x3,
+  makeKinematicCalibration,
+  calibrateVector3,
+  parseKinematicCalibBlock,
+  generateKinematicCalibBlock,
+  INERTIAL_UNITS,
+  getGroupDefaults,
+  getDefaultCalibration,
+  parseCalibDump,
+  generateCalibDump,
+  MAX_CALIB_DUMP_BYTES,
+  CALIB_READ_SOURCE,
+  shouldOverrideCalibration,
+} from './devices/calibration/index.js';
+export type {
+  KinematicCalibration,
+  ParseKinematicOptions,
+  ImuFamily,
+  InertialGroup,
+  GroupDefaults,
+  CalibDump,
+  CalibDumpRecord,
+  CalibDumpVersion,
+  CalibReadSource,
+} from './devices/calibration/index.js';
+
+// The unit vocabulary every calibrated field is labelled with — the Java
+// driver's own CHANNEL_UNITS strings, so a recording from this SDK and one from
+// Consensys describe the same signal with the same word.
+export { CHANNEL_UNITS } from './core/units.js';
+export type { ChannelUnit } from './core/units.js';
+
+// Per-channel streaming calibration: every channel a Shimmer3/Shimmer3R can
+// send, converted to engineering units. The clients call this themselves; it is
+// exported for a host that decodes frames some other way, and for the
+// provenance types `calibrationInfo` reports.
+export {
+  calibrateStreamFrame,
+  SCALAR_CALIBRATORS,
+  ADC_VREF_VOLTS,
+  ADC_BITS,
+  BATTERY_DIVIDER_RATIO,
+  PRESSURE_NAME,
+  TEMPERATURE_NAME,
+  UNIX_TIMESTAMP_NAME,
+} from './devices/calibration/streamChannels.js';
+export type {
+  StreamCalibrationState,
+  StreamCalibrationInfo,
+  StreamCalibrationSource,
+  ExgCalibrationSource,
+} from './devices/calibration/streamChannels.js';
+
+// GSR: one raw word to resistance, conductance and the range that produced it.
+export {
+  calibrateGsrSample,
+  calibrateGsrChannel,
+  gsrRangeForSample,
+  GSR_RESISTANCE_NAME,
+  GSR_RANGE_NAME,
+} from './devices/calibration/gsr.js';
+export type { CalibratedGsr } from './devices/calibration/gsr.js';
+
+// The firmware's own calibration-domain sensor ids, and dump → group mapping.
+export {
+  SC_SENSOR,
+  SC_SENSOR_NAMES,
+  CALIB_SENSOR_ID_BY_GROUP,
+  calibSensorIdForGroup,
+  groupForCalibSensorId,
+  selectDumpCalibrations,
+} from './devices/calibration/sensorIds.js';
+export type { DumpCalibrationsByGroup } from './devices/calibration/sensorIds.js';
+
+// Pressure and temperature: the four Bosch parts, their factory trim, and the
+// compensation the firmware leaves to the host.
+export {
+  parseBmp180Coefficients,
+  compensateBmp180,
+  parseBmp280Coefficients,
+  compensateBmp280,
+  parseBmp390Coefficients,
+  compensateBmp390,
+  compensateBmp581,
+  parsePressureCalibrationResponse,
+  compensatePressure,
+  isBmp581PresentPerSrNumber,
+  BMP581_MIN_FIRMWARE,
+  PRESSURE_SENSOR_ID,
+  PRESSURE_SENSOR_ID_BY_KIND,
+  PRESSURE_COEFFICIENT_BYTES,
+  PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD,
+} from './devices/pressure/index.js';
+export type {
+  PressureSensorKind,
+  PressureCalibration,
+  PressureCoefficients,
+  CompensatedPressure,
+  Bmp180Coefficients,
+  Bmp280Coefficients,
+  Bmp390Coefficients,
+  Bmp581DetectionContext,
+} from './devices/pressure/index.js';
+
+// Unwrapping the sample counter, and placing samples on a wall clock. Usable on
+// its own by a host that decodes frames itself.
+export {
+  StreamTimeline,
+  TICKS_PER_SECOND,
+  TICKS_PER_MS,
+  INVALID_ZERO_WINDOW_TICKS,
+  REORDER_PERIODS,
+  MAX_WINDOW_DIVISOR,
+  reorderWindowTicks,
+} from './core/StreamTimeline.js';
+export type {
+  StreamStamp,
+  TimelineState,
+  TimelineSource,
+  TimestampBits,
+  StreamTimelineOptions,
+} from './core/StreamTimeline.js';
+
+// Which sensors can be enabled together, which need the expansion rail, and
+// which need a particular board. Pure, so a configuration editor can consult it
+// against an image it has not written yet.
+export {
+  applySensorToggle,
+  checkSensorRules,
+  deriveExpPower,
+  describeSensorRules,
+  sensorAvailability,
+  sensorConflicts,
+  requiresExpansionPower,
+  sensorRuleLabel,
+  sensorRuleMask,
+  SENSOR_RULE_CONFLICTS,
+  SR_BOARD,
+  EXG_ANY_MASK,
+} from './devices/shimmer3/sensorRules.js';
+export type {
+  SensorRuleKey,
+  SensorRuleState,
+  SensorRuleCheck,
+  SensorRuleChange,
+  SensorRuleViolation,
+  SensorToggleResult,
+  SensorAvailability,
+  SensorRuleDescription,
+  SensorGate,
+} from './devices/shimmer3/sensorRules.js';
+
+// ExG counts to millivolts, with the gain and reference read out of the chip's
+// own register bank.
+export {
+  EXG_VREF_VOLTS,
+  exgChannelMillivoltFactor,
+  calibrateExgSample,
+  summariseExgCalibration,
+  summariseExgBanks,
+} from './devices/exg/calibration.js';
+export type { ExgSampleResolution, ExgCalibrationSummary } from './devices/exg/calibration.js';
+
+// Binary SD-log file decoder (Shimmer3 / Shimmer3R) — phase D3
+export {
+  SDLOG_HW_ID,
+  SDLOG_FW_ID,
+  SDLOG_HEADER_LENGTH,
+  SDLOG_CLOCK_FREQ,
+  SDLOG_SYNC_OFFSET_LENGTH,
+  SDLOG_SYNC_BLOCK_LENGTH,
+  SDLogHeaderBitmask,
+  hasSensorBit,
+  SdLogFormatError,
+  decodeSdLogValue,
+  SDLOG_DATA_TYPE_BYTES,
+  parseSdLogHeader,
+  decodeSdLogFile,
+  decodeSdSession,
+  parseSdSessionName,
+  parseSdTrialFolderName,
+  isNewImuSensors,
+} from './devices/sdlog/index.js';
+export type {
+  SdLogChannel,
+  SdLogHeader,
+  SdLogRecord,
+  SdLogFormatErrorCode,
+  SdLogCalibrationBytes,
+  SdLogExpansionBoard,
+  SdLogImuRanges,
+  SdLogChannelCalibrationInfo,
+  SdLogPressureSensor,
+  SdLogDataType,
+  SdLogChannelSpec,
+  SdLogDecodeOptions,
+  SdLogDecodeResult,
+} from './devices/sdlog/index.js';
+
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
 export type {
@@ -61,7 +921,11 @@ export type {
   BleLinkAutoOptimizeOptions,
   BleLinkAutoOptimizeResult,
   BleLinkAutoOptimizeStopReason,
+  ThroughputTestOptions,
+  ThroughputTestResult,
+  /** @deprecated Renamed to `ThroughputTestOptions`. */
   BleThroughputTestOptions,
+  /** @deprecated Renamed to `ThroughputTestResult`. */
   BleThroughputTestResult,
   VerisenseConnectWithRetryOptions,
   VerisenseConnectRetryInfo,
@@ -137,6 +1001,10 @@ export {
   writeVerisenseOperationalFieldValue,
   setVerisenseOperationalBitRange,
   enforceVerisenseCommsChannelInterlock,
+  VERISENSE_BLUETOOTH_OFF_MIN_FW,
+  supportsVerisenseBluetoothOff,
+  isVerisenseBluetoothEnabled,
+  enforceVerisenseBluetoothOffFirmwareGuard,
   VERISENSE_SENSOR_ENABLE_FIELDS,
   VERISENSE_OPERATIONAL_FIELD_GROUPS,
   VERISENSE_OPERATIONAL_FIELD_FALLBACK_GROUP_ID,
@@ -146,6 +1014,8 @@ export {
   getVerisenseHardwareFriendlyName,
   formatVerisenseHardwareRevision,
   isVerisenseSecondGenerationHardware,
+  isVerisenseGsrSupportedHardware,
+  isVerisenseLipoBatteryHardware,
   getVerisenseHardwareCapabilities,
   getVerisenseHardwareSensorSupport,
   getVerisenseHardwareRevision,
@@ -156,6 +1026,8 @@ export {
   parseHexByteString,
   formatPendingEventProperties,
   formatVerisenseUnixAndHuman,
+  utcToLocalCivilMillis,
+  localCivilUnixSecondsNow,
   inferVerisenseChargerChipFamily,
   describeVerisenseChargerStatus,
   formatVerisenseChargerStatus,
@@ -166,7 +1038,91 @@ export {
   getVerisenseStreamSensorLabel,
   inferVerisenseLookupBankCount,
   isVerisenseLightDarkChannelEnabled,
+  VERISENSE_MAX_PLAUSIBLE_UNIX_SECONDS,
+  decodeVerisenseBleOptimizationResult,
+  VERISENSE_DEFAULT_PASSKEY_BY_ID,
+  defaultVerisensePasskeyForId,
+  buildVerisenseAdvertisedName,
+  parseVerisenseAdvertisedName,
+  deriveVerisenseMacIdFromName,
+  verisenseDeviceFileTag,
+  padVerisenseOperationalConfig,
+  VERISENSE_SENSOR_RATE_DEFAULT_GROUPS,
+  resolveVerisenseSensorRateFieldKey,
+  VERISENSE_BLE_SYNC_SCHEDULES,
+  VERISENSE_BLE_SCHEDULE_RANGES,
+  VERISENSE_BLE_SCHEDULE_DEFAULTS,
+  minutesSinceMidnightToHHMM,
+  hhmmToMinutesSinceMidnight,
+  expectedVerisenseStreamSensorIds,
+  expectedVerisenseStreamSensorIdsFromConfig,
 } from './devices/verisense/protocol.js';
+export type {
+  VerisenseBleOptimizationResult,
+  VerisenseAdvertisedNameParts,
+  VerisenseImuGeneration,
+  VerisenseSensorRateDefaultField,
+  VerisenseSensorRateDefaultGroup,
+  VerisenseBleSyncSchedule,
+  VerisenseStreamSensorEnables,
+} from './devices/verisense/protocol.js';
+
+// Verisense Nordic Secure-DFU flow (DEV-845)
+export {
+  VERISENSE_DFU_TRANSIENT_ERROR_REGEX,
+  VERISENSE_DFU_CONNECT_ATTEMPTS,
+  VERISENSE_DFU_RETRY_DELAY_MS,
+  VERISENSE_DFU_REBOOT_DELAY_MS,
+  VERISENSE_DFU_SET_MODE_TIMEOUT_MS,
+  VERISENSE_DFU_RELIABLE_PACKET_DELAY_MS,
+  VERISENSE_DFU_FAST_PACKET_DELAY_MS,
+  VERISENSE_DFU_BOOTLOADER_NAME_PREFIX,
+  VERISENSE_DFU_BOOTLOADER_NAME_PREFIXES,
+  VERISENSE_DFU_ROUTINE_LOG_REGEX,
+  isRoutineVerisenseDfuLogMessage,
+  verisenseDfuAttemptLabel,
+  patchSecureDfuSendOperation,
+  classifyVerisenseDfuError,
+  promiseWithTimeout,
+  isSafeFirmwareArchiveName,
+  buildVerisenseDfuRequestDeviceOptions,
+  setVerisenseDfuModeWithRetry,
+  updateVerisenseDfuImageWithRetry,
+  runVerisenseDfuUpdate,
+} from './devices/verisense/dfu.js';
+export type {
+  VerisenseDfuImage,
+  VerisenseDfuPackage,
+  SecureDfuLike,
+  VerisenseDfuErrorCategory,
+  VerisenseDfuErrorInfo,
+  VerisenseDfuRetryInfo,
+  VerisenseDfuFlowOptions,
+} from './devices/verisense/dfu.js';
+
+// Verisense Nordic Secure-DFU over USB CDC serial (bootloader v3)
+export {
+  slipEncode,
+  SlipDecoder,
+  crc32,
+  SERIAL_DFU_OP,
+  SERIAL_DFU_OBJECT_TYPE,
+  SERIAL_DFU_RESULT_NAMES,
+  SERIAL_DFU_EXTENDED_ERROR_NAMES,
+  VERISENSE_USB_DFU_VID,
+  VERISENSE_USB_DFU_PID,
+  VERISENSE_USB_DFU_PORT_FILTERS,
+  VERISENSE_USB_DFU_REENUMERATION_DELAY_MS,
+  VERISENSE_SERIAL_DFU_REQUEST_TIMEOUT_MS,
+  VERISENSE_SERIAL_DFU_OBJECT_ATTEMPTS,
+  isUsbDfuUnsupportedError,
+  VerisenseSerialDfu,
+} from './devices/verisense/dfuSerial.js';
+export type {
+  SerialDfuTransportLike,
+  VerisenseSerialDfuProgress,
+  VerisenseSerialDfuOptions,
+} from './devices/verisense/dfuSerial.js';
 export {
   parseCalibrationBlob,
   serializeCalibrationBlob,
@@ -256,6 +1212,76 @@ export { SensorMAX32674 } from './devices/verisense/sensors/SensorMAX32674.js';
 export type { MAX32674Sample } from './devices/verisense/sensors/SensorMAX32674.js';
 export { SensorMLX90632 } from './devices/verisense/sensors/SensorMLX90632.js';
 export type { MLX90632Sample } from './devices/verisense/sensors/SensorMLX90632.js';
+export {
+  parseVerisenseFactoryTestReport,
+  verisenseFactoryTestReportToCsvRows,
+} from './devices/verisense/factoryTestReport.js';
+export type {
+  VerisenseFactoryTestVerdict,
+  VerisenseFactoryTestMetricValue,
+  VerisenseFactoryTestResult,
+  VerisenseFactoryTestMcuInfo,
+  VerisenseFactoryTestModelInfo,
+  VerisenseFactoryTestOverall,
+  VerisenseFactoryTestReportParsed,
+} from './devices/verisense/factoryTestReport.js';
+
+// --- Device identity: which board, and which Bluetooth module ---
+// One set of SR codes and module version strings, whichever transport a host
+// reaches the sensor over, so the tables and the display formatting live in one
+// place. Read today by `Shimmer3RClient` and `WiredShimmerClient`; the
+// classic-only `Shimmer3Client` has no identity reads yet.
+export {
+  SHIMMER_PLATFORM_NAMES,
+  SHIMMER_SR_BOARD_NAMES,
+  formatShimmerSrCode,
+  isShimmerSrBoardValid,
+  isShimmerSrBoardAtLeast,
+  describeShimmerHardware,
+  BLUETOOTH_MODULE_VERSIONS,
+  parseBluetoothModuleVersion,
+} from './devices/identity.js';
+export type {
+  ShimmerSrBoard,
+  ShimmerHardwareDescription,
+  BluetoothModuleFamily,
+  BluetoothModuleVersionEntry,
+  BluetoothModuleVersion,
+  Cyw20820VersionDetails,
+} from './devices/identity.js';
+
+// --- Factory test report parsing (all families) ---
+// The Verisense exports above are one grammar over this shared core; these are
+// the core itself plus the Shimmer3/Shimmer3R grammar.
+export {
+  factoryTestReportToCsvRows,
+  detectFactoryTestReportFamily,
+} from './devices/factoryTest/report.js';
+export type {
+  FactoryTestVerdict,
+  FactoryTestMetricValue,
+  FactoryTestResult,
+  FactoryTestOverall,
+  FactoryTestReportParsedBase,
+  FactoryTestClassifier,
+  FactoryTestGrammar,
+  FactoryTestLineContext,
+  FactoryTestLineRule,
+  FactoryTestReportFamily,
+} from './devices/factoryTest/report.js';
+export {
+  parseShimmerFactoryTestReport,
+  shimmerFactoryTestReportToCsvRows,
+  SHIMMER3R_FACTORY_TEST_ID_NAMES,
+  SHIMMER_FACTORY_TEST_CLASSIFIERS,
+} from './devices/factoryTest/shimmerReport.js';
+export type {
+  ShimmerFactoryTestReportFamily,
+  ShimmerFactoryTestReportParsed,
+  ShimmerFactoryTestMcuInfo,
+  ShimmerFactoryTestModelInfo,
+  ShimmerFactoryTestIoStatus,
+} from './devices/factoryTest/shimmerReport.js';
 
 // Instruments — Nordic Power Profiler Kit II (PPK2)
 export { Ppk2 } from './instruments/ppk2/Ppk2.js';

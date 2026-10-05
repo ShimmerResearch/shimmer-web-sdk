@@ -1,4 +1,5 @@
 import { OP_IDX, OP_CONFIG_VERSION_V9 } from './constants.js';
+import { compareVerisenseFirmwareVersion, type VerisenseFirmwareVersion } from './protocolUtils.js';
 import {
   getVerisenseHardwareRevision,
   getVerisenseHardwareSensorSupport,
@@ -142,9 +143,22 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
     ],
   },
   {
+    key: 'LOW_BATT_AUTO_STOP_DISABLED',
+    label: 'Low-Power Auto-Stop',
+    desc: 'Stop recording and BLE data transfers when the battery drops below the low-power threshold. Disabling keeps the device recording until the battery is exhausted, at the risk of data loss from brown-out.',
+    kind: 'bit',
+    index: OP_IDX.GEN_CFG_2,
+    shift: 3,
+    width: 1,
+    options: [
+      [0, 'Enabled'],
+      [1, 'Disabled'],
+    ],
+  },
+  {
     key: 'BATT_TYPE',
     label: 'Battery Type',
-    desc: 'Battery chemistry',
+    desc: 'Battery chemistry (replaceable-battery models only; Zinc-Air is legacy — new configurations should use NiMH). Models with a permanently attached LiPo (SR62, SR61.5+, SR68.9+) ignore this setting — the firmware forces LiPo (see isVerisenseLipoBatteryHardware).',
     kind: 'bit',
     index: OP_IDX.GEN_CFG_2,
     shift: 0,
@@ -796,8 +810,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   },
   {
     key: 'INACTIVE_TIMEOUT_MINUTES',
-    label: 'Inactive Timeout (minutes)',
-    desc: 'Minutes of no activity before the device stops recording and sleeps. 0 disables inactivity detection.',
+    label: 'Inactive Timeout (minutes, 0 = off)',
+    desc:
+      'Minutes the device must be completely stationary before it stops recording (1-63; 0 = stationary detection off, record regardless of movement). ' +
+      'CAUTION: with "Resume Rec On Activity" disabled, hitting this timeout also turns Logging OFF in the stored config - the device will not record again until it is reconfigured.',
     kind: 'inactiveMinutes',
     index: OP_IDX.INACTIVE_TIMEOUT,
     min: 0,
@@ -806,7 +822,10 @@ export const VERISENSE_OPERATIONAL_FIELD_SCHEMA = [
   {
     key: 'RESUME_REC_ON_ACTIVITY',
     label: 'Resume Rec On Activity',
-    desc: 'Automatically resume recording when activity is detected after an inactivity sleep. Only has an effect when Logging is enabled and the inactive timeout is above 0.',
+    desc:
+      'Enabled: recording pauses at the inactive timeout and automatically resumes when movement is detected. ' +
+      'Disabled: hitting the timeout stops recording permanently and turns Logging off in the stored config. ' +
+      'Only has an effect when Logging is enabled and the inactive timeout is above 0.',
     kind: 'inactiveResume',
     index: OP_IDX.INACTIVE_TIMEOUT,
     options: [
@@ -1694,6 +1713,10 @@ const GEN_CFG_0_USB_EN_MASK = 1 << 3;
  * in the SDK means any consuming application is protected — a device can't be
  * stranded by a third-party tool writing 0/0.
  *
+ * On firmware older than {@link VERISENSE_BLUETOOTH_OFF_MIN_FW} this is not
+ * enough: there, Bluetooth off takes USB with it. See
+ * {@link enforceVerisenseBluetoothOffFirmwareGuard}.
+ *
  * Mutates `op` in place. Returns `true` if a correction was applied.
  */
 export function enforceVerisenseCommsChannelInterlock(op: Uint8Array): boolean {
@@ -1703,6 +1726,58 @@ export function enforceVerisenseCommsChannelInterlock(op: Uint8Array): boolean {
     (genCfg0 & GEN_CFG_0_BLUETOOTH_EN_MASK) === 0 && (genCfg0 & GEN_CFG_0_USB_EN_MASK) === 0;
   if (!bothDisabled) return false;
   op[OP_IDX.GEN_CFG_0] = genCfg0 | GEN_CFG_0_BLUETOOTH_EN_MASK | GEN_CFG_0_USB_EN_MASK;
+  return true;
+}
+
+/**
+ * The first firmware on which `BLUETOOTH_EN = 0` leaves USB working (DEV-1096).
+ *
+ * ASM_Production handles USB events only while its SoftDevice is on, and before
+ * this version it started the SoftDevice only for Bluetooth. With Bluetooth off,
+ * USB therefore never enumerated either, and a write that turned Bluetooth off
+ * over USB stopped USB at once. The sensor was left with no way back in but SWD.
+ * {@link enforceVerisenseCommsChannelInterlock} cannot catch that, because USB
+ * is still enabled in the config.
+ */
+export const VERISENSE_BLUETOOTH_OFF_MIN_FW: VerisenseFirmwareVersion = {
+  major: 2,
+  minor: 1,
+  internal: 3,
+};
+
+/** Whether the given firmware can run with Bluetooth disabled. Firmware whose
+ * version is unknown cannot be assumed to. */
+export function supportsVerisenseBluetoothOff(
+  fw: Partial<VerisenseFirmwareVersion> | null | undefined,
+): boolean {
+  if (!fw) return false;
+  return compareVerisenseFirmwareVersion(fw, VERISENSE_BLUETOOTH_OFF_MIN_FW) >= 0;
+}
+
+/** Whether an operational-config buffer has Bluetooth enabled (`BLUETOOTH_EN`). */
+export function isVerisenseBluetoothEnabled(op: Uint8Array | null | undefined): boolean {
+  if (!op || op.length <= OP_IDX.GEN_CFG_0) return false;
+  return (op[OP_IDX.GEN_CFG_0] & GEN_CFG_0_BLUETOOTH_EN_MASK) !== 0;
+}
+
+/**
+ * Keep Bluetooth enabled in an operational-config buffer bound for firmware that
+ * cannot run without it: older than {@link VERISENSE_BLUETOOTH_OFF_MIN_FW}, or of
+ * unknown version.
+ *
+ * That includes firmware older than V2.00.007, which ignores `BLUETOOTH_EN`. The
+ * bit still stays in the sensor's EEPROM, and an update to V2.00.007 - V2.01.002
+ * would then strand the sensor.
+ *
+ * Mutates `op` in place. Returns `true` if a correction was applied.
+ */
+export function enforceVerisenseBluetoothOffFirmwareGuard(
+  op: Uint8Array,
+  fw: Partial<VerisenseFirmwareVersion> | null | undefined,
+): boolean {
+  if (!op || op.length <= OP_IDX.GEN_CFG_0) return false;
+  if (isVerisenseBluetoothEnabled(op) || supportsVerisenseBluetoothOff(fw)) return false;
+  op[OP_IDX.GEN_CFG_0] |= GEN_CFG_0_BLUETOOTH_EN_MASK;
   return true;
 }
 
@@ -1767,6 +1842,7 @@ export const VERISENSE_OPERATIONAL_FIELD_GROUPS: readonly VerisenseOperationalFi
         'DATA_COMPRESSION_MODE',
         'HR_PPG_CHANNEL',
         'STEP_COUNT_EN',
+        'LOW_BATT_AUTO_STOP_DISABLED',
         'BATT_TYPE',
         'MAG_EN',
         'LED_MODE',
@@ -2030,4 +2106,253 @@ export function getVerisenseSupportedOperationalFieldGroupIds(
 export function isVerisenseLightDarkChannelEnabled(op: Uint8Array | null | undefined): boolean {
   if (!op?.length) return false;
   return ((op[OP_IDX.LIGHT_CONFIG] ?? 0) & (1 << 1)) !== 0;
+}
+
+/**
+ * Pad an operational config authored at a legacy/shorter length onto a blank
+ * full-size (v9, {@link VERISENSE_OP_CONFIG_BYTE_SIZE}-byte) image so the
+ * working config is always canonical size — otherwise trailing v9 fields
+ * (e.g. the person-parameter bytes) would be absent. Configs already at or
+ * beyond full size are returned as-is.
+ */
+export function padVerisenseOperationalConfig(bytes: Uint8Array | ArrayLike<number>): Uint8Array {
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(Array.from(bytes));
+  if (src.length >= VERISENSE_OP_CONFIG_BYTE_SIZE) return src;
+  const full = createBlankVerisenseOperationalConfig(VERISENSE_OP_CONFIG_BYTE_SIZE);
+  full.set(src);
+  return full;
+}
+
+/** Which IMU generation an op-config field key targets: 'ds3' = first-gen
+ * LSM6DS3, 'dsv' = second-gen LSM6DSV (+LIS2MDL mag). */
+export type VerisenseImuGeneration = 'ds3' | 'dsv';
+
+export interface VerisenseSensorRateDefaultField {
+  /** Field key in {@link VERISENSE_OPERATIONAL_FIELD_SCHEMA}, when the field
+   * is the same on both IMU generations. */
+  readonly key?: string;
+  /** Generation-specific field keys (accel2/gyro ODR live in different
+   * fields on LSM6DS3 vs LSM6DSV configs). */
+  readonly keyByGen?: Readonly<Record<VerisenseImuGeneration, string>>;
+  /** Default rate/mode code to seed when the sensor is enabled. */
+  readonly on: number;
+  /** Power-down code to write when every enable in the group is off. */
+  readonly off: number;
+}
+
+export interface VerisenseSensorRateDefaultGroup {
+  /** Sensor-enable field keys (see {@link VERISENSE_SENSOR_ENABLE_FIELDS})
+   * that share the rate/mode field(s) below. */
+  readonly enableKeys: readonly string[];
+  readonly fields: readonly VerisenseSensorRateDefaultField[];
+}
+
+/**
+ * Firmware default rate/mode codes per sensor group, for config editors that
+ * auto-seed a rate when a sensor is first enabled and power it down when all
+ * of its enables are cleared. Editors should only seed the `on` default when
+ * the field currently holds the `off` (power-down) code, so a user-chosen
+ * rate is never clobbered. Sensors whose rate field has no power-down value
+ * (magnetometer LIS2MDL_ODR, PPG_SR) are omitted — their enable bit / channel
+ * toggles are the on/off control. Default ODR codes mirror the standard
+ * customer template (Accel1 = 50 Hz, ADC = 128 Hz).
+ */
+export const VERISENSE_SENSOR_RATE_DEFAULT_GROUPS: readonly VerisenseSensorRateDefaultGroup[] = [
+  { enableKeys: ['ACCEL_1_EN'], fields: [{ key: 'ODR', on: 4, off: 0 }] },
+  {
+    enableKeys: ['ACCEL_2_EN'],
+    fields: [{ keyByGen: { dsv: 'LSM6DSV_ODR_XL', ds3: 'ODR_XL' }, on: 3, off: 0 }],
+  },
+  {
+    enableKeys: ['GYRO_EN'],
+    fields: [{ keyByGen: { dsv: 'LSM6DSV_ODR_G', ds3: 'ODR_G' }, on: 3, off: 0 }],
+  },
+  {
+    enableKeys: ['GSR_EN', 'VBATT_EN', 'VPROG_EN'],
+    fields: [{ key: 'ADC_SAMPLE_RATE', on: 19, off: 0 }],
+  },
+  {
+    enableKeys: ['AMBIENT_LIGHT_EN'],
+    fields: [{ key: 'LIGHT_SAMPLE_RATE_INDEX', on: 2, off: 0 }],
+  },
+  {
+    enableKeys: ['SKIN_TEMP_EN'],
+    fields: [{ key: 'SKIN_TEMP_SAMPLE_RATE', on: 5, off: 0 }],
+  },
+  { enableKeys: ['ALGO_HUB_EN'], fields: [{ key: 'ALGO_OP_MODE', on: 1, off: 0 }] },
+];
+
+/** Resolve a rate-default field to its concrete schema key for the given IMU
+ * generation, or null when the field has no key for that generation. */
+export function resolveVerisenseSensorRateFieldKey(
+  field: VerisenseSensorRateDefaultField,
+  generation: VerisenseImuGeneration,
+): string | null {
+  return field.key ?? field.keyByGen?.[generation] ?? null;
+}
+
+/** One of the three firmware BLE wake/sync schedules and its four op-config
+ * field keys (see the BLE Wake Schedule field group). */
+export interface VerisenseBleSyncSchedule {
+  readonly id: 'data' | 'status' | 'rtcSync';
+  /** Field-group subgroup id used by the operational field schema. */
+  readonly subgroupId: string;
+  readonly intervalKey: string;
+  readonly timeKey: string;
+  readonly durKey: string;
+  readonly retryKey: string;
+}
+
+/**
+ * The three firmware sync schedules (data transfer, status, RTC sync), each
+ * with wake-interval-hours / wake-time / active-duration / retry-interval
+ * fields. Interval semantics (from firmware `hal_rtc.c`): 0 = off, 24 = once
+ * daily at the wake time, 1-23 = every N hours. Wake time is
+ * minutes-since-midnight (device local time), duration is minutes 0-255,
+ * retry interval is minutes 0-1439. The number of connection attempts per
+ * window is the separate global `BLE_CONNECTION_TRIES_PER_DAY` field.
+ */
+export const VERISENSE_BLE_SYNC_SCHEDULES: readonly VerisenseBleSyncSchedule[] = [
+  {
+    id: 'data',
+    subgroupId: 'ble_data',
+    intervalKey: 'BLE_DATA_TRANS_WKUP_INT_HOURS',
+    timeKey: 'BLE_DATA_TRANS_WKUP_TIME',
+    durKey: 'BLE_DATA_TRANS_WKUP_DUR',
+    retryKey: 'BLE_DATA_TRANS_RETRY_INT',
+  },
+  {
+    id: 'status',
+    subgroupId: 'ble_status',
+    intervalKey: 'BLE_STATUS_WKUP_INT_HOURS',
+    timeKey: 'BLE_STATUS_WKUP_TIME',
+    durKey: 'BLE_STATUS_WKUP_DUR',
+    retryKey: 'BLE_STATUS_RETRY_INT',
+  },
+  {
+    id: 'rtcSync',
+    subgroupId: 'ble_rtc_sync',
+    intervalKey: 'BLE_RTC_SYNC_WKUP_INT_HOURS',
+    timeKey: 'BLE_RTC_SYNC_WKUP_TIME',
+    durKey: 'BLE_RTC_SYNC_WKUP_DUR',
+    retryKey: 'BLE_RTC_SYNC_RETRY_INT',
+  },
+];
+
+/** Value ranges for the BLE sync-schedule fields (clamp editor input to
+ * these before writing). */
+export const VERISENSE_BLE_SCHEDULE_RANGES = Object.freeze({
+  intervalHours: Object.freeze({ min: 0, max: 24 }),
+  timeMins: Object.freeze({ min: 0, max: 1439 }),
+  durMin: Object.freeze({ min: 0, max: 255 }),
+  retryIntMin: Object.freeze({ min: 0, max: 1439 }),
+});
+
+/**
+ * Canonical schedule defaults: 01:00 daily, 10-minute window, 15-minute
+ * retry, 5 connection attempts per wake. Also the "reset" values applied
+ * when the pending-events scheduler is disabled, so a disabled config lands
+ * in a clean known state.
+ */
+export const VERISENSE_BLE_SCHEDULE_DEFAULTS = Object.freeze({
+  intervalHours: 24,
+  timeMins: 60,
+  durMin: 10,
+  retryIntMin: 15,
+  connectionTries: 5,
+});
+
+/** Format minutes-since-midnight as `"HH:MM"`, or null when out of range.
+ * Fractional input is rounded to the nearest whole minute first, so the
+ * minutes component always stays in 0–59. */
+export function minutesSinceMidnightToHHMM(mins: number | null | undefined): string | null {
+  if (mins == null) return null;
+  const v = Math.round(Number(mins));
+  if (!Number.isFinite(v) || v < 0 || v > 1439) return null;
+  const h = Math.floor(v / 60);
+  const m = v % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/** Parse `"HH:MM"` (or `"H:MM"`) into minutes-since-midnight, or null when
+ * malformed / out of range. */
+export function hhmmToMinutesSinceMidnight(text: string | null | undefined): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? '').trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+  return h * 60 + mm;
+}
+
+/** Boolean sensor enables used to predict which stream sensor IDs a config
+ * will produce (see {@link expectedVerisenseStreamSensorIds}). */
+export interface VerisenseStreamSensorEnables {
+  gsr?: boolean;
+  vbatt?: boolean;
+  vprog?: boolean;
+  accel1?: boolean;
+  accel2?: boolean;
+  gyro?: boolean;
+  mag?: boolean;
+  ppg?: boolean;
+  ambientLight?: boolean;
+  skinTemp?: boolean;
+  algoHub?: boolean;
+}
+
+/**
+ * The stream-packet sensor IDs a device will emit for a given set of sensor
+ * enables (see `VERISENSE_STREAM_SENSOR_LABELS` for the ID meanings). The
+ * IMU block splits by hardware generation: first-gen streams accel2+gyro as
+ * ID 3 (LSM6DS3); second-gen streams accel2+gyro+mag as ID 6 (LSM6DSV +
+ * LIS2MDL). Any enabled PPG channel produces the single PPG stream (ID 4).
+ */
+export function expectedVerisenseStreamSensorIds(
+  enables: VerisenseStreamSensorEnables,
+  opts: { secondGeneration: boolean },
+): Set<number> {
+  const ids = new Set<number>();
+  if (enables.gsr || enables.vbatt || enables.vprog) ids.add(1);
+  if (enables.accel1) ids.add(2);
+  if (enables.accel2 || enables.gyro || enables.mag) ids.add(opts.secondGeneration ? 6 : 3);
+  if (enables.ppg) ids.add(4);
+  if (enables.ambientLight) ids.add(7);
+  if (enables.algoHub) ids.add(8);
+  if (enables.skinTemp) ids.add(9);
+  return ids;
+}
+
+const STREAM_ENABLE_BY_FIELD_KEY: Readonly<Record<string, keyof VerisenseStreamSensorEnables>> = {
+  ACCEL_1_EN: 'accel1',
+  ACCEL_2_EN: 'accel2',
+  GYRO_EN: 'gyro',
+  MAG_EN: 'mag',
+  GSR_EN: 'gsr',
+  PPG_GREEN_EN: 'ppg',
+  PPG_RED_EN: 'ppg',
+  PPG_IR_EN: 'ppg',
+  PPG_BLUE_EN: 'ppg',
+  VPROG_EN: 'vprog',
+  VBATT_EN: 'vbatt',
+  AMBIENT_LIGHT_EN: 'ambientLight',
+  SKIN_TEMP_EN: 'skinTemp',
+  ALGO_HUB_EN: 'algoHub',
+};
+
+/** {@link expectedVerisenseStreamSensorIds} computed straight from op-config
+ * bytes via the sensor-enable bit schema. */
+export function expectedVerisenseStreamSensorIdsFromConfig(
+  op: Uint8Array | null | undefined,
+  opts: { secondGeneration: boolean },
+): Set<number> {
+  const enables: VerisenseStreamSensorEnables = {};
+  if (op?.length) {
+    for (const f of VERISENSE_SENSOR_ENABLE_FIELDS) {
+      const enableKey = STREAM_ENABLE_BY_FIELD_KEY[f.key];
+      if (!enableKey) continue;
+      if ((((op[f.index] ?? 0) >> f.shift) & 0x01) === 1) enables[enableKey] = true;
+    }
+  }
+  return expectedVerisenseStreamSensorIds(enables, opts);
 }

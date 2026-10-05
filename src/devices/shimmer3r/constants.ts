@@ -2,6 +2,25 @@
  * Shimmer3R BLE protocol opcodes.
  * Values taken directly from the Shimmer3 firmware header.
  */
+/**
+ * Feature ids for the SET_FEATURE (0xB7) command: `[0xB7][featureId][value]`.
+ * Mirrors the FEATURE_* enum in log-and-stream-common
+ * `Comms/shimmer_bt_uart.h`.
+ */
+export const BT_FEATURE = Object.freeze({
+  NONE: 0,
+  /** Shimmer3 RN4678 error LEDs. */
+  RN4678_ERROR_LEDS: 1,
+  /**
+   * Arm a one-shot soft reboot that fires when the host disconnects. Lets a
+   * host apply settings only read at boot (e.g. the EEPROM brand record's
+   * advertising names) without the user power-cycling the device. Firmware
+   * skips the reboot while sensing, so an armed request can never truncate an
+   * active SD recording.
+   */
+  REBOOT_ON_DISCONNECT: 2,
+} as const);
+
 export const OPCODES = Object.freeze({
   DATA_PACKET: 0x00,
   INQUIRY_COMMAND: 0x01,
@@ -173,13 +192,50 @@ export const OPCODES = Object.freeze({
 
 export type Opcode = (typeof OPCODES)[keyof typeof OPCODES];
 
-/** Default BLE service / characteristic UUIDs for Shimmer3R. */
+/**
+ * Default BLE service / characteristic UUIDs for Shimmer3R.
+ *
+ * The Shimmer3R's BLE transport is the CYW20820 module's CYSPP profile. Per the
+ * EZ-Serial firmware platform user guide the service exposes three
+ * characteristics, and which one you subscribe to decides the throughput:
+ *
+ * - `…ca101` Acknowledged Data (Write, **Indicate**) — "guaranteed
+ *   reliability". Every payload costs an application-level confirmation round
+ *   trip, so at a 7.5 ms connection interval one PDU takes two intervals.
+ * - `…ca102` Unacknowledged Data (Write without response, **Notify**) — the
+ *   guide's "faster potential throughput" path. One characteristic serves both
+ *   directions. Loss of the ATT-level confirmation only: the BLE link layer
+ *   still retransmits and preserves ordering, and LiteProtocol frames carry
+ *   their own integrity checks on top.
+ * - `…ca103` RX Flow (Indicate) — the server indicates when it can no longer
+ *   safely receive new data.
+ */
 export const SHIMMER3R_DEFAULTS = Object.freeze({
   SERVICE_UUID: '65333333-a115-11e2-9e9a-0800200ca100',
-  /** Write characteristic (host → device). */
+  /** Unacknowledged Data — host → device writes (write without response). */
   CHAR_RX_UUID: '65333333-a115-11e2-9e9a-0800200ca102',
-  /** Notify characteristic (device → host). */
-  CHAR_TX_UUID: '65333333-a115-11e2-9e9a-0800200ca101',
+  /**
+   * Device → host subscription. The Unacknowledged Data characteristic, which
+   * is notify-capable and therefore does not pay a confirmation round trip per
+   * payload — the same characteristic {@link CHAR_RX_UUID} writes to, which is
+   * the documented CYSPP client pattern.
+   *
+   * This was `…ca101` (Acknowledged Data) up to SDK 0.2.1. That characteristic
+   * is Indicate-only, so `startNotifications()` subscribed for indications and
+   * device → host throughput was capped at one PDU per two connection
+   * intervals — measured ~32 KB/s against a Windows 11 host, with an HCI
+   * capture confirming ATT indications (opcode 0x1D) and one confirmation per
+   * PDU. {@link WebBluetoothTransportOptions.notifyCharUUIDFallback} keeps the
+   * old characteristic reachable if a device does not offer this one.
+   */
+  CHAR_TX_UUID: '65333333-a115-11e2-9e9a-0800200ca102',
+  /** Acknowledged Data — the pre-0.2.2 device → host subscription. */
+  CHAR_TX_ACKED_UUID: '65333333-a115-11e2-9e9a-0800200ca101',
+  /**
+   * RX Flow. Indicates that the device can no longer safely receive new data;
+   * see {@link WebBluetoothTransportOptions.rxFlowCharUUID}.
+   */
+  CHAR_RX_FLOW_UUID: '65333333-a115-11e2-9e9a-0800200ca103',
 } as const);
 
 /**

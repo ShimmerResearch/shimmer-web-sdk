@@ -1,0 +1,309 @@
+/**
+ * SD-log packet decoding — single file and multi-file session.
+ *
+ * Ported from the Shimmer Java driver:
+ *   ShimmerSDLog#readPacketMsg / #isEndOfFile — read loop and sync-block
+ *     accounting (the 9-byte timestamp-offset field before the first packet
+ *     of each 512-byte block is consumed and DISCARDED; porting the sync
+ *     algorithm itself is out of scope)
+ *   ShimmerObject#unwrapTimeStamp / #parseTimestampShimmer3 — rollover
+ *     unwrapping and tick→ms conversion
+ *   ParserLoggedDataToDatabase#createMapOfFiles / #parseDataToDB /
+ *   #compareSDHeader — numeric file ordering + cross-file consistency
+ *     (modern files are self-contained: each restarts its own unwrap state
+ *     and carries its own initial timestamp; only legacy 0.5.x — out of
+ *     scope — carried rollover state across files)
+ */
+
+import { firstTsOffsetFromInitialTsTicks } from './anchor.js';
+import { SDLOG_CLOCK_FREQ, SDLOG_SYNC_OFFSET_LENGTH } from './constants.js';
+import {
+  decodeSdLogValue,
+  SDLOG_BMP581_PRESSURE_NAME,
+  SDLOG_BMP581_TEMPERATURE_NAME,
+  type SdLogChannelSpec,
+} from './channels.js';
+import { parseSdLog, type ParsedSdLog } from './header.js';
+import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js';
+import { calibrateGsrSample } from '../calibration/gsr.js';
+import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
+import { compensateBmp581 } from '../pressure/bmp581.js';
+
+/** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
+export interface SdLogDecodeOptions {
+  /** Stop after this many records (the result is flagged `truncated`). */
+  maxRecords?: number;
+}
+
+/** Result of decoding one SD-log file or a whole session. */
+export interface SdLogDecodeResult {
+  header: SdLogHeader;
+  records: SdLogRecord[];
+  /** True when decoding stopped early because `maxRecords` was reached. */
+  truncated: boolean;
+}
+
+/**
+ * Convert a raw GSR sample to conductance in µS, through the one shared
+ * amplifier-equation path (`devices/calibration/gsr.ts`) that the streaming
+ * clients also use, seeded with the header's GSR range setting.
+ */
+// HARDWARE-VERIFY: GSR amplifier-equation calibration is shared by the SDK's
+// Shimmer3 and Shimmer3R streaming clients; confirm it holds for SD-logged
+// GSR data on older (pre-GSR+) Shimmer3 expansion boards.
+function calibrateGsr(raw: number, gsrRangeSetting: number): number {
+  return calibrateGsrSample(raw, gsrRangeSetting).conductanceUSiemens;
+}
+
+/** Where a file's BMP581 pair sits in each record, -1 for a channel it lacks. */
+interface Bmp581Indices {
+  pressure: number;
+  temperature: number;
+}
+
+/**
+ * Locate the calibrated BMP581 pair, or null when the file has neither channel
+ * — which is every file not decided as a Shimmer3R BMP581, because only
+ * `buildShimmer3RSdLogChannels` emits these calibrated. Every other pressure
+ * pair, including an unknown part's or one the header says is not fitted
+ * (DEV-1123), stays raw.
+ */
+function findBmp581(channels: SdLogChannelSpec[]): Bmp581Indices | null {
+  const find = (name: string): number => channels.findIndex((c) => c.name === name && c.calibrated);
+  const pressure = find(SDLOG_BMP581_PRESSURE_NAME);
+  const temperature = find(SDLOG_BMP581_TEMPERATURE_NAME);
+  return pressure < 0 && temperature < 0 ? null : { pressure, temperature };
+}
+
+/**
+ * Replace the BMP581 pair's raw values in place with kPa and °C, through the
+ * same `compensateBmp581` the streaming path dispatches to. Each output is a
+ * fixed scale of its own register, so a file that somehow carries only one of
+ * the two still converts it correctly.
+ */
+function applyBmp581(values: number[], idx: Bmp581Indices): void {
+  const out = compensateBmp581(
+    idx.pressure < 0 ? 0 : values[idx.pressure],
+    idx.temperature < 0 ? 0 : values[idx.temperature],
+  );
+  if (idx.pressure >= 0) values[idx.pressure] = out.pressureKPa;
+  if (idx.temperature >= 0) values[idx.temperature] = out.temperatureC;
+}
+
+interface DecodeBudget {
+  remaining: number;
+  truncated: boolean;
+}
+
+function decodeRecordsFromFile(
+  bytes: Uint8Array,
+  parsed: ParsedSdLog,
+  out: SdLogRecord[],
+  budget: DecodeBudget,
+): void {
+  const { header, channels, syncFraming, samplesPerBlock, wallClockFreqHz } = parsed;
+  // Build the inertial calibration plan once per file. This also flips the
+  // affected channel specs to calibrated:true / unit and records per-group
+  // metadata on the header (header.calibration), mirroring how GSR is emitted
+  // calibrated. LN accel, WR accel, gyro, mag (+ Shimmer3R alt accel/mag).
+  const calibPlan = buildSdLogCalibPlan(header, channels);
+  header.calibration = calibPlan.info;
+  const bmp581 = findBmp581(channels);
+  const packetSize = header.packetSizeBytes;
+  const tsBytes = header.timestampBytes;
+  const maxTicks = 2 ** (8 * tsBytes);
+  const initialTicks = header.initialTimestampTicks;
+  const rtcTicks = Number(header.rtcDifferenceTicks);
+  const hasRtc = header.rtcDifferenceTicks !== 0n;
+
+  // Per-file rollover state (ShimmerObject#unwrapTimeStamp): modern files
+  // restart from cycle 0 with their own header initial timestamp.
+  let cycle = 0;
+  let lastUnwrapped = 0;
+  // Subtracted, with the header's initial timestamp added, from each unwrapped
+  // timestamp (mFirstTsOffsetFromInitialTsTicks in the Java driver). The header
+  // holds the RTC when the file was created, not the first packet's time, so
+  // the offset re-anchors the file on the first packet's own counter value —
+  // see ./anchor.ts (DEV-1095).
+  let firstTsOffsetTicks: number | null = null;
+
+  let pos = header.headerLengthBytes;
+  let samplesInBlock = 0;
+
+  while (budget.remaining > 0) {
+    // ShimmerSDLog#readPacketMsg: the first packet of the file and the first
+    // packet after every `samplesPerBlock` packets is prefixed by the 9-byte
+    // sync timestamp-offset field, which is read and discarded here.
+    const withOffset = syncFraming && (samplesInBlock === 0 || samplesInBlock === samplesPerBlock);
+    const need = withOffset ? SDLOG_SYNC_OFFSET_LENGTH + packetSize : packetSize;
+    if (pos + need > bytes.length) break; // trailing partial packet is dropped (Java EOF)
+
+    let p = pos;
+    if (withOffset) {
+      p += SDLOG_SYNC_OFFSET_LENGTH; // discard the offset value
+      samplesInBlock = 0;
+    }
+
+    // Timestamp: u16/u24 little-endian, unwrapped against rollovers.
+    let rawTs = bytes[p] | (bytes[p + 1] << 8);
+    if (tsBytes === 3) rawTs |= bytes[p + 2] << 16;
+    p += tsBytes;
+    let unwrapped = rawTs + maxTicks * cycle;
+    if (unwrapped < lastUnwrapped) {
+      cycle += 1;
+      unwrapped = rawTs + maxTicks * cycle;
+    }
+    lastUnwrapped = unwrapped;
+    if (firstTsOffsetTicks === null) {
+      firstTsOffsetTicks = firstTsOffsetFromInitialTsTicks(initialTicks, rawTs, maxTicks);
+    }
+
+    const values = new Array<number>(channels.length);
+    for (let c = 0; c < channels.length; c++) {
+      const spec = channels[c];
+      const raw = decodeSdLogValue(bytes, p, spec.dataType);
+      // GSR is calibrated inline (amplifier equation). Inertial channels are
+      // marked calibrated by the plan but keep their raw value here and are
+      // calibrated together (per triple) by applyCalibPlan below, and the
+      // BMP581 pair likewise by applyBmp581.
+      values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
+      p += spec.sizeBytes;
+    }
+    if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
+    if (bmp581) applyBmp581(values, bmp581);
+
+    const absoluteTicks = initialTicks + unwrapped - firstTsOffsetTicks;
+    out.push({
+      // Device-clock timestamp always divides by the 32768 Hz RTC clock
+      // (ShimmerObject#getRtcClockFreq); only the wall-clock (RTC) conversion
+      // below honours the TCXO sampling clock (ShimmerObject#getSamplingClockFreq).
+      timestampMs: (absoluteTicks / SDLOG_CLOCK_FREQ) * 1000,
+      wallClockMs: hasRtc ? ((absoluteTicks + rtcTicks) / wallClockFreqHz) * 1000 : null,
+      values,
+    });
+
+    samplesInBlock += 1;
+    pos += need;
+    budget.remaining -= 1;
+  }
+
+  if (budget.remaining === 0) {
+    const nextWithOffset =
+      syncFraming && (samplesInBlock === 0 || samplesInBlock === samplesPerBlock);
+    const nextNeed = nextWithOffset ? SDLOG_SYNC_OFFSET_LENGTH + packetSize : packetSize;
+    if (pos + nextNeed <= bytes.length) {
+      budget.truncated = true;
+    }
+  }
+}
+
+/**
+ * Decode a single SD-log binary file (e.g. `000`) into typed records.
+ *
+ * @throws SdLogFormatError `NO_DATA` when the file contains only a header.
+ */
+export function decodeSdLogFile(bytes: Uint8Array, opts?: SdLogDecodeOptions): SdLogDecodeResult {
+  const parsed = parseSdLog(bytes);
+  if (bytes.length <= parsed.header.headerLengthBytes) {
+    throw new SdLogFormatError(
+      'NO_DATA',
+      `File contains only the ${parsed.header.headerLengthBytes}-byte header — no sample data.`,
+    );
+  }
+  const records: SdLogRecord[] = [];
+  const budget: DecodeBudget = {
+    remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
+    truncated: false,
+  };
+  decodeRecordsFromFile(bytes, parsed, records, budget);
+  return { header: parsed.header, records, truncated: budget.truncated };
+}
+
+const isDataFileName = (name: string): boolean => !name.includes('.');
+
+/**
+ * Decode a multi-file SD session (files `000`, `001`, … within one
+ * `<ShimmerName>-<SessionNumber>` folder).
+ *
+ * - Files whose names contain a `.` are ignored (UtilDock's "a log file is a
+ *   name containing no dot" rule); remaining names must be numeric.
+ * - Files are concatenated in ascending numeric order.
+ * - Headers must agree on MAC address, sampling rate, enabled sensors and
+ *   trial id (ParserLoggedDataToDatabase#compareSDHeader), otherwise
+ *   `INCONSISTENT_SESSION` is thrown.
+ * - Each file restarts its own timestamp-unwrap state and uses its own
+ *   header's initial timestamp, so absolute times remain continuous across
+ *   file boundaries on modern firmware.
+ */
+export function decodeSdSession(
+  files: { name: string; bytes: Uint8Array }[],
+  opts?: SdLogDecodeOptions,
+): SdLogDecodeResult {
+  const dataFiles = files.filter((f) => isDataFileName(f.name));
+  if (dataFiles.length === 0) {
+    throw new SdLogFormatError('NO_DATA', 'No SD-log data files (dot-free numeric names) given.');
+  }
+
+  const numbered = dataFiles.map((f) => {
+    if (!/^\d+$/.test(f.name)) {
+      throw new SdLogFormatError(
+        'BAD_HEADER',
+        `"${f.name}" is not a valid SD-log data file name (expected digits only, e.g. "000").`,
+      );
+    }
+    return { num: parseInt(f.name, 10), file: f };
+  });
+  numbered.sort((a, b) => a.num - b.num);
+  for (let i = 1; i < numbered.length; i++) {
+    if (numbered[i].num === numbered[i - 1].num) {
+      throw new SdLogFormatError(
+        'INCONSISTENT_SESSION',
+        `Duplicate log file number ${numbered[i].num} in session.`,
+      );
+    }
+  }
+
+  const parsedFiles = numbered.map(({ file }) => ({
+    name: file.name,
+    bytes: file.bytes,
+    parsed: parseSdLog(file.bytes),
+  }));
+
+  const first = parsedFiles[0].parsed.header;
+  // Populate the returned header's calibration metadata (and calibrated channel
+  // flags) even if the first file turns out to be header-only.
+  first.calibration = buildSdLogCalibPlan(first, parsedFiles[0].parsed.channels).info;
+  for (const { name, parsed } of parsedFiles) {
+    const h = parsed.header;
+    if (
+      h.macAddress !== first.macAddress ||
+      h.samplingRateHz !== first.samplingRateHz ||
+      h.enabledSensors !== first.enabledSensors ||
+      h.trial.id !== first.trial.id
+    ) {
+      throw new SdLogFormatError(
+        'INCONSISTENT_SESSION',
+        `Header of file "${name}" does not match the session's first file (MAC/rate/sensors/trial id).`,
+      );
+    }
+  }
+
+  const withData = parsedFiles.filter((f) => f.bytes.length > f.parsed.header.headerLengthBytes);
+  if (withData.length === 0) {
+    throw new SdLogFormatError('NO_DATA', 'No file in the session contains sample data.');
+  }
+
+  const records: SdLogRecord[] = [];
+  const budget: DecodeBudget = {
+    remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
+    truncated: false,
+  };
+  for (const f of withData) {
+    if (budget.remaining <= 0) {
+      budget.truncated = true;
+      break;
+    }
+    decodeRecordsFromFile(f.bytes, f.parsed, records, budget);
+  }
+  return { header: first, records, truncated: budget.truncated };
+}

@@ -1,0 +1,596 @@
+import { describe, it, expect } from 'vitest';
+import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
+import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
+import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+
+// Exercise Shimmer3RClient's connect / inquiry / config flows against a scripted
+// in-memory transport — no browser, no Web Bluetooth. The transport delivers the
+// exact notification chunks it is told to, so these tests pin the ACK-first
+// command flow and, critically, the ACK-remainder handling.
+
+const ACK = OPCODES.ACK_COMMAND_PROCESSED; // 0xff
+const INQ_RSP = OPCODES.INQUIRY_RESPONSE; // 0x02
+
+// A minimal, opcode-prefixed inquiry response:
+//   [0x02, adcLo, adcHi, cfg0..cfg6, numCh, bufSize, ch0, ch1, ch2]
+// adcRaw = 0x0280 = 640  ->  32768 / 640 = 51.2 Hz
+// channels 0x0a/0x0b/0x0c = GYRO X/Y/Z  ->  SENSOR_GYRO
+const INQUIRY_BODY = [INQ_RSP, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0x0a, 0x0b, 0x0c];
+
+/**
+ * Deliver each chunk in its own macrotask (successive `setTimeout(0)`s), so the
+ * client's microtask-scheduled continuations (register ACK wait → register
+ * response wait) run in between — mirroring how real notifications interleave.
+ */
+function scheduleChunks(t: LoopbackTransport, chunks: Array<number[] | Uint8Array>): void {
+  for (const c of chunks) setTimeout(() => t.notify(c), 0);
+}
+
+describe('Shimmer3RClient over LoopbackTransport', () => {
+  it('connects over an injected transport without touching navigator.bluetooth', async () => {
+    const t = new LoopbackTransport({ deviceName: 'Shimmer3R-TEST' });
+    const client = new Shimmer3RClient({ debug: false, transport: t });
+    await client.connect();
+    expect(t.connected).toBe(true);
+    // No BluetoothDevice for a non-web transport.
+    expect(client.device).toBeNull();
+  });
+
+  it('setSamplingRate sends the 16-bit divisor command and resolves on ACK', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t); // connect(transport) parameter form
+
+    const res = await client.setSamplingRate(51.2);
+    expect(res.divisor).toBe(640);
+    expect(res.appliedHz).toBeCloseTo(51.2, 5);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_SAMPLING_RATE_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_SAMPLING_RATE_COMMAND, 0x80, 0x02]);
+  });
+
+  it('setGSRRange resolves on ACK and caches the range', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const res = await client.setGSRRange(2);
+    expect(res.gsrRange).toBe(2);
+    expect(client.gsrRangeSetting).toBe(2);
+  });
+
+  it('setWrAccelRange sends [0x09, range] and updates the calibration range', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const res = await client.setWrAccelRange(1);
+    expect(res.wrAccelRange).toBe(1);
+    // Streaming calibration must see the new range without waiting for an inquiry.
+    expect(client.imuRanges.wrAccel).toBe(1);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_WR_ACCEL_RANGE_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_WR_ACCEL_RANGE_COMMAND, 1]);
+  });
+
+  it('setGyroRange sends [0x49, range] and updates the calibration range', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    // 5 = ±4000 dps, the Shimmer3R-only range the firmware reports back through
+    // the split LSB-pair + MSB-bit config field. The command is a single byte.
+    const res = await client.setGyroRange(5);
+    expect(res.gyroRange).toBe(5);
+    expect(client.imuRanges.gyro).toBe(5);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_GYRO_RANGE_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.SET_GYRO_RANGE_COMMAND, 5]);
+  });
+
+  it('range setters reject out-of-range values before writing', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.setWrAccelRange(4)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setWrAccelRange(-1)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setWrAccelRange(1.5)).rejects.toThrow(/wrAccelRange/);
+    await expect(client.setGyroRange(6)).rejects.toThrow(/gyroRange/);
+    await expect(client.setGyroRange(-1)).rejects.toThrow(/gyroRange/);
+    await expect(client.setGyroRange(2.5)).rejects.toThrow(/gyroRange/);
+    expect(t.writes.length).toBe(0);
+    // Nothing was cached either.
+    expect(client.imuRanges.wrAccel).toBe(0);
+    expect(client.imuRanges.gyro).toBe(0);
+  });
+
+  it('parses an inquiry response piggybacked in the SAME chunk as its ACK (regression)', async () => {
+    // The regression: Shimmer3R firmware frequently returns the ACK (0xFF) and
+    // the INQUIRY_RESPONSE (0x02 ...) in a single BLE notification. The transport
+    // must preserve that chunk so the client's ACK-remainder path can recover the
+    // piggybacked response instead of timing out.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK, ...INQUIRY_BODY]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.opcode).toBe(INQ_RSP);
+    expect(info.samplingRateHz).toBeCloseTo(51.2, 5);
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('parses an inquiry response delivered as a SEPARATE chunk after the ACK', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // ACK alone, then the response in its own notification chunk.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  // The inquiry response is the one multi-byte response with no length byte, so
+  // it cannot be accumulated against a declared length the way every other one
+  // is. Before it was reassembled, a response split across notifications was
+  // parsed from whichever chunk arrived first: the channel count read as 0, the
+  // channel list came back empty, and that parsed all the way through to
+  // enabledSensors = 0x000000 and a timestamp-only 4-byte frame. The device then
+  // sent its real 16/24-byte frames, so the only symptom was 100% packet loss at
+  // a believable data rate — nothing pointed at the inquiry. Hence a case per
+  // split position rather than one representative split.
+
+  it('reassembles an inquiry response split inside the channel list (regression)', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Header through the first channel id, then the remaining two.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 13), INQUIRY_BODY.slice(13)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response split before the channel count (regression)', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Splits inside the header, so even the total length is unknown at first.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 4), INQUIRY_BODY.slice(4)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response whose first chunk is the opcode alone (regression)', async () => {
+    // The worst case: a lone chunk that matches the expected opcode is exactly
+    // what the response waiter used to resolve on.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK], [INQ_RSP], INQUIRY_BODY.slice(1)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('reassembles an inquiry response piggybacked on the ACK and then split', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK, ...INQUIRY_BODY.slice(0, 11)], INQUIRY_BODY.slice(11)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.numChannels).toBe(3);
+    expect(info.channelIds).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(info.schema.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+  });
+
+  it('preserves a channel id of 0xFF across a split rather than reading it as a stray ACK', async () => {
+    // Continuation chunks are accumulated verbatim: a lone 0xFF here is a
+    // channel id, and dropping it would misalign every channel after it.
+    const body = [INQ_RSP, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0x0a, 0xff, 0x0c];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        scheduleChunks(tr, [[ACK], body.slice(0, 13), [0xff], body.slice(14)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const info = await client.inquiry();
+    expect(info.channelIds).toEqual([0x0a, 0xff, 0x0c]);
+  });
+
+  it('rejects a genuinely truncated inquiry response instead of reporting no sensors', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        // Declares 3 channels but only ever sends one of them.
+        scheduleChunks(tr, [[ACK], INQUIRY_BODY.slice(0, 13)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.inquiry()).rejects.toThrow(/truncated/i);
+    // The silent-degradation symptom must not appear, and the rejection must
+    // leave nothing half-applied: no sensor bitmap, no sampling rate.
+    expect(client.enabledSensors).toBe(0);
+    expect(client.samplingRateHz).toBe(0);
+  });
+
+  it('reports the right minimum length for a chunk that is only the opcode', async () => {
+    // The opcode's presence is decided on the byte alone. Deciding it on the
+    // buffer length too made a lone [0x02] look headerless, so the error named
+    // the headerless minimum (11) for a buffer that needed 12.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) scheduleChunks(tr, [[ACK], [INQ_RSP]]);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.inquiry()).rejects.toThrow(/at least 12/);
+  });
+
+  it('setSensors ACKs then auto-inquires to rebuild the schema', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_SENSORS_COMMAND) scheduleChunks(tr, [[ACK]]);
+      else if (bytes[0] === OPCODES.INQUIRY_COMMAND) scheduleChunks(tr, [[ACK, ...INQUIRY_BODY]]);
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const res = await client.setSensors(SensorBitmapShimmer3.SENSOR_GYRO);
+    expect(res.enabledSensors).toBe(SensorBitmapShimmer3.SENSOR_GYRO);
+    // A SET_SENSORS_CMD and a follow-up INQUIRY_CMD were both written.
+    expect(t.writes.some((w) => w.bytes[0] === OPCODES.SET_SENSORS_COMMAND)).toBe(true);
+    expect(t.writes.some((w) => w.bytes[0] === OPCODES.INQUIRY_COMMAND)).toBe(true);
+  });
+
+  it('readInfoMem sends [cmd, len, addrLSB, addrMSB] and parses a piggybacked response', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // ACK + [INFOMEM_RSP][length][data...] in a single notification chunk.
+        scheduleChunks(tr, [[ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(224, 6);
+    expect(Array.from(data)).toEqual(payload);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.GET_INFOMEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    // 224 = 0x00e0 little-endian → addrLSB 0xe0, addrMSB 0x00.
+    expect(Array.from(cmd!.bytes)).toEqual([OPCODES.GET_INFOMEM_COMMAND, 6, 0xe0, 0x00]);
+  });
+
+  it('readInfoMem rejects non-integer or out-of-range address/length before writing', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.readInfoMem(-1, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0x10000, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(224.5, 6)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(224, 0)).rejects.toThrow(/length/);
+    await expect(client.readInfoMem(224, 129)).rejects.toThrow(/length/);
+    await expect(client.readInfoMem(224, 6.5)).rejects.toThrow(/length/);
+    // No command bytes were written for any rejected call.
+    expect(t.writes.length).toBe(0);
+  });
+
+  it('readInfoMem parses a response whose length byte is absent', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // [INFOMEM_RSP][data...] with no length byte.
+        scheduleChunks(tr, [[ACK], [OPCODES.INFOMEM_RESPONSE, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(224, 6);
+    expect(Array.from(data)).toEqual(payload);
+  });
+
+  it('getMacAddress reads InfoMem @224 and formats 12 uppercase hex chars', async () => {
+    const payload = [0x26, 0x01, 0x14, 0x01, 0x85, 0xb8];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        // ACK alone, then the response in its own notification chunk.
+        scheduleChunks(tr, [[ACK], [OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.getMacAddress()).resolves.toBe('2601140185B8');
+  });
+
+  it('getMacAddress rejects an unprovisioned (all-FF) MAC', async () => {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        scheduleChunks(tr, [
+          [ACK, OPCODES.INFOMEM_RESPONSE, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.getMacAddress()).rejects.toThrow(/unprovisioned MAC/);
+  });
+
+  it('disconnect() tears the transport down', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false, transport: t });
+    await client.connect();
+    expect(t.connected).toBe(true);
+    await client.disconnect();
+    expect(t.connected).toBe(false);
+    expect(client.device).toBeNull();
+  });
+});
+
+describe('Shimmer3RClient daughter-card memory over LoopbackTransport', () => {
+  // Brand record host offset 1936 = 0x0790 little-endian → addrLSB 0x90, addrMSB 0x07.
+  const OFFSET = 1936;
+
+  it('readDaughterCardMem sends [cmd, len, offLSB, offMSB] and parses a piggybacked response', async () => {
+    const payload = Array.from({ length: 8 }, (_, i) => 0x40 + i);
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        // ACK + [DC_MEM_RSP][length][data...] in one notification chunk.
+        scheduleChunks(tr, [[ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, payload.length, ...payload]]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(OFFSET, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      payload.length,
+      0x90,
+      0x07,
+    ]);
+  });
+
+  it('readDaughterCardMem parses ACK and response arriving as separate chunks', async () => {
+    const payload = [0x11, 0x22, 0x33];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(tr, [
+          [ACK],
+          [OPCODES.DAUGHTER_CARD_MEM_RESPONSE, payload.length, ...payload],
+        ]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(16, 3);
+    expect(Array.from(data)).toEqual(payload);
+  });
+
+  it('writeDaughterCardMem sends [cmd, len, offLSB, offMSB, data...] and resolves on ACK', async () => {
+    const data = [0x42, 0x53, 0x01, 0x00];
+    const t = new LoopbackTransport();
+    t.setOnWrite((_bytes, tr) => scheduleChunks(tr, [[ACK]]));
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await client.writeDaughterCardMem(OFFSET, Uint8Array.from(data));
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND,
+      data.length,
+      0x90,
+      0x07,
+      ...data,
+    ]);
+  });
+
+  it('rejects out-of-range offsets/lengths before writing (firmware bounds: 1..128 within 0..2031)', async () => {
+    const t = new LoopbackTransport();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.readDaughterCardMem(-1, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(2032, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(0, 0)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readDaughterCardMem(0, 129)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readDaughterCardMem(2000, 64)).rejects.toThrow(/1\.\.128/); // 2000+64 > 2032
+    await expect(client.writeDaughterCardMem(2032, Uint8Array.of(1))).rejects.toThrow(/offset/);
+    await expect(client.writeDaughterCardMem(0, new Uint8Array(0))).rejects.toThrow(/1\.\.128/);
+    await expect(client.writeDaughterCardMem(2000, new Uint8Array(64))).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(0);
+  });
+});
+
+describe('Shimmer3RClient fragmented BLE responses', () => {
+  /**
+   * Regression: an 80-byte brand-record read returned only a partial record on
+   * real hardware. One BLE notification carries a single ATT payload (~42 bytes
+   * at the CYW20820's negotiated MTU), so the response arrives split and the
+   * client must reassemble it rather than trusting the first chunk.
+   */
+  it('readDaughterCardMem reassembles an 80-byte record split across notifications', async () => {
+    const record = Array.from({ length: 80 }, (_, i) => i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    // Split at 42 bytes — the fragment size observed on hardware.
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42), full.slice(42)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(1936, 80);
+    expect(Array.from(data)).toEqual(record);
+  });
+
+  it('readDaughterCardMem reassembles a record dribbled one byte per notification', async () => {
+    const record = Array.from({ length: 80 }, (_, i) => 0xc0 ^ i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(
+          tr,
+          full.map((b) => [b]),
+        );
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readDaughterCardMem(0, 80);
+    expect(Array.from(data)).toEqual(record);
+  });
+
+  it('reports how many bytes arrived when a fragmented response never completes', async () => {
+    const record = Array.from({ length: 80 }, (_, i) => i);
+    const full = [ACK, OPCODES.DAUGHTER_CARD_MEM_RESPONSE, record.length, ...record];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      // Deliver only the first fragment, then go silent.
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    await expect(client.readDaughterCardMem(1936, 80)).rejects.toThrow(/39 of 80 bytes/);
+  });
+
+  it('readInfoMem also reassembles a fragmented long read', async () => {
+    const payload = Array.from({ length: 100 }, (_, i) => (i * 7) & 0xff);
+    const full = [ACK, OPCODES.INFOMEM_RESPONSE, payload.length, ...payload];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        scheduleChunks(tr, [full.slice(0, 42), full.slice(42, 84), full.slice(84)]);
+      }
+    });
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(t);
+
+    const data = await client.readInfoMem(0, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+  });
+});
+
+describe('the connect log does not invent a device name', () => {
+  /* `Selected: Shimmer3R` used to be printed for a link that supplied no name,
+     because the string came from the label that doubles as
+     `ObjectCluster.deviceId` and so needs a non-null fallback. Read in a line
+     beginning "Selected:", a generation name looks like the name from the
+     chooser - which is the question being asked when a connect has failed.
+
+     The wording for each transport kind is pinned in
+     `unframed-transport.test.ts`, alongside the rest of the connect vocabulary
+     and against the kinds a user can actually reach. What is pinned here is the
+     other half: which SOURCE the name comes from. */
+
+  it('echoes the name the transport supplied, verbatim', async () => {
+    const deviceName = 'Shimmer3R-TEST';
+    const t = new LoopbackTransport({ deviceName });
+    const client = new Shimmer3RClient({ debug: false });
+    const status: string[] = [];
+    client.onStatus = (m) => status.push(m);
+    await client.connect(t);
+    expect(status).toContain(`Selected: ${deviceName}`);
+  });
+
+  it('does not carry a previous session name onto a new link', async () => {
+    /* The failure this prevents: connect over BLE, let the link drop, then
+       reconnect over Web Serial. `device` is only ever ASSIGNED for a Web
+       Bluetooth transport and only ever cleared by disconnect(), which a caller
+       need not call after a drop - so the old peripheral used to survive into
+       the new session and its name was printed for a serial port. That is worse
+       than the generic fallback it replaced: it is a specific, plausible, wrong
+       name. Standing in for the dropped BLE session by setting the public field
+       directly, which is exactly the state the old code left behind. */
+    const client = new Shimmer3RClient({ debug: false });
+    client.device = { name: 'Shimmer3R-AAAA' } as unknown as BluetoothDevice;
+
+    const status: string[] = [];
+    client.onStatus = (m) => status.push(m);
+    await client.connect(new LoopbackTransport());
+
+    const selected = status.filter((m) => m.startsWith('Selected:'));
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).not.toContain('Shimmer3R-AAAA');
+    // And the field itself is back to what its docblock promises for an
+    // injected transport, so the frame labels cannot inherit it either.
+    expect(client.device).toBeNull();
+  });
+});
