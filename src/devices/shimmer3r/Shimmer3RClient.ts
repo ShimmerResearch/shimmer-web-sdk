@@ -305,6 +305,11 @@ function withoutLeadingAck(msg: Uint8Array): Uint8Array {
   return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
 }
 
+/** True for an ACK (0xFF) or a NACK (0xFE): every reply to a command starts with one. */
+function isAckOrNack(b: number | undefined): boolean {
+  return b === OPCODES.ACK_COMMAND_PROCESSED || b === OPCODES.NACK_COMMAND_PROCESSED;
+}
+
 /** A firmware version as the release tags spell it, e.g. `v1.00.011`. */
 function firmwareTag(major: number, minor: number, internal: number): string {
   return `v${major}.${String(minor).padStart(2, '0')}.${String(internal).padStart(3, '0')}`;
@@ -1171,7 +1176,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return;
     }
 
-    // 2) During streaming, all bytes are data-plane
+    // 2) During streaming, all bytes are data-plane, bar the bare ACKs and NACKs
+    //    the stream parser finds between packets
     if (this._streaming) {
       this._rxBuf = concatU8(this._rxBuf, chunk);
     } else {
@@ -1287,7 +1293,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
     // While a stream is live every byte is schema-defined stream data, whose
     // length this protocol layer cannot know — hand it straight to the parser,
-    // which accumulates and so is already fragmentation-proof.
+    // which accumulates and so is already fragmentation-proof. The parser also
+    // takes the bare ACKs and NACKs the firmware queues between packets
+    // (`_streamReplyLength`), though no reply with more in it.
     if (this._streaming) {
       this._rxBuf = concatU8(this._rxBuf, chunk);
       this._parseStreamIfPossible();
@@ -3939,6 +3947,75 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return false;
   }
 
+  /**
+   * The length of the bare ACK or NACK at `buf[at]`, a whole reply with nothing
+   * in it but the acknowledgement: `1 +` the link CRC. `RESYNC` when `buf[at]`
+   * is not one, `NEED_MORE` when the buffer ends before that can be told.
+   *
+   * With a CRC on, the CRC is what tells. The firmware appends one over the
+   * whole reply (`ShimBt_sendRsp`, `Comms/shimmer_bt_uart.c`), so a bare ACK is
+   * `FF F4 65` and a bare NACK `FE C5 56`, each without its last byte under a
+   * 1-byte CRC. An ACK with a response behind it fails the check, since its CRC
+   * covers the response too, and no response can pass it either: no response
+   * opcode is 0xF4 in any Shimmer3 or Shimmer3R firmware.
+   *
+   * With no CRC, a NACK is always bare, because it replaces the whole reply. An
+   * ACK is bare when what follows it cannot be a response: the next packet, or
+   * another ACK or NACK.
+   *
+   * HARDWARE-VERIFY: derived from the firmware source (`ShimBt_sendRsp`, and
+   * replies sharing the transmit ring with the packets) and run against a
+   * scripted device only. No sensor has been streamed against it with a command
+   * in flight, in any CRC mode or over any link.
+   */
+  private _streamReplyLength(buf: Uint8Array, at: number): number {
+    const op = buf[at];
+    if (!isAckOrNack(op)) return RESYNC;
+    const trailer = crcTrailerBytes(this._crcMode);
+    if (trailer > 0) {
+      if (buf.length < at + 1 + trailer) return NEED_MORE;
+      return verifyCrc(buf.subarray(at, at + 1 + trailer), this._crcMode) ? 1 + trailer : RESYNC;
+    }
+    if (op === OPCODES.NACK_COMMAND_PROCESSED) return 1;
+    if (buf.length < at + 2) return NEED_MORE;
+    const after = buf[at + 1];
+    return after === OPCODES.DATA_PACKET || isAckOrNack(after) ? 1 : RESYNC;
+  }
+
+  /** How many bytes of bare replies run from `buf[at]`, each as {@link _streamReplyLength} measures it. */
+  private _streamRepliesLength(buf: Uint8Array, at: number): number {
+    let end = at;
+    for (;;) {
+      const n = this._streamReplyLength(buf, end);
+      if (n === NEED_MORE) return NEED_MORE;
+      if (n === RESYNC) return end - at;
+      end += n;
+    }
+  }
+
+  /**
+   * Hand a bare ACK or NACK found between stream packets to the command waiting
+   * for it, as {@link _handleFramedChunk} does with one that arrives on its own.
+   * An ACK that no command is counting on is dropped, such as the one for
+   * {@link toggleLed}, which does not wait for it while streaming.
+   */
+  private _takeStreamReply(op: number): void {
+    if (op === OPCODES.NACK_COMMAND_PROCESSED) {
+      // _waitForAck rejects on it, and its caller gives the count back
+      this._log('NACK between stream packets');
+      this._emitTemp(new Uint8Array([op]));
+      return;
+    }
+    if (this._expectingAck <= 0) {
+      this._log('ACK between stream packets, with no command waiting for it; dropped');
+      return;
+    }
+    this._log('ACK between stream packets (expected)');
+    this._expectingAck--;
+    this._lastAckRemainder = null;
+    this._emitTemp(new Uint8Array([op]));
+  }
+
   private _parseBySchema(): void {
     const sch = this.schema!;
     const preamble = sch.dataPreambleByte;
@@ -3959,66 +4036,116 @@ export class Shimmer3RClient extends BaseShimmerClient {
     let drops = 0;
     let anomalies = 0;
 
-    while (buf.length >= wireBytes * 2) {
-      if (buf[0] === preamble && buf[wireBytes] === preamble) {
-        let ts1: number, ts2: number;
-        try {
-          ts1 = tsBytes === 2 ? u16le(buf, 1) : u24le(buf, 1);
-          ts2 = tsBytes === 2 ? u16le(buf, wireBytes + 1) : u24le(buf, wireBytes + 1);
-        } catch {
-          buf = buf.subarray(1);
-          drops++;
+    for (;;) {
+      /* A bare ACK or NACK at a packet boundary. The firmware queues replies
+       * into the same transmit ring as the packets (protocol doc §6.3), so the
+       * reply to a command sent mid-stream lands between two of them. Taken
+       * here only where a boundary is known, after a packet or another reply,
+       * and never from bytes the parser has yet to place, which could be
+       * anything. A packet with replies behind it, below, leaves them here. */
+      if (this._streaming && this._streamAligned && isAckOrNack(buf[0])) {
+        const n = this._streamReplyLength(buf, 0);
+        if (n === NEED_MORE) break;
+        if (n !== RESYNC) {
+          this._takeStreamReply(buf[0]);
+          buf = buf.subarray(n);
           continue;
         }
+      }
 
-        const dt = (((ts2 - ts1) % TS_MOD) + TS_MOD) % TS_MOD;
-        if (dt === 0) {
-          buf = buf.subarray(1);
-          drops++;
-          this._streamAligned = false;
-          continue;
-        }
+      /* Where the next packet starts: straight after this one, or past the
+       * replies queued at this boundary. Replies used to fail the second
+       * preamble test, and took this packet with them.
+       *
+       * A reply whose own CRC checks out, behind a packet at a known boundary,
+       * says by itself where that packet ends, so the packet is taken without
+       * waiting for the next one: at the slowest rates that wait is a second,
+       * most of the reply's ACK timeout. With no CRC to check, or while
+       * acquiring, the next packet has to be found past the replies and its
+       * timestamp has to pass the test below. */
+      let next = wireBytes;
+      let vouched = false;
+      if (
+        this._streaming &&
+        buf[0] === preamble &&
+        buf.length > wireBytes &&
+        buf[wireBytes] !== preamble
+      ) {
+        const vouchable = crcBytes > 0 && this._streamAligned;
+        const replies = vouchable
+          ? this._streamReplyLength(buf, wireBytes)
+          : this._streamRepliesLength(buf, wireBytes);
+        if (replies === NEED_MORE) break;
+        vouched = vouchable && replies !== RESYNC;
+        if (!vouched) next += replies;
+      }
+      if (!vouched && buf.length < Math.max(wireBytes * 2, next + 1 + tsBytes)) break;
 
-        /* Two preambles a frame apart are not proof of alignment on a periodic
-         * layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock agrees,
-         * keep sliding. Only the acquisition is gated: once aligned, a real gap
-         * in the link must not be mistaken for a bad lock. */
-        /* Two tiers. While the expected interval is still credible a candidate
-         * must match it; once every candidate has been rejected that many
-         * times it is the expectation that is wrong, so the test drops to the
-         * rate-free band rather than off altogether. Dropping it off
-         * altogether is what used to let a wrong byte offset lock - its
-         * "timestamp" stepping by millions of ticks - and then look for all the
-         * world like a working stream. */
-        const strictTier = this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS;
-        if (
-          !this._streamAligned &&
-          !(strictTier
-            ? this._plausibleFrameDelta(dt, expectedTicks)
-            : this._frameDeltaInPlausibleBand(dt))
-        ) {
-          buf = buf.subarray(1);
-          drops++;
-          if (strictTier) {
-            this._streamAlignRejects++;
-            if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
-              /* Said once, at full volume: the reported rate does not describe
-               * what is arriving, and that is the thing to fix. */
-              this._emitStatus(
-                `Frame timing does not match the reported ${expectedTicks}-tick ` +
-                  `interval; accepting any interval a valid configuration could produce.`,
+      if (buf[0] === preamble && (vouched || buf[next] === preamble)) {
+        if (!vouched) {
+          let ts1: number, ts2: number;
+          try {
+            ts1 = tsBytes === 2 ? u16le(buf, 1) : u24le(buf, 1);
+            ts2 = tsBytes === 2 ? u16le(buf, next + 1) : u24le(buf, next + 1);
+          } catch {
+            buf = buf.subarray(1);
+            drops++;
+            continue;
+          }
+
+          const dt = (((ts2 - ts1) % TS_MOD) + TS_MOD) % TS_MOD;
+          if (dt === 0) {
+            buf = buf.subarray(1);
+            drops++;
+            this._streamAligned = false;
+            continue;
+          }
+
+          /* Two preambles a frame apart are not proof of alignment on a
+           * periodic layout - see STREAM_ALIGN_MAX_SKIP. Until the device clock
+           * agrees, keep sliding. Only the acquisition is gated: once aligned, a
+           * real gap in the link must not be mistaken for a bad lock. The
+           * exception is replies in between, which are tested even once
+           * aligned: with no CRC on them, this timestamp is the only evidence
+           * that they are replies and not a slip in the stream. */
+          /* Two tiers. While the expected interval is still credible a
+           * candidate must match it; once every candidate has been rejected
+           * that many times it is the expectation that is wrong, so the test
+           * drops to the rate-free band rather than off altogether. Dropping it
+           * off altogether is what used to let a wrong byte offset lock - its
+           * "timestamp" stepping by millions of ticks - and then look for all
+           * the world like a working stream. */
+          const strictTier = this._streamAlignRejects < STREAM_ALIGN_MAX_REJECTS;
+          if (
+            (!this._streamAligned || next > wireBytes) &&
+            !(strictTier
+              ? this._plausibleFrameDelta(dt, expectedTicks)
+              : this._frameDeltaInPlausibleBand(dt))
+          ) {
+            buf = buf.subarray(1);
+            drops++;
+            this._streamAligned = false;
+            if (strictTier) {
+              this._streamAlignRejects++;
+              if (this._streamAlignRejects === STREAM_ALIGN_MAX_REJECTS) {
+                /* Said once, at full volume: the reported rate does not
+                 * describe what is arriving, and that is the thing to fix. */
+                this._emitStatus(
+                  `Frame timing does not match the reported ${expectedTicks}-tick ` +
+                    `interval; accepting any interval a valid configuration could produce.`,
+                );
+              }
+            }
+            if (this.debug && drops % 64 === 1) {
+              this._log(
+                strictTier
+                  ? `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
+                      `the ${expectedTicks}-tick frame interval`
+                  : `align: rejecting candidate, Δt=${dt} ticks is outside any valid frame interval`,
               );
             }
+            continue;
           }
-          if (this.debug && drops % 64 === 1) {
-            this._log(
-              strictTier
-                ? `align: rejecting candidate, Δt=${dt} ticks is not ~1-${STREAM_ALIGN_MAX_SKIP}× ` +
-                    `the ${expectedTicks}-tick frame interval`
-                : `align: rejecting candidate, Δt=${dt} ticks is outside any valid frame interval`,
-            );
-          }
-          continue;
         }
 
         const frame = buf.subarray(0, frameBytes);
@@ -4212,7 +4339,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
         // that; "ACK timeout" a second and a half later reads as a dead link.
         // Only reachable while a command is in flight — this handler is
         // registered for exactly that window — so a stray 0xFE cannot fabricate
-        // one, and stream bytes never reach the control fan-out at all.
+        // one. Stream bytes reach the control fan-out only as a bare NACK the
+        // stream parser found at a packet boundary (`_streamReplyLength`).
         if (chunk[0] === OPCODES.NACK_COMMAND_PROCESSED) {
           clearTimeout(t);
           off();
@@ -5111,9 +5239,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * `redLedOn` — which is what {@link setRedLed} uses to make "on"/"off" mean
    * something.
    *
-   * While streaming this writes without waiting for the ACK: every inbound byte
-   * belongs to the data plane then, so the ACK would be consumed by the schema
-   * parser and the wait would time out on a command the firmware did in fact run.
+   * While streaming this writes without waiting for the ACK. That began as a
+   * way round the stream parser, which used to drop the ACK as junk, along with
+   * the packet in front of it, so the wait timed out on a command the firmware
+   * did in fact run. The parser now takes the ACK between the two packets and
+   * keeps the packet, so the ACK the firmware sends costs nothing either way.
    *
    * HARDWARE-VERIFY: that the lower LED visibly lights, and that the flag really
    * does survive a disconnect, want confirming on a sensor.
