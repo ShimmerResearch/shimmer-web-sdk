@@ -327,6 +327,34 @@ export type {
   SdTransferSummary,
 } from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 
+// Shimmer3R Bluetooth module (IF820) OTA firmware update over BLE (DEV-1164)
+export {
+  IF820_OTA,
+  IF820_OTA_SERVICE_UUIDS,
+  IF820_OTA_COMMAND,
+  IF820_OTA_STATUS,
+  IF820_OTA_DEFAULT_CHUNK_SIZE,
+  IF820_OTA_MIN_CHUNK_SIZE,
+  IF820_OTA_RESPONSE_TIMEOUT_MS,
+  IF820_OTA_VERIFY_TIMEOUT_MS,
+  IF820_OTA_TRANSIENT_ERROR_REGEX,
+  If820OtaError,
+  if820OtaStatusText,
+  isIf820OtaTransientError,
+  runIf820OtaUpdate,
+  compareIf820Versions,
+  isIf820UpdateAvailable,
+} from './devices/shimmer3r/if820Ota.js';
+export type {
+  If820OtaCharacteristicLike,
+  If820OtaServiceLike,
+  If820OtaGattServerLike,
+  If820OtaDeviceLike,
+  If820OtaProgress,
+  If820OtaOptions,
+  If820OtaResult,
+} from './devices/shimmer3r/if820Ota.js';
+
 // Host-side directory-tree creation (File System Access API)
 export { ensureDirectoryPath } from './devices/verisense/protocolDataFlow.js';
 

@@ -88,6 +88,12 @@ import {
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
+import {
+  IF820_OTA_SERVICE_UUIDS,
+  runIf820OtaUpdate,
+  type If820OtaOptions,
+  type If820OtaResult,
+} from './if820Ota.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
@@ -361,6 +367,14 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * Default true. Set false to keep the pre-calibration behaviour (raw only).
    */
   emitCalibratedInertial?: boolean;
+  /**
+   * Extra GATT services to grant at `requestDevice` time, on top of the
+   * Shimmer3R service and the Bluetooth module's OTA update services
+   * ({@link IF820_OTA_SERVICE_UUIDS}), which are always requested so that
+   * {@link Shimmer3RClient.updateBtModuleFirmware} can run on the existing
+   * connection. Web Bluetooth only lets a page reach services listed here.
+   */
+  optionalServices?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +417,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   // Transport (byte pipe). Injected via options/connect, or a WebBluetoothTransport by default.
   private _injectedTransport: ShimmerTransport | null = null;
+  private readonly _extraOptionalServices: string[];
   private _transport: ShimmerTransport | null = null;
   private _notifyUnsub: Unsubscribe | null = null;
   private _disconnectUnsub: Unsubscribe | null = null;
@@ -718,6 +733,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.forceTimestampFmt = opts.timestampFmt ?? 'u24';
     this._injectedTransport = opts.transport ?? null;
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
+    this._extraOptionalServices = opts.optionalServices ?? [];
   }
 
   /**
@@ -770,7 +786,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       rxFlowCharUUID: SHIMMER3R_DEFAULTS.CHAR_RX_FLOW_UUID,
       requestDeviceOptions: {
         filters: [{ services: [this.serviceUUID] }],
-        optionalServices: [this.serviceUUID],
+        optionalServices: this.requestedOptionalServices(),
       },
       defaultWriteWithResponse: true,
       debug: this.debug,
@@ -2147,6 +2163,68 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const parsed = parseBluetoothModuleVersion(payload);
     this._emitStatus(`Bluetooth module: ${parsed.label}`);
     return parsed;
+  }
+
+  /**
+   * The `optionalServices` this client requests when it opens the Web
+   * Bluetooth picker: the Shimmer3R service, the Bluetooth module's OTA
+   * update services, and any {@link Shimmer3RClientOptions.optionalServices}.
+   * A host that builds its own `requestDevice` options must request the same
+   * list, or {@link updateBtModuleFirmware} cannot run on that connection.
+   */
+  requestedOptionalServices(): string[] {
+    return [
+      ...new Set([this.serviceUUID, ...IF820_OTA_SERVICE_UUIDS, ...this._extraOptionalServices]),
+    ];
+  }
+
+  /**
+   * Update the Bluetooth module's (IF820) firmware over this BLE connection.
+   * `image` is the module's `.ota.bin`. See {@link runIf820OtaUpdate} for the
+   * protocol.
+   *
+   * Refused while streaming, and only possible over Web Bluetooth — the
+   * module is updated by its own GATT service, which a Bluetooth Classic or
+   * USB link cannot reach.
+   *
+   * By default reboot-on-disconnect is armed first: the module resets onto
+   * the new firmware once it has verified it, which drops the link, and the
+   * Shimmer3R's MCU only reads the module version at boot. With it armed the
+   * MCU reboots on that drop, so after reconnecting {@link readBtModuleVersion}
+   * reports the new version. Pass `rebootMcuOnDisconnect: false` to skip that
+   * (the version then updates at the next power-cycle). Firmware that NACKs
+   * the feature is not an error: the update still runs.
+   *
+   * Resolves once the module has accepted the image; expect a disconnect
+   * shortly after. Reconnect with a {@link WebBluetoothTransport} given the
+   * same {@link device} to avoid a second picker.
+   *
+   * HARDWARE-VERIFY: not yet run on a Shimmer3R — see the note in
+   * `if820Ota.ts`.
+   */
+  async updateBtModuleFirmware(
+    image: ArrayBuffer | Uint8Array,
+    opts: If820OtaOptions & { rebootMcuOnDisconnect?: boolean } = {},
+  ): Promise<If820OtaResult> {
+    const t = this._transport;
+    if (!t) throw new Error('Not connected');
+    if (!(t instanceof WebBluetoothTransport) || !t.device) {
+      throw new Error(
+        'The Bluetooth module can only be updated over a BLE (Web Bluetooth) connection.',
+      );
+    }
+    if (this._streaming) {
+      throw new Error('Stop streaming before updating the Bluetooth module firmware.');
+    }
+    if (opts.rebootMcuOnDisconnect ?? true) {
+      try {
+        await this.setRebootOnDisconnect(true);
+      } catch (e) {
+        this._log('reboot-on-disconnect not available; continuing', e);
+        opts.onLog?.(`reboot-on-disconnect not armed: ${String(e)}`);
+      }
+    }
+    return runIf820OtaUpdate(t.device, image, opts);
   }
 
   /**

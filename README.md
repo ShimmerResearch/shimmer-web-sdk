@@ -557,6 +557,45 @@ writes nothing when the LED is already as asked, and throws rather than
 reporting success if the sensor's flag does not follow. Bluetooth only: the
 dock protocol has no LED command.
 
+## Shimmer3R Bluetooth Module Update (IF820 OTA)
+
+The Shimmer3R's Bluetooth module (Ezurio Vela IF820, an Infineon CYW20820)
+is updated over BLE through Infineon's OTA firmware upgrade service: the same
+protocol `WsOtaUpgrade.exe` uses. The Shimmer3R's own MCU cannot reflash it,
+so a host does it directly, on the BLE connection it already has open.
+
+```ts
+const client = new Shimmer3RClient(); // requests the OTA services in optionalServices
+await client.connect();
+const current = await client.readBtModuleVersion();
+if (isIf820UpdateAvailable(current, '1.4.18.18')) {
+  const image = await (await fetch('firmware/if820/module.ota.bin')).arrayBuffer();
+  await client.updateBtModuleFirmware(image, {
+    onProgress: ({ currentBytes, totalBytes }) => console.log(currentBytes / totalBytes),
+  });
+  // The module resets onto the new image and the link drops. Reconnect without
+  // a picker by handing the same BluetoothDevice to a new WebBluetoothTransport.
+}
+```
+
+- **BLE only.** A Classic Bluetooth or USB link cannot reach the module's GATT
+  service.
+- **The OTA services must be granted at connect time.** `Shimmer3RClient`
+  requests them by default. A host that builds its own `requestDevice` options
+  must include `client.requestedOptionalServices()`, or the update cannot run
+  without a second device picker.
+- **Interruption is safe.** The module switches images only after it has
+  verified the whole image's CRC-32, so a dropped link or a cancel leaves the
+  old firmware running, and the update can be run again.
+- **The MCU reads the module version only at boot.** `updateBtModuleFirmware`
+  therefore arms reboot-on-disconnect first, so the post-update drop reboots
+  the MCU and `readBtModuleVersion()` reports the new version after
+  reconnecting.
+
+`runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
+for any object that has the `BluetoothDevice`'s `gatt` server. Not yet run
+against hardware: `HARDWARE-VERIFY:`.
+
 ## Building
 
 ```bash
