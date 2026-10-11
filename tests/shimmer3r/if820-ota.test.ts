@@ -4,6 +4,8 @@ import {
   IF820_OTA_COMMAND,
   IF820_OTA_STATUS,
   IF820_OTA_DEFAULT_CHUNK_SIZE,
+  IF820_OTA_FAST_CHUNK_SIZE,
+  IF820_OTA_SAFE_CHUNK_SIZE,
   IF820_OTA_MIN_CHUNK_SIZE,
   If820OtaError,
   runIf820OtaUpdate,
@@ -71,6 +73,11 @@ interface FakeModuleOptions {
   midTransferStatus?: { afterWrites: number; status: number };
   /** Fail the data write at this offset with a link error. */
   dropAtOffset?: number;
+  /** Never answer a data write longer than this - the stalled-link case
+   * (a 340 µs airtime limit on the real module). Cleared by a reconnect only
+   * if `stallClearsOnReconnect`. */
+  stallAbove?: number;
+  stallClearsOnReconnect?: boolean;
 }
 
 class FakeIf820 {
@@ -81,6 +88,8 @@ class FakeIf820 {
   received: number[] = [];
   expectedLength = 0;
   connected = true;
+  connects = 0;
+  disconnects = 0;
   private _writesSinceDownload = 0;
 
   constructor(readonly opts: FakeModuleOptions = {}) {
@@ -119,7 +128,13 @@ class FakeIf820 {
       getPrimaryService,
       connect: async () => {
         this.connected = true;
+        this.connects++;
+        if (this.opts.stallClearsOnReconnect) this.opts.stallAbove = undefined;
         return server;
+      },
+      disconnect: () => {
+        this.connected = false;
+        this.disconnects++;
       },
     } as unknown as If820OtaGattServerLike;
     Object.defineProperty(server, 'connected', { get: () => this.connected });
@@ -161,7 +176,10 @@ class FakeIf820 {
     }
   }
 
-  private _onData(bytes: Uint8Array): void {
+  private _onData(bytes: Uint8Array): void | Promise<void> {
+    if (this.opts.stallAbove !== undefined && bytes.length > this.opts.stallAbove) {
+      return new Promise<void>(() => {});
+    }
     if (this.opts.dropAtOffset !== undefined && this.received.length >= this.opts.dropAtOffset) {
       this.connected = false;
       const e = new Error('GATT Server is disconnected. Cannot perform GATT operations.');
@@ -223,18 +241,72 @@ describe('runIf820OtaUpdate', () => {
     expect(Uint8Array.from(mod.received)).toEqual(img);
   });
 
-  it('completes at the default chunk on a module that takes at most 63 bytes', async () => {
-    // The Shimmer3R's IF820 refuses a 64-byte data write (bench, 2026-10-11).
-    const mod = new FakeIf820({ maxChunk: 63 });
+  it('starts at 512-byte chunks', async () => {
+    const mod = new FakeIf820();
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, image(1300));
+    expect(result.chunkSize).toBe(IF820_OTA_FAST_CHUNK_SIZE);
+    expect(mod.dataWrites).toEqual([512, 512, 276]);
+  });
+
+  it('falls back to 63 on the same link when a large first write is refused', async () => {
+    const mod = new FakeIf820({ maxChunk: IF820_OTA_SAFE_CHUNK_SIZE });
     const img = image(1000);
-    const result = await runIf820OtaUpdate({ gatt: mod.server }, img);
-    expect(result.chunkSize).toBe(63);
+    const retries: unknown[] = [];
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, img, {
+      onRetry: (r) => retries.push(r),
+    });
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
     expect(Uint8Array.from(mod.received)).toEqual(img);
+    expect(retries).toEqual([{ fromChunkSize: 512, toChunkSize: 63, reconnecting: false }]);
+    expect(mod.disconnects).toBe(0);
     expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.ABORT,
       IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
       IF820_OTA_COMMAND.DOWNLOAD,
       IF820_OTA_COMMAND.VERIFY,
     ]);
+  });
+
+  it('drops a stalled link, reconnects and finishes at 63 bytes', async () => {
+    // The module never answers a write that does not fit one radio packet.
+    const mod = new FakeIf820({ stallAbove: IF820_OTA_SAFE_CHUNK_SIZE });
+    const img = image(1000);
+    const retries: unknown[] = [];
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, img, {
+      firstWriteTimeoutMs: 30,
+      reconnectDelayMs: 5,
+      onRetry: (r) => retries.push(r),
+    });
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
+    expect(Uint8Array.from(mod.received)).toEqual(img);
+    expect(retries).toEqual([{ fromChunkSize: 512, toChunkSize: 63, reconnecting: true }]);
+    expect(mod.disconnects).toBe(1);
+    expect(mod.connects).toBe(1);
+    expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.VERIFY,
+    ]);
+  });
+
+  it('gives up with a transient error when the stalled link will not come back', async () => {
+    const mod = new FakeIf820({ stallAbove: IF820_OTA_SAFE_CHUNK_SIZE });
+    const server = mod.server;
+    (server as unknown as { connect: () => Promise<never> }).connect = async () => {
+      throw new Error('GATT Server is disconnected. Cannot perform GATT operations.');
+    };
+    const err = await runIf820OtaUpdate({ gatt: server }, image(500), {
+      firstWriteTimeoutMs: 20,
+      reconnectDelayMs: 1,
+      reconnectAttempts: 2,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(If820OtaError);
+    expect(err.transient).toBe(true);
+    expect(err.message).toMatch(/Could not reconnect/);
   });
 
   it('falls back to the minimum chunk when the first chunk is refused', async () => {
@@ -243,8 +315,11 @@ describe('runIf820OtaUpdate', () => {
     const result = await runIf820OtaUpdate({ gatt: mod.server }, img);
     expect(result.chunkSize).toBe(IF820_OTA_MIN_CHUNK_SIZE);
     expect(Uint8Array.from(mod.received)).toEqual(img);
-    // first pass: PREPARE, DOWNLOAD, ABORT; second pass: PREPARE, DOWNLOAD, VERIFY
+    // 512 refused, then 63 refused, then 20 completes - each on the same link
     expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.ABORT,
       IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
       IF820_OTA_COMMAND.DOWNLOAD,
       IF820_OTA_COMMAND.ABORT,
@@ -308,7 +383,9 @@ describe('runIf820OtaUpdate', () => {
 
   it('classifies a link drop mid-transfer as transient and skips ABORT on a dead link', async () => {
     const mod = new FakeIf820({ dropAtOffset: 504 });
-    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(1000)).catch((e) => e);
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(1000), {
+      chunkSize: IF820_OTA_SAFE_CHUNK_SIZE,
+    }).catch((e) => e);
     expect(err).toBeInstanceOf(If820OtaError);
     expect(err.transient).toBe(true);
     expect(err.message).toMatch(/offset 504/);

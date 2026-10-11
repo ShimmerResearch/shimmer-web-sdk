@@ -108,18 +108,40 @@ export function if820OtaStatusText(status: number): string {
 }
 
 /**
- * Data chunk size used first: the largest write the Shimmer3R's IF820 accepts
- * on the OTA data characteristic. Measured on v1.4.16.16 and v1.4.18.18
- * modules over a Windows link (2026-10-11): 63 bytes is accepted and 64 is
- * refused, every time, although that link had negotiated a 517-byte MTU. So
- * the limit is the module's, not the link's, and the 244 bytes Infineon's iOS
- * app uses fail outright here. A link whose MTU is smaller than 66 still
- * refuses the first chunk, and the update restarts once at
- * {@link IF820_OTA_MIN_CHUNK_SIZE}, which fits the 23-byte default MTU every
- * link supports.
+ * Data chunk sizes, tried in this order.
+ *
+ * How large a write the Shimmer3R's IF820 takes depends on the link, not the
+ * MTU (Windows HCI traces, 2026-10-11, all on the 2M PHY with a 517-byte MTU):
+ * the radios agree a maximum packet airtime, and the module stalls - no ATT
+ * response, then a supervision timeout - on any write that does not fit one
+ * radio packet.
+ *
+ * - **2120 µs** (251-byte packets): 512-byte writes are accepted, about 43 ms
+ *   each, so a 100 KB image takes ~8 s. Seen after a power-on of the module.
+ * - **340 µs** (~70-byte packets on an encrypted 2M link): the largest write
+ *   that fits is 63 bytes (+4 L2CAP +3 ATT), ~23 ms each, ~30 s per image. Seen
+ *   after the module had only been soft-reset.
+ *
+ * Web Bluetooth exposes neither the airtime nor the MTU, so the update starts
+ * at {@link IF820_OTA_FAST_CHUNK_SIZE} and, if that first write is not
+ * answered within {@link IF820_OTA_FIRST_WRITE_TIMEOUT_MS}, drops the stalled
+ * link itself, reconnects to the same device and starts again at
+ * {@link IF820_OTA_SAFE_CHUNK_SIZE}. {@link IF820_OTA_MIN_CHUNK_SIZE} fits the
+ * 23-byte default MTU every link supports, and is the last resort.
  */
-export const IF820_OTA_DEFAULT_CHUNK_SIZE = 63;
+export const IF820_OTA_FAST_CHUNK_SIZE = 512;
+export const IF820_OTA_SAFE_CHUNK_SIZE = 63;
 export const IF820_OTA_MIN_CHUNK_SIZE = 20;
+/** The first chunk size tried when `chunkSize` is not given. */
+export const IF820_OTA_DEFAULT_CHUNK_SIZE = IF820_OTA_FAST_CHUNK_SIZE;
+
+/** How long the first data write may go unanswered before the link is
+ * treated as stalled. An accepted 512-byte write answers in ~45 ms. */
+export const IF820_OTA_FIRST_WRITE_TIMEOUT_MS = 4000;
+/** Reconnect attempts, and the pause before each, after dropping a stalled
+ * link to retry smaller. */
+export const IF820_OTA_RECONNECT_ATTEMPTS = 5;
+export const IF820_OTA_RECONNECT_DELAY_MS = 2000;
 
 /** Bound on each control-point command's status answer. */
 export const IF820_OTA_RESPONSE_TIMEOUT_MS = 10000;
@@ -176,6 +198,7 @@ export interface If820OtaServiceLike {
 export interface If820OtaGattServerLike {
   readonly connected: boolean;
   connect(): Promise<If820OtaGattServerLike>;
+  disconnect?(): void;
   getPrimaryService(uuid: string): Promise<If820OtaServiceLike>;
 }
 
@@ -205,6 +228,19 @@ export interface If820OtaOptions {
   signal?: AbortSignal;
   /** First chunk size to try. Default {@link IF820_OTA_DEFAULT_CHUNK_SIZE}. */
   chunkSize?: number;
+  /**
+   * Called when the first data write is refused or stalls and the update is
+   * about to start again at a smaller chunk. `reconnecting` is true when the
+   * link is being dropped and re-opened to do so: a host sees that as a
+   * disconnect, which is part of the update and not the end of it.
+   */
+  onRetry?: (info: { fromChunkSize: number; toChunkSize: number; reconnecting: boolean }) => void;
+  /** Bound on the first data write. */
+  firstWriteTimeoutMs?: number;
+  /** Reconnect attempts after dropping a stalled link. */
+  reconnectAttempts?: number;
+  /** Pause before each reconnect attempt. */
+  reconnectDelayMs?: number;
   /** Bound on each command's status answer. */
   responseTimeoutMs?: number;
   /** Bound on the VERIFY answer. */
@@ -225,12 +261,19 @@ export interface If820OtaResult {
 
 // ── Implementation ──
 
-/** Internal: the first data write failed at a chunk size above the minimum. */
+/** Internal: the first data write failed at a chunk size above the minimum.
+ * `stalled` means it went unanswered, so the link is wedged and has to be
+ * dropped and re-opened before anything else can be sent. */
 class ChunkRefused extends Error {
-  constructor(readonly inner: unknown) {
+  constructor(
+    readonly inner: unknown,
+    readonly stalled: boolean,
+  ) {
     super('first data chunk refused');
   }
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 function abortError(): Error {
   const err = new Error('Bluetooth module update cancelled');
@@ -364,9 +407,11 @@ async function resolveService(
  * reboot-on-disconnect beforehand ({@link Shimmer3RClient.setRebootOnDisconnect})
  * for the new version to be reported after reconnecting.
  *
- * If the first data write is refused (an MTU too small for the default
- * chunk), the update is aborted and rerun once at
- * {@link IF820_OTA_MIN_CHUNK_SIZE}.
+ * Starts at {@link IF820_OTA_FAST_CHUNK_SIZE}. If the first data write is
+ * refused, the update is aborted and rerun at the next size down; if it goes
+ * unanswered (the link has stalled), the link is dropped and re-opened to the
+ * same device first - see {@link IF820_OTA_DEFAULT_CHUNK_SIZE} for why, and
+ * `onRetry` for telling the host.
  */
 export async function runIf820OtaUpdate(
   device: If820OtaDeviceLike,
@@ -382,10 +427,18 @@ export async function runIf820OtaUpdate(
   const signal = opts.signal;
   const responseTimeoutMs = opts.responseTimeoutMs ?? IF820_OTA_RESPONSE_TIMEOUT_MS;
   const verifyTimeoutMs = opts.verifyTimeoutMs ?? IF820_OTA_VERIFY_TIMEOUT_MS;
+  const firstWriteTimeoutMs = opts.firstWriteTimeoutMs ?? IF820_OTA_FIRST_WRITE_TIMEOUT_MS;
+  const reconnectAttempts = opts.reconnectAttempts ?? IF820_OTA_RECONNECT_ATTEMPTS;
+  const reconnectDelayMs = opts.reconnectDelayMs ?? IF820_OTA_RECONNECT_DELAY_MS;
   const firstChunk = Math.max(
     IF820_OTA_MIN_CHUNK_SIZE,
     Math.floor(opts.chunkSize ?? IF820_OTA_DEFAULT_CHUNK_SIZE),
   );
+  /* The sizes to try, largest first: the requested one, then the safe and
+   * minimum sizes below it. */
+  const ladder = [
+    ...new Set([firstChunk, IF820_OTA_SAFE_CHUNK_SIZE, IF820_OTA_MIN_CHUNK_SIZE]),
+  ].filter((n) => n <= firstChunk);
 
   if (bytes.length === 0) throw new If820OtaError('Firmware image is empty');
   throwIfAborted(signal);
@@ -402,32 +455,77 @@ export async function runIf820OtaUpdate(
     throw wrapGattError(e, 'Connecting');
   }
 
-  onStatus('Opening the Bluetooth module update service…');
-  const { service, uuid: serviceUuid } = await resolveService(server, log);
-  let control: If820OtaCharacteristicLike;
-  let data: If820OtaCharacteristicLike;
-  try {
-    control = await service.getCharacteristic(IF820_OTA.CONTROL_POINT_UUID);
-    data = await service.getCharacteristic(IF820_OTA.DATA_UUID);
-  } catch (e) {
-    throw wrapGattError(e, 'Opening the update characteristics');
-  }
-
   const statuses = new StatusQueue();
   const onValue = (ev: Event): void => {
-    const target = (ev.target ?? control) as If820OtaCharacteristicLike;
-    const v = target.value;
+    const target = (ev.target ?? control) as If820OtaCharacteristicLike | undefined;
+    const v = target?.value;
     if (!v || v.byteLength === 0) return;
     const status = v.getUint8(0);
     log(`control point ← status ${status} (${if820OtaStatusText(status)})`);
     statuses.push(status);
   };
-  control.addEventListener('characteristicvaluechanged', onValue);
+
+  let serviceUuid = '';
+  let control: If820OtaCharacteristicLike | undefined;
+  let data: If820OtaCharacteristicLike | undefined;
+
+  /** Resolve the service and characteristics on the current connection and
+   * subscribe to the control point. Run again after a reconnect, which hands
+   * out new GATT objects. */
+  const open = async (): Promise<void> => {
+    control?.removeEventListener('characteristicvaluechanged', onValue);
+    const resolved = await resolveService(server, log);
+    serviceUuid = resolved.uuid;
+    try {
+      control = await resolved.service.getCharacteristic(IF820_OTA.CONTROL_POINT_UUID);
+      data = await resolved.service.getCharacteristic(IF820_OTA.DATA_UUID);
+    } catch (e) {
+      throw wrapGattError(e, 'Opening the update characteristics');
+    }
+    control.addEventListener('characteristicvaluechanged', onValue);
+    try {
+      await control.startNotifications();
+    } catch (e) {
+      throw wrapGattError(e, 'Subscribing to the update control point');
+    }
+  };
+
+  /** Drop a stalled link and open a fresh one to the same device. */
+  const reopen = async (): Promise<void> => {
+    if (server.connected) {
+      log('dropping the stalled link');
+      try {
+        server.disconnect?.();
+      } catch {
+        /* already going */
+      }
+    }
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= reconnectAttempts; attempt++) {
+      throwIfAborted(signal);
+      await sleep(reconnectDelayMs);
+      onStatus(
+        `Reconnecting to the Bluetooth module (attempt ${attempt} of ${reconnectAttempts})…`,
+      );
+      try {
+        await server.connect();
+        await open();
+        return;
+      } catch (e) {
+        lastError = e;
+        log(`reconnect attempt ${attempt} failed: ${String(e)}`);
+      }
+    }
+    throw new If820OtaError(
+      `Could not reconnect to the Bluetooth module to retry the update: ${String(lastError)}`,
+      { transient: true },
+    );
+  };
 
   const send = async (op: number, param: number | undefined, what: string): Promise<void> => {
     log(`control point → ${what}`);
     try {
-      await write(control, command(op, param));
+      await write(control!, command(op, param));
     } catch (e) {
       throw wrapGattError(e, what);
     }
@@ -443,6 +541,7 @@ export async function runIf820OtaUpdate(
   };
 
   const abortQuietly = async (): Promise<void> => {
+    if (!control) return;
     try {
       await write(control, command(IF820_OTA_COMMAND.ABORT));
       log('control point → ABORT');
@@ -452,9 +551,31 @@ export async function runIf820OtaUpdate(
     }
   };
 
+  /** The first data write, bounded: on a stalled link it is never answered. */
+  const firstWrite = async (chunk: Uint8Array<ArrayBuffer>): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = write(data!, chunk);
+    /* Whatever the stalled write eventually settles with, it is no longer
+     * anyone's concern, and must not surface as an unhandled rejection. */
+    attempt.catch(() => {});
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ChunkRefused('no answer', true)), firstWriteTimeoutMs);
+    });
+    try {
+      await Promise.race([attempt, timeout]);
+    } catch (e) {
+      if (e instanceof ChunkRefused) throw e;
+      /* Refused outright. A rejection that comes with the link gone is a stall
+       * the stack noticed first. */
+      throw new ChunkRefused(e, !server.connected);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   /** One full pass at a given chunk size. Throws {@link ChunkRefused} when the
    * very first data write fails, so the caller can retry smaller. */
-  const pass = async (chunkSize: number): Promise<number> => {
+  const pass = async (chunkSize: number, canRetry: boolean): Promise<number> => {
     statuses.clear();
     onStatus('Preparing the Bluetooth module for the update…');
     await send(IF820_OTA_COMMAND.PREPARE_DOWNLOAD, undefined, 'PREPARE_DOWNLOAD');
@@ -470,11 +591,14 @@ export async function runIf820OtaUpdate(
     while (offset < bytes.length) {
       throwIfAborted(signal);
       const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
-      try {
-        await write(data, chunk);
-      } catch (e) {
-        if (offset === 0 && chunkSize > IF820_OTA_MIN_CHUNK_SIZE) throw new ChunkRefused(e);
-        throw wrapGattError(e, `Writing firmware at offset ${offset}`);
+      if (offset === 0 && canRetry) {
+        await firstWrite(chunk);
+      } else {
+        try {
+          await write(data!, chunk);
+        } catch (e) {
+          throw wrapGattError(e, `Writing firmware at offset ${offset}`);
+        }
       }
       crc = crc32(chunk, crc);
       offset += chunk.length;
@@ -503,28 +627,32 @@ export async function runIf820OtaUpdate(
   };
 
   try {
-    try {
-      await control.startNotifications();
-    } catch (e) {
-      throw wrapGattError(e, 'Subscribing to the update control point');
-    }
+    onStatus('Opening the Bluetooth module update service…');
+    await open();
 
-    let chunkSize = firstChunk;
+    let step = 0;
     let crc: number;
     for (;;) {
+      const chunkSize = ladder[step];
+      const canRetry = step < ladder.length - 1;
       try {
-        crc = await pass(chunkSize);
+        crc = await pass(chunkSize, canRetry);
         break;
       } catch (e) {
-        if (e instanceof ChunkRefused) {
-          log(
-            `first ${chunkSize}-byte data write refused (${String(e.inner)}); retrying at ${IF820_OTA_MIN_CHUNK_SIZE}`,
-          );
+        if (!(e instanceof ChunkRefused)) throw e;
+        const next = ladder[step + 1];
+        log(
+          `first ${chunkSize}-byte data write ${e.stalled ? 'went unanswered' : 'was refused'}` +
+            ` (${String(e.inner)}); retrying at ${next}`,
+        );
+        opts.onRetry?.({ fromChunkSize: chunkSize, toChunkSize: next, reconnecting: e.stalled });
+        if (e.stalled) {
+          onStatus('The link stalled on large writes; reconnecting to continue with smaller ones…');
+          await reopen();
+        } else {
           await abortQuietly();
-          chunkSize = IF820_OTA_MIN_CHUNK_SIZE;
-          continue;
         }
-        throw e;
+        step++;
       }
     }
 
@@ -532,7 +660,7 @@ export async function runIf820OtaUpdate(
     return {
       bytes: bytes.length,
       crc32: crc,
-      chunkSize,
+      chunkSize: ladder[step],
       serviceUuid,
       durationMs: Date.now() - started,
     };
@@ -540,7 +668,7 @@ export async function runIf820OtaUpdate(
     if (server.connected) await abortQuietly();
     throw e;
   } finally {
-    control.removeEventListener('characteristicvaluechanged', onValue);
+    control?.removeEventListener('characteristicvaluechanged', onValue);
   }
 }
 

@@ -584,6 +584,11 @@ if (isIf820UpdateAvailable(current, '1.4.18.18')) {
   requests them by default. A host that builds its own `requestDevice` options
   must include `client.requestedOptionalServices()`, or the update cannot run
   without a second device picker.
+- **512-byte writes first, 63 if the link stalls.** Whether the module accepts
+  large writes depends on the packet airtime the two radios agreed, which a
+  page cannot see. A stalled first write makes the update drop and re-open
+  the link (no picker) and continue at 63 bytes, so expect one disconnect
+  during the update in that case; `onRetry` reports it.
 - **Interruption is safe.** The module switches images only after it has
   verified the whole image's CRC-32, so a dropped link or a cancel leaves the
   old firmware running, and the update can be run again.
