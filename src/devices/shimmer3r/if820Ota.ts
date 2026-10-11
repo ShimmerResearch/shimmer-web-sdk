@@ -31,11 +31,15 @@
  * goes through callbacks and the GATT objects are structurally typed, so
  * tests drive it with a fake.
  *
- * HARDWARE-VERIFY: written from the protocol as Infineon's peer apps drive
- * it and exercised only against a fake GATT server. Not yet run against a
- * Shimmer3R's IF820 — in particular, whether EZ-Serial exposes the OTA
- * service while CYSPP is in use, the chunk size Chrome's negotiated MTU
- * allows, and the module's behaviour after VERIFY (reset, BLE address kept).
+ * Bench-checked on a Shimmer3R (2026-10-11, from a Python BLE host running
+ * this same sequence): EZ-Serial exposes the OTA service alongside CYSPP,
+ * PREPARE / DOWNLOAD / data / VERIFY are accepted, the module resets onto
+ * the new image and keeps its BLE address. The module may come back on
+ * factory UART settings, so the Shimmer3R MCU must reboot afterwards to
+ * re-provision it — see {@link Shimmer3RClient.updateBtModuleFirmware}.
+ *
+ * HARDWARE-VERIFY: this TypeScript, under Chrome's Web Bluetooth, has not
+ * yet run against a real module — only the protocol has.
  */
 
 import { crc32 } from '../verisense/dfuSerial.js';
@@ -104,13 +108,17 @@ export function if820OtaStatusText(status: number): string {
 }
 
 /**
- * Data chunk size used first. 244 bytes fills one ATT write at the 247-byte
- * MTU desktop and mobile stacks usually negotiate, and is what Infineon's iOS
- * app uses. Web Bluetooth does not expose the MTU, so if the first chunk is
- * refused the update restarts at {@link IF820_OTA_MIN_CHUNK_SIZE}, which fits
- * the 23-byte default MTU every link supports.
+ * Data chunk size used first: the largest write the Shimmer3R's IF820 accepts
+ * on the OTA data characteristic. Measured on v1.4.16.16 and v1.4.18.18
+ * modules over a Windows link (2026-10-11): 63 bytes is accepted and 64 is
+ * refused, every time, although that link had negotiated a 517-byte MTU. So
+ * the limit is the module's, not the link's, and the 244 bytes Infineon's iOS
+ * app uses fail outright here. A link whose MTU is smaller than 66 still
+ * refuses the first chunk, and the update restarts once at
+ * {@link IF820_OTA_MIN_CHUNK_SIZE}, which fits the 23-byte default MTU every
+ * link supports.
  */
-export const IF820_OTA_DEFAULT_CHUNK_SIZE = 244;
+export const IF820_OTA_DEFAULT_CHUNK_SIZE = 63;
 export const IF820_OTA_MIN_CHUNK_SIZE = 20;
 
 /** Bound on each control-point command's status answer. */

@@ -223,6 +223,20 @@ describe('runIf820OtaUpdate', () => {
     expect(Uint8Array.from(mod.received)).toEqual(img);
   });
 
+  it('completes at the default chunk on a module that takes at most 63 bytes', async () => {
+    // The Shimmer3R's IF820 refuses a 64-byte data write (bench, 2026-10-11).
+    const mod = new FakeIf820({ maxChunk: 63 });
+    const img = image(1000);
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, img);
+    expect(result.chunkSize).toBe(63);
+    expect(Uint8Array.from(mod.received)).toEqual(img);
+    expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.VERIFY,
+    ]);
+  });
+
   it('falls back to the minimum chunk when the first chunk is refused', async () => {
     const mod = new FakeIf820({ maxChunk: IF820_OTA_MIN_CHUNK_SIZE });
     const img = image(250);
@@ -293,11 +307,11 @@ describe('runIf820OtaUpdate', () => {
   });
 
   it('classifies a link drop mid-transfer as transient and skips ABORT on a dead link', async () => {
-    const mod = new FakeIf820({ dropAtOffset: 488 });
+    const mod = new FakeIf820({ dropAtOffset: 504 });
     const err = await runIf820OtaUpdate({ gatt: mod.server }, image(1000)).catch((e) => e);
     expect(err).toBeInstanceOf(If820OtaError);
     expect(err.transient).toBe(true);
-    expect(err.message).toMatch(/offset 488/);
+    expect(err.message).toMatch(/offset 504/);
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.ABORT)).toBe(false);
   });
 
