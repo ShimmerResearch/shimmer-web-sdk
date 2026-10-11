@@ -35,8 +35,9 @@
  * this same sequence): EZ-Serial exposes the OTA service alongside CYSPP,
  * PREPARE / DOWNLOAD / data / VERIFY are accepted, the module resets onto
  * the new image and keeps its BLE address. The module may come back on
- * factory UART settings, so the Shimmer3R MCU must reboot afterwards to
- * re-provision it — see {@link Shimmer3RClient.updateBtModuleFirmware}.
+ * different UART settings, so the Shimmer3R MCU must reboot afterwards to
+ * re-provision it - but only once the module has finished switching images
+ * (see {@link Shimmer3RClient.updateBtModuleFirmware}).
  *
  * HARDWARE-VERIFY: this TypeScript, under Chrome's Web Bluetooth, has not
  * yet run against a real module — only the protocol has.
@@ -402,10 +403,11 @@ async function resolveService(
  * `optionalServices`. `image` is the module's `.ota.bin`.
  *
  * Resolves once the module has verified the image. The module then resets
- * onto the new firmware by itself, so expect the link to drop shortly after;
- * the Shimmer3R's MCU reads the module version only at its own boot, so arm
- * reboot-on-disconnect beforehand ({@link Shimmer3RClient.setRebootOnDisconnect})
- * for the new version to be reported after reconnecting.
+ * onto the new firmware by itself, so expect the link to drop shortly after.
+ * Do NOT arm the Shimmer3R's reboot-on-disconnect for it: rebooting the MCU
+ * on that drop cuts the module's power while it is still switching images,
+ * and it comes back on the old one (see
+ * {@link Shimmer3RClient.updateBtModuleFirmware}).
  *
  * Starts at {@link IF820_OTA_FAST_CHUNK_SIZE}. If the first data write is
  * refused, the update is aborted and rerun at the next size down; if it goes

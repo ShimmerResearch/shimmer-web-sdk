@@ -592,10 +592,11 @@ if (isIf820UpdateAvailable(current, '1.4.18.18')) {
 - **Interruption is safe.** The module switches images only after it has
   verified the whole image's CRC-32, so a dropped link or a cancel leaves the
   old firmware running, and the update can be run again.
-- **The MCU reads the module version only at boot.** `updateBtModuleFirmware`
-  therefore arms reboot-on-disconnect first, so the post-update drop reboots
-  the MCU and `readBtModuleVersion()` reports the new version after
-  reconnecting.
+- **Never arm reboot-on-disconnect for it.** Rebooting the MCU when the
+  link drops after VERIFY cuts the module's power while it is still switching
+  images, and it comes back on the old one. Shimmer3R firmware with DEV-1164
+  reboots the MCU itself once the module is back, so the new version is
+  reported after reconnecting; older firmware needs a power-cycle.
 
 `runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
 for any object that has the `BluetoothDevice`'s `gatt` server. Not yet run

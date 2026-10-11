@@ -2187,13 +2187,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * module is updated by its own GATT service, which a Bluetooth Classic or
    * USB link cannot reach.
    *
-   * By default reboot-on-disconnect is armed first: the module resets onto
-   * the new firmware once it has verified it, which drops the link, and the
-   * Shimmer3R's MCU only reads the module version at boot. With it armed the
-   * MCU reboots on that drop, so after reconnecting {@link readBtModuleVersion}
-   * reports the new version. Pass `rebootMcuOnDisconnect: false` to skip that
-   * (the version then updates at the next power-cycle). Firmware that NACKs
-   * the feature is not an error: the update still runs.
+   * Deliberately does NOT arm reboot-on-disconnect. After VERIFY the module
+   * resets and spends a moment switching to the new image; on the transparent
+   * data path (every fielded v1.4.16.16 module) the MCU sees that reset as a
+   * disconnect at once, and an armed reboot then cuts the module's power
+   * mid-switch, so it comes back on the OLD image although VERIFY succeeded
+   * (bench, 15BC, SWO-logged, 2026-10-11). Firmware with DEV-1164's
+   * unexpected-module-boot handling reboots the MCU itself once the module
+   * has come back, and so reports the new version; older firmware keeps the
+   * old version string, and possibly a dead module link, until the sensor is
+   * power-cycled.
    *
    * Resolves once the module has accepted the image; expect a disconnect
    * shortly after. Reconnect with a {@link WebBluetoothTransport} given the
@@ -2204,7 +2207,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async updateBtModuleFirmware(
     image: ArrayBuffer | Uint8Array,
-    opts: If820OtaOptions & { rebootMcuOnDisconnect?: boolean } = {},
+    opts: If820OtaOptions = {},
   ): Promise<If820OtaResult> {
     const t = this._transport;
     if (!t) throw new Error('Not connected');
@@ -2215,14 +2218,6 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     if (this._streaming) {
       throw new Error('Stop streaming before updating the Bluetooth module firmware.');
-    }
-    if (opts.rebootMcuOnDisconnect ?? true) {
-      try {
-        await this.setRebootOnDisconnect(true);
-      } catch (e) {
-        this._log('reboot-on-disconnect not available; continuing', e);
-        opts.onLog?.(`reboot-on-disconnect not armed: ${String(e)}`);
-      }
     }
     return runIf820OtaUpdate(t.device, image, opts);
   }
