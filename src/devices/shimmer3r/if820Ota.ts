@@ -442,6 +442,10 @@ export async function runIf820OtaUpdate(
   }
 }
 
+/** How long a cancelled first write may take to settle before the link is
+ * treated as stalled and dropped. A healthy write settles in tens of ms. */
+const IF820_OTA_ABORT_GRACE_MS = 500;
+
 /** Devices with an update running, for {@link runIf820OtaUpdate}'s guard. */
 const updatesInFlight = new WeakSet<object>();
 
@@ -598,15 +602,45 @@ async function runUpdate(
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new ChunkRefused('no answer', true)), firstWriteTimeoutMs);
     });
+    /* A cancel is honoured at once rather than after the timeout. */
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(abortError());
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
+    });
     try {
-      await Promise.race([attempt, timeout]);
+      await Promise.race([attempt, timeout, aborted]);
     } catch (e) {
       if (e instanceof ChunkRefused) throw e;
+      if ((e as Error)?.name === 'AbortError') {
+        /* A write still pending after a short grace is a stalled link, which
+         * would also hold up the ABORT queued behind it, and which the module
+         * drops by supervision timeout anyway. Drop it now. No VERIFY was
+         * sent, so the module keeps its current image. */
+        const settled = await Promise.race([
+          attempt.then(
+            () => true,
+            () => true,
+          ),
+          sleep(IF820_OTA_ABORT_GRACE_MS).then(() => false),
+        ]);
+        if (!settled && server.connected) {
+          log('cancelled during a stalled write; dropping the link');
+          try {
+            server.disconnect?.();
+          } catch {
+            /* already going */
+          }
+        }
+        throw e;
+      }
       /* Refused outright. A rejection that comes with the link gone is a stall
        * the stack noticed first. */
       throw new ChunkRefused(e, !server.connected);
     } finally {
       clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
     }
   };
 

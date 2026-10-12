@@ -441,6 +441,23 @@ describe('runIf820OtaUpdate', () => {
     }
   });
 
+  it('cancels at once during a stalled first write, dropping the stalled link', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const run = runIf820OtaUpdate({ gatt: mod.server }, image(2000), {
+      signal: ctrl.signal,
+      firstWriteTimeoutMs: 10_000,
+    }).catch((e) => e);
+    await new Promise((r) => setTimeout(r, 50));
+    ctrl.abort();
+    const err = await run;
+    expect(err.name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(mod.disconnects).toBe(1);
+    expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+  });
+
   it('refuses a second update on the same device while one is running', async () => {
     const mod = new FakeIf820();
     const device = { gatt: mod.server };
