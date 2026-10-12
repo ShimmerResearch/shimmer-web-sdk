@@ -59,7 +59,7 @@
     "@types/node": "^26.6.3",
     "@types/web-bluetooth": "^0.0.21",
     "@typescript-eslint/eslint-plugin": "^8.71.0",
-    "@typescript-eslint/parser": "^8.70.0",
+    "@typescript-eslint/parser": "^8.71.1",
     "eslint": "^10.11.0",
     "globals": "^17.13.0",
     "prettier": "^3.9.9",
