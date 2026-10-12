@@ -599,8 +599,9 @@ if (isIf820UpdateAvailable(current, '1.4.18.18')) {
   reported after reconnecting; older firmware needs a power-cycle.
 
 `runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
-for any object that has the `BluetoothDevice`'s `gatt` server. Not yet run
-against hardware: `HARDWARE-VERIFY:`.
+for any object that has the `BluetoothDevice`'s `gatt` server. Run end to end
+on a Shimmer3R from Chrome; the stalled-link fallback (reconnect, then 63-byte
+writes) is not yet hardware-verified under Web Bluetooth: `HARDWARE-VERIFY:`.
 
 ## Building
 
