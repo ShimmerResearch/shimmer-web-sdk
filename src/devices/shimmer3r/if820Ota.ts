@@ -311,6 +311,9 @@ class StatusQueue {
   }
 
   next(timeoutMs: number, what: string, signal?: AbortSignal): Promise<number> {
+    /* An abort that landed while a write was in flight has already fired, so
+     * the listener below would never see it. */
+    if (signal?.aborted) return Promise.reject(abortError());
     if (this._values.length) return Promise.resolve(this._values.shift()!);
     return new Promise<number>((resolve, reject) => {
       const onAbort = (): void => {
@@ -432,6 +435,9 @@ export async function runIf820OtaUpdate(
   const firstWriteTimeoutMs = opts.firstWriteTimeoutMs ?? IF820_OTA_FIRST_WRITE_TIMEOUT_MS;
   const reconnectAttempts = opts.reconnectAttempts ?? IF820_OTA_RECONNECT_ATTEMPTS;
   const reconnectDelayMs = opts.reconnectDelayMs ?? IF820_OTA_RECONNECT_DELAY_MS;
+  if (opts.chunkSize !== undefined && (!Number.isFinite(opts.chunkSize) || opts.chunkSize <= 0)) {
+    throw new If820OtaError(`Invalid chunkSize: ${opts.chunkSize}`);
+  }
   const firstChunk = Math.max(
     IF820_OTA_MIN_CHUNK_SIZE,
     Math.floor(opts.chunkSize ?? IF820_OTA_DEFAULT_CHUNK_SIZE),

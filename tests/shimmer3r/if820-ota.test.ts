@@ -416,6 +416,31 @@ describe('runIf820OtaUpdate', () => {
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
   });
 
+  it('reports cancellation, not a timeout, when aborted while a command write is in flight', async () => {
+    const mod = new FakeIf820({ silentOn: IF820_OTA_COMMAND.DOWNLOAD });
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(50), {
+      signal: ctrl.signal,
+      responseTimeoutMs: 5000,
+      onLog: (line) => {
+        if (line.startsWith('control point → DOWNLOAD')) ctrl.abort();
+      },
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('rejects a chunkSize that is not a finite positive number', async () => {
+    for (const chunkSize of [NaN, Infinity, 0, -5]) {
+      const mod = new FakeIf820();
+      await expect(
+        runIf820OtaUpdate({ gatt: mod.server }, image(10), { chunkSize }),
+      ).rejects.toThrow(/Invalid chunkSize/);
+      expect(mod.commands).toEqual([]);
+    }
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
