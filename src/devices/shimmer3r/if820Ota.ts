@@ -420,11 +420,35 @@ async function resolveService(
  * unanswered (the link has stalled), the link is dropped and re-opened to the
  * same device first - see {@link IF820_OTA_DEFAULT_CHUNK_SIZE} for why, and
  * `onRetry` for telling the host.
+ *
+ * One update at a time per device: a second call for a device whose update is
+ * still running is refused before it touches the module. Two runs would share
+ * the control point, each hearing the other's status bytes, and interleave
+ * their writes into the one image buffer the module has.
  */
 export async function runIf820OtaUpdate(
   device: If820OtaDeviceLike,
   image: ArrayBuffer | Uint8Array,
   opts: If820OtaOptions = {},
+): Promise<If820OtaResult> {
+  if (updatesInFlight.has(device)) {
+    throw new If820OtaError('A Bluetooth module update is already running on this device');
+  }
+  updatesInFlight.add(device);
+  try {
+    return await runUpdate(device, image, opts);
+  } finally {
+    updatesInFlight.delete(device);
+  }
+}
+
+/** Devices with an update running, for {@link runIf820OtaUpdate}'s guard. */
+const updatesInFlight = new WeakSet<object>();
+
+async function runUpdate(
+  device: If820OtaDeviceLike,
+  image: ArrayBuffer | Uint8Array,
+  opts: If820OtaOptions,
 ): Promise<If820OtaResult> {
   /* A private copy: the image cannot change under the CRC mid-transfer, and
    * it is ArrayBuffer-backed, which the GATT write signature requires. */

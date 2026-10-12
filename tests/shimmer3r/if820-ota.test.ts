@@ -441,6 +441,21 @@ describe('runIf820OtaUpdate', () => {
     }
   });
 
+  it('refuses a second update on the same device while one is running', async () => {
+    const mod = new FakeIf820();
+    const device = { gatt: mod.server };
+    const first = runIf820OtaUpdate(device, image(2000));
+    await expect(runIf820OtaUpdate(device, image(2000))).rejects.toThrow(/already running/);
+    await expect(first).resolves.toMatchObject({ bytes: 2000 });
+    expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.VERIFY,
+    ]);
+    // Released once the first one settles, failed or not.
+    await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;

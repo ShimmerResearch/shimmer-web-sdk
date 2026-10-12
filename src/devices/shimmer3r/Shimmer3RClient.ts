@@ -2202,6 +2202,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * shortly after. Reconnect with a {@link WebBluetoothTransport} given the
    * same {@link device} to avoid a second picker.
    *
+   * A second call while an update is running on this connection is refused
+   * ({@link runIf820OtaUpdate} allows one per device).
+   *
    * HARDWARE-VERIFY: run end to end on a Shimmer3R from Chrome; the fallback
    * that reconnects after a stalled 512-byte write has not been, on hardware —
    * see the note in `if820Ota.ts`.
