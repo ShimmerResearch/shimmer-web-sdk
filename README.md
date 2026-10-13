@@ -332,7 +332,11 @@ await client.startStreaming();
 Unlike the BLE clients, `Shimmer3Client` runs a **byte-stream parser**: inbound
 bytes are accumulated and complete LiteProtocol messages are extracted with a
 length-aware framer, so ACKs and responses are recovered correctly no matter how
-the RFCOMM stream splits or coalesces them.
+the RFCOMM stream splits or coalesces them. That includes the status a Shimmer3
+sends unasked when it is docked or undocked, or when the button starts or stops
+a recording. That status is reported through `onDeviceStatus`, and
+`getStatus()` and `getBattery()` request the status and battery readings on
+demand.
 
 ### Wired / dock UART (`WiredShimmerClient`)
 

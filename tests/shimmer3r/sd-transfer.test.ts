@@ -341,6 +341,12 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
         send([ACK, 0x2f, 3, 0, 1, 0, 1, opts.fwPatch ?? 11]);
         return;
       }
+      case 0x3f: {
+        // GET_DEVICE_VERSION → Shimmer3R (10). setCrcMode reads it first and
+        // refuses a CRC without it.
+        send([ACK, 0x25, 10]);
+        return;
+      }
       case OP.LIST_DIR_COMMAND: {
         const startIdx = cmd[1] | (cmd[2] << 8);
         const maxEntries = Math.min(cmd[3], opts.maxEntriesPerPage ?? 16);

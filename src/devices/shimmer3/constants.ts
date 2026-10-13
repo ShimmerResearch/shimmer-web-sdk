@@ -62,6 +62,10 @@ export const SHIMMER3_SPP_SERIAL_OPTIONS = Object.freeze({
 /**
  * Connect-handshake defaults, ported from the timings/sequence in
  * com.shimmerresearch.bluetooth.ShimmerBluetooth.
+ *
+ * `Object.freeze` keeps each value's literal type (`RESPONSE_TIMEOUT_MS` is
+ * `2000`, not `number`), so a parameter that defaults to one of these needs an
+ * explicit `: number`. Without it, TypeScript callers can pass no other value.
  */
 export const SHIMMER3_DEFAULTS = Object.freeze({
   /**
