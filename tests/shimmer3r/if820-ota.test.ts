@@ -80,6 +80,11 @@ interface FakeModuleOptions {
    * if `stallClearsOnReconnect`. */
   stallAbove?: number;
   stallClearsOnReconnect?: boolean;
+  /** Never answer the data write at this offset or any after it - a link
+   * that stalls mid transfer. */
+  stallAtOffset?: number;
+  /** getPrimaryService fails as the link goes down under it. */
+  dropOnServiceLookup?: boolean;
 }
 
 class FakeIf820 {
@@ -101,6 +106,12 @@ class FakeIf820 {
 
   get server(): If820OtaGattServerLike {
     const getPrimaryService = async (uuid: string) => {
+      if (this.opts.dropOnServiceLookup) {
+        this.connected = false;
+        const e = new Error('GATT Server is disconnected. Cannot retrieve services.');
+        e.name = 'NetworkError';
+        throw e;
+      }
       if (this.opts.notGranted) {
         const e = new Error(
           `Origin is not allowed to access the service. Tip: Add the service UUID to 'optionalServices'`,
@@ -180,6 +191,9 @@ class FakeIf820 {
 
   private _onData(bytes: Uint8Array): void | Promise<void> {
     if (this.opts.stallAbove !== undefined && bytes.length > this.opts.stallAbove) {
+      return new Promise<void>(() => {});
+    }
+    if (this.opts.stallAtOffset !== undefined && this.received.length >= this.opts.stallAtOffset) {
       return new Promise<void>(() => {});
     }
     if (this.opts.dropAtOffset !== undefined && this.received.length >= this.opts.dropAtOffset) {
@@ -458,6 +472,52 @@ describe('runIf820OtaUpdate', () => {
     expect(Date.now() - started).toBeLessThan(2000);
     expect(mod.disconnects).toBe(1);
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+  });
+
+  it('refuses a second update through another wrapper of the same GATT server', async () => {
+    const mod = new FakeIf820();
+    const server = mod.server;
+    const first = runIf820OtaUpdate({ gatt: server }, image(2000));
+    await expect(runIf820OtaUpdate({ gatt: server }, image(2000))).rejects.toThrow(
+      /already running/,
+    );
+    await expect(first).resolves.toMatchObject({ bytes: 2000 });
+  });
+
+  it('times out a data write that stalls mid transfer, drops the link, and calls it transient', async () => {
+    const mod = new FakeIf820({ stallAtOffset: 1024 });
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(4000), {
+      responseTimeoutMs: 100,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(If820OtaError);
+    expect(err.transient).toBe(true);
+    expect(err.message).toMatch(/offset 1024 .*timed out/);
+    expect(mod.disconnects).toBe(1);
+    expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('cancels at once during a write that stalls mid transfer', async () => {
+    const mod = new FakeIf820({ stallAtOffset: 1024 });
+    const ctrl = new AbortController();
+    const run = runIf820OtaUpdate({ gatt: mod.server }, image(4000), {
+      signal: ctrl.signal,
+      onProgress: (p) => {
+        if (p.currentBytes >= 1024) setTimeout(() => ctrl.abort(), 20);
+      },
+    }).catch((e) => e);
+    const err = await run;
+    expect(err.name).toBe('AbortError');
+    expect(mod.disconnects).toBe(1);
+  });
+
+  it('keeps a link that drops during the service lookup transient', async () => {
+    const mod = new FakeIf820({ dropOnServiceLookup: true });
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(10)).catch((e) => e);
+    expect(err).toBeInstanceOf(If820OtaError);
+    expect(err.transient).toBe(true);
+    expect(err.message).not.toMatch(/does not expose/);
   });
 
   it('refuses a second update on the same device while one is running', async () => {
