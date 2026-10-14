@@ -393,6 +393,12 @@ export class Shimmer3Client extends BaseShimmerClient {
      * the previous one fails here, rather than take this link's ACK or reply. */
     this._resetLinkProtocolState();
     const link = this._link.current;
+    /* The schema describes the old device's channel layout, and the
+     * enabled-sensor bitmap is the one it was built with: a reconnect -
+     * possibly to a different sensor - inherits neither until it inquires.
+     * Same reset as Shimmer3RClient.connect. */
+    this.schema = null;
+    this.enabledSensors = 0x000000;
     /* And the previous transport's subscriptions go. After a drop nothing else
      * removes them, and a late notification or disconnect event from that
      * transport would be taken as this link's. */
@@ -495,6 +501,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       this._transport = null;
       this._resetLinkProtocolState();
       this.schema = null;
+      this.enabledSensors = 0x000000;
       this.ExpPower = 0;
       this._resetCalibrationState();
       this._timeline.reset();

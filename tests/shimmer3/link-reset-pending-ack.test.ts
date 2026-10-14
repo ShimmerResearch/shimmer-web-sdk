@@ -267,6 +267,25 @@ describe('an operation the drop strands part-way', () => {
     expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.INQUIRY_COMMAND);
   });
 
+  it("a reconnect from onInquiry does not leave the old device's schema on the next link", async () => {
+    const inquiry: Answer = (cmd) =>
+      cmd[0] === OPCODES.INQUIRY_COMMAND ? [ACK, ...INQUIRY_MSG] : [ACK];
+    const first = device(inquiry);
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    let reconnected: Promise<void> = Promise.resolve();
+    client.onInquiry = () => {
+      client.onInquiry = null;
+      first.emitDisconnect(new Error('dropped'));
+      reconnected = client.connect(device());
+    };
+    await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
+    await reconnected;
+    // Stored before the callback ran, and the next device has not inquired
+    expect(client.enabledSensors).toBe(0);
+    expect((client as unknown as { schema: unknown }).schema).toBeNull();
+  });
+
   it('an ExG preset dropped part-way fails, rather than finish on the next device', async () => {
     const exg = (cmd: Uint8Array): number[] | null => {
       switch (cmd[0]) {
