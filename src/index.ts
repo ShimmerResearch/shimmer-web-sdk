@@ -1282,3 +1282,31 @@ export type {
   ShimmerFactoryTestModelInfo,
   ShimmerFactoryTestIoStatus,
 } from './devices/factoryTest/shimmerReport.js';
+
+// Instruments — Nordic Power Profiler Kit II (PPK2)
+export { Ppk2 } from './instruments/ppk2/Ppk2.js';
+export type { Ppk2Options } from './instruments/ppk2/Ppk2.js';
+export {
+  Ppk2SampleDecoder,
+  parsePpk2Metadata,
+  convertSourceVoltage,
+  clampSourceVoltageMv,
+  clonePpk2Modifiers,
+  DEFAULT_PPK2_MODIFIERS,
+  RunningStats,
+  MinMaxDownsampler,
+} from './instruments/ppk2/ppk2Codec.js';
+export type {
+  Ppk2Modifiers,
+  Ppk2RangeTable,
+  Ppk2SampleBatch,
+  MinMaxBin,
+} from './instruments/ppk2/ppk2Codec.js';
+export {
+  PPK2_CMD,
+  PPK2_USB_VENDOR_ID,
+  PPK2_USB_PRODUCT_ID,
+  PPK2_BAUD_RATE,
+  PPK2_SAMPLES_PER_SECOND,
+} from './instruments/ppk2/constants.js';
+export type { Ppk2Command } from './instruments/ppk2/constants.js';
