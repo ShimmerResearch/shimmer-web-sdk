@@ -408,6 +408,8 @@ describe('a multi-step operation a reconnect splits', () => {
     };
     await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
     await reconnected();
+    // The old device's bitmap, stored before the callback ran, is not the next one's
+    expect(client.getEnabledSensors()).toBe(0);
   });
 
   it("readExgConfig does not take chip 2's bank from the next device", async () => {

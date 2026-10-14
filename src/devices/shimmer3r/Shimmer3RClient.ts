@@ -808,8 +808,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._unframed = t.capabilities.framed === false;
     /* Both version caches describe the device at the far end, and the schema
      * describes its channel layout, so a reconnect - possibly to a DIFFERENT
-     * sensor - must not inherit any of them. */
+     * sensor - must not inherit any of them. Nor the enabled-sensor bitmap the
+     * schema was built with: it is the old device's until an inquiry here. */
     this.schema = null;
+    this.enabledSensors = 0x000000;
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
     this._statusPayloadBytes = null;
@@ -922,6 +924,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._resetLinkProtocolState();
       this._unframed = false;
       this.schema = null;
+      this.enabledSensors = 0x000000;
       this.ExpPower = 0;
       this._deviceCalibrations = {};
       this._emitStatus('Disconnected');
