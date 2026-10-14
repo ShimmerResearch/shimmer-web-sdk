@@ -395,7 +395,19 @@ describe('a multi-step operation a reconnect splits', () => {
     swapAtStatus(client, 'Sensors ACK received', swap);
     await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
     await reconnected();
+    // No phantom ACK left counted against the next link
+    expect(expectingAck(client)).toBe(0);
     expect(sent(second)).not.toContain(OPCODES.INQUIRY_COMMAND);
+  });
+
+  it('setSensors fails when its onInquiry callback replaces the link', async () => {
+    const { client, swap, reconnected } = await onFirst();
+    client.onInquiry = () => {
+      client.onInquiry = null;
+      swap();
+    };
+    await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
+    await reconnected();
   });
 
   it("readExgConfig does not take chip 2's bank from the next device", async () => {
@@ -403,6 +415,8 @@ describe('a multi-step operation a reconnect splits', () => {
     swapAfterStep(client, '_readExgChip', (a) => a[0] === 0, swap);
     await expect(client.readExgConfig()).rejects.toThrow(/link was reset/);
     await reconnected();
+    // No phantom ACK left counted against the next link
+    expect(expectingAck(client)).toBe(0);
     expect(sent(second)).not.toContain(OPCODES.GET_EXG_REGS_COMMAND);
   });
 
@@ -420,6 +434,8 @@ describe('a multi-step operation a reconnect splits', () => {
     const bank = new Uint8Array(10);
     await expect(client.writeExgConfig(bank, bank)).rejects.toThrow(/link was reset/);
     await reconnected();
+    // No phantom ACK left counted against the next link
+    expect(expectingAck(client)).toBe(0);
     expect(sent(second)).not.toContain(OPCODES.GET_EXG_REGS_COMMAND);
   });
 
@@ -434,6 +450,8 @@ describe('a multi-step operation a reconnect splits', () => {
     };
     await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(/link was reset/);
     await reconnected();
+    // No phantom ACK left counted against the next link
+    expect(expectingAck(client)).toBe(0);
     expect(sent(second)).not.toContain(OPCODES.SET_SENSORS_COMMAND);
     expect(said.some((m) => /preset .* applied/.test(m))).toBe(false);
   });
@@ -452,6 +470,7 @@ describe('a multi-step operation a reconnect splits', () => {
     await client.connect(second);
     expect(await reading).toMatch(/link was reset/);
     for (const get of Object.keys(CALIB).map(Number)) expect(sent(second)).not.toContain(get);
+    expect(expectingAck(client)).toBe(0);
   });
 });
 

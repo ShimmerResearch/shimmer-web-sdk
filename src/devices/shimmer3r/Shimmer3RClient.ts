@@ -1775,6 +1775,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
     const info = this._interpretInquiryResponseShimmer3R(rsp);
     this.onInquiry?.(info);
+    /* The callback can itself drop or replace the link. The answer is then the
+       old device's, and a caller such as setSensors must not apply it to the
+       next one. */
+    if (this._linkGeneration !== link) throw this._linkResetError('the inquiry response');
     return info;
   }
 
@@ -4370,6 +4374,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     ackTimeoutMs = 1000,
     link = this._linkGeneration,
   ): Promise<Uint8Array | null> {
+    /* A step of an operation whose link has already been replaced: refused
+       before it is counted, since the count is now the next link's and the
+       catch below leaves it alone across a reset. */
+    if (link !== this._linkGeneration) {
+      throw new Error('The link was reset while the command was being sent');
+    }
     this._expectingAck++;
     try {
       /* The write is asynchronous, and the link can be reset while it is
