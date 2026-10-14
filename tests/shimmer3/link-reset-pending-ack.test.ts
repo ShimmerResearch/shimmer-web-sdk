@@ -254,6 +254,57 @@ describe('an operation the drop strands part-way', () => {
     // Room for the stranded read's three 2 s response timeouts, which is how
     // it fails where a reset does not stop it
   }, 10000);
+
+  it('setSensors fails, rather than report success, when the link drops before its re-inquiry', async () => {
+    const first = device();
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    // Dropped between the SET's ACK and the inquiry: a status callback can do it
+    client.onStatus = (m) => {
+      if (m.startsWith('Sensors ACKed')) first.emitDisconnect(new Error('dropped'));
+    };
+    await expect(client.setSensors(0x000080)).rejects.toThrow();
+    expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.INQUIRY_COMMAND);
+  });
+
+  it('an ExG preset dropped part-way fails, rather than finish on the next device', async () => {
+    const exg = (cmd: Uint8Array): number[] | null => {
+      switch (cmd[0]) {
+        case OPCODES.GET_EXG_REGS_COMMAND:
+          return [ACK, OPCODES.EXG_REGS_RESPONSE, 10, ...new Array<number>(10).fill(0)];
+        case OPCODES.INQUIRY_COMMAND:
+          return [ACK, ...INQUIRY_MSG];
+        default:
+          return [ACK];
+      }
+    };
+    const first = device(exg);
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    const said: string[] = [];
+    client.onStatus = (m) => {
+      said.push(m);
+      if (m.startsWith('ExG registers written')) first.emitDisconnect(new Error('dropped'));
+    };
+    await expect(client.applyExgPresetLive('ecg', '24bit')).rejects.toThrow();
+    // The sensors were never set, so the preset was not applied
+    expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.SET_SENSORS_COMMAND);
+    expect(said.some((m) => /preset .* applied/.test(m))).toBe(false);
+  });
+
+  it('readCalibration fails at a drop, rather than skip to a partial result', async () => {
+    const first = device(silentTo(OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND));
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    const reading = client.readCalibration().then(
+      (groups) => groups,
+      (e: Error) => e.message,
+    );
+    await tick(20); // the first group's reply is awaited
+    first.emitDisconnect(new Error('dropped'));
+    expect(await reading).toMatch(/link was reset/);
+    expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.GET_GYRO_CALIBRATION_COMMAND);
+  });
 });
 
 describe('the transport of a link that dropped', () => {
