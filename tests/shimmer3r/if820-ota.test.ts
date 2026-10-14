@@ -85,6 +85,8 @@ interface FakeModuleOptions {
   stallAtOffset?: number;
   /** getPrimaryService fails as the link goes down under it. */
   dropOnServiceLookup?: boolean;
+  /** Never complete the control-point write of this command. */
+  hangWriteOf?: number;
 }
 
 class FakeIf820 {
@@ -158,10 +160,11 @@ class FakeIf820 {
     setTimeout(() => this.control.notify([status]), 0);
   }
 
-  private _onControl(bytes: Uint8Array): void {
+  private _onControl(bytes: Uint8Array): void | Promise<void> {
     const cmd = Array.from(bytes);
     this.commands.push(cmd);
     const op = cmd[0];
+    if (op === this.opts.hangWriteOf) return new Promise<void>(() => {});
     if (op === this.opts.silentOn) return;
     const param = bytes.length >= 5 ? new DataView(bytes.buffer).getUint32(1, true) : undefined;
     switch (op) {
@@ -472,6 +475,34 @@ describe('runIf820OtaUpdate', () => {
     expect(Date.now() - started).toBeLessThan(2000);
     expect(mod.disconnects).toBe(1);
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+  });
+
+  it('times out a control-point write that hangs, drops the link, and calls it transient', async () => {
+    const mod = new FakeIf820({ hangWriteOf: IF820_OTA_COMMAND.DOWNLOAD });
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100), {
+      responseTimeoutMs: 100,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(If820OtaError);
+    expect(err.transient).toBe(true);
+    expect(err.message).toMatch(/did not accept DOWNLOAD/);
+    expect(mod.disconnects).toBe(1);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('cancels at once during a control-point write that hangs', async () => {
+    const mod = new FakeIf820({ hangWriteOf: IF820_OTA_COMMAND.DOWNLOAD });
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100), {
+      signal: ctrl.signal,
+      onLog: (line) => {
+        if (line.startsWith('control point → DOWNLOAD')) setTimeout(() => ctrl.abort(), 20);
+      },
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(mod.disconnects).toBe(1);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it('never sends VERIFY when cancelled from the last progress callback', async () => {

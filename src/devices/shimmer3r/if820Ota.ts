@@ -574,8 +574,20 @@ async function runUpdate(
 
   const send = async (op: number, param: number | undefined, what: string): Promise<void> => {
     log(`control point → ${what}`);
+    /* Bounded and cancellable like the data writes: a control-point write
+     * that hangs on a failing link would otherwise never reach the response
+     * wait, where the timeout and the cancel apply. (awaitWrite is declared
+     * below; send only runs once the whole update is set up.) */
     try {
-      await write(control!, command(op, param));
+      await awaitWrite(
+        write(control!, command(op, param)),
+        responseTimeoutMs,
+        () =>
+          new If820OtaError(`Bluetooth module did not accept ${what} (timed out)`, {
+            transient: true,
+          }),
+        true,
+      );
     } catch (e) {
       throw wrapGattError(e, what);
     }
