@@ -2835,6 +2835,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * (ShimmerBluetooth.java:2732,2735) and runs `writeEXGConfiguration()` earlier
    * in the same flow (:2670). {@link setSensors} re-inquires, so the streaming
    * schema and `enabledSensors` end up reflecting the new preset.
+   *
+   * Every step runs on the link the preset began on: a drop part-way fails the
+   * call rather than finish the preset on whatever device reconnects.
+   *
+   * HARDWARE-VERIFY: that binding - here and in {@link setSensors},
+   * {@link readExgConfig}, {@link writeExgConfig} and {@link readCalibration} -
+   * has only been run against a scripted loopback device that drops and
+   * reconnects between steps. No real Shimmer3R link has dropped part-way
+   * through one of them.
    */
   async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
