@@ -569,8 +569,13 @@ const client = new Shimmer3RClient(); // requests the OTA services in optionalSe
 await client.connect();
 const hw = await client.readDeviceVersion();
 const fw = await client.readFwVersion();
-const sensor = { hardwareVersion: hw.hardwareVersion, firmwareId: fw.fwId,
-                 major: fw.major, minor: fw.minor, internal: fw.patch };
+const sensor = {
+  hardwareVersion: hw.hardwareVersion,
+  firmwareId: fw.fwId,
+  major: fw.major,
+  minor: fw.minor,
+  internal: fw.patch,
+};
 const current = await client.readBtModuleVersion();
 if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '1.4.18.18')) {
   const image = await (await fetch('firmware/if820/module.ota.bin')).arrayBuffer();
