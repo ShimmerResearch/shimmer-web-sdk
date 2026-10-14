@@ -778,3 +778,95 @@ export function isIf820UpdateAvailable(
   if (!current || current.family !== 'cyw20820' || !current.version) return false;
   return compareIf820Versions(current.version, latest) < 0;
 }
+
+// ── Which sensors may be updated ──
+
+/**
+ * The first Shimmer3R LogAndStream release the module update is offered on:
+ * v1.01.022. It is the first to recover by itself once the module restarts on
+ * its new image (it reboots the MCU, which re-reads the module version), and
+ * the first to repair the SPP MTU an update leaves broken on v1.4.18.x, which
+ * otherwise runs the classic link at a fraction of its speed. Older firmware
+ * keeps reporting the old module version until it is power-cycled.
+ */
+export const IF820_OTA_MIN_SENSOR_FIRMWARE = Object.freeze({ major: 1, minor: 1, internal: 22 });
+
+/** Hardware version of a Shimmer3R, as GET_DEVICE_VERSION reports it. */
+const HW_ID_SHIMMER_3R = 10;
+/** Firmware identifier of LogAndStream, as GET_FW_VERSION reports it. */
+const FW_ID_LOGANDSTREAM = 3;
+
+/** What {@link if820OtaSensorSupport} needs to know about the sensor. */
+export interface If820OtaSensorIdentity {
+  /** GET_DEVICE_VERSION's hardware version (10 = Shimmer3R). */
+  hardwareVersion: number | null | undefined;
+  /** GET_FW_VERSION's firmware identifier (3 = LogAndStream). */
+  firmwareId: number | null | undefined;
+  major: number | null | undefined;
+  minor: number | null | undefined;
+  /** The third field, e.g. 22 in v1.01.022. */
+  internal: number | null | undefined;
+}
+
+export type If820OtaSensorSupport =
+  | { supported: true }
+  | {
+      supported: false;
+      reason: 'unknown' | 'not-shimmer3r' | 'not-logandstream' | 'firmware-too-old';
+      /** One sentence a host can show as it is. */
+      message: string;
+    };
+
+/**
+ * Whether this sensor may have its Bluetooth module updated: a Shimmer3R
+ * running LogAndStream {@link IF820_OTA_MIN_SENSOR_FIRMWARE} or later. A
+ * sensor whose versions were not read is not supported - a host must never
+ * offer the update to a sensor it cannot identify.
+ */
+export function if820OtaSensorSupport(
+  sensor: If820OtaSensorIdentity | null | undefined,
+): If820OtaSensorSupport {
+  const min = IF820_OTA_MIN_SENSOR_FIRMWARE;
+  const minText = `LogAndStream v${min.major}.${String(min.minor).padStart(2, '0')}.${String(min.internal).padStart(3, '0')}`;
+  if (
+    !sensor ||
+    sensor.hardwareVersion == null ||
+    sensor.firmwareId == null ||
+    sensor.major == null ||
+    sensor.minor == null ||
+    sensor.internal == null
+  ) {
+    return {
+      supported: false,
+      reason: 'unknown',
+      message: "The sensor's hardware and firmware versions could not be read.",
+    };
+  }
+  if (sensor.hardwareVersion !== HW_ID_SHIMMER_3R) {
+    return {
+      supported: false,
+      reason: 'not-shimmer3r',
+      message: 'The Bluetooth module update is for Shimmer3R sensors only.',
+    };
+  }
+  if (sensor.firmwareId !== FW_ID_LOGANDSTREAM) {
+    return {
+      supported: false,
+      reason: 'not-logandstream',
+      message: `The Bluetooth module update needs ${minText} or later on the sensor.`,
+    };
+  }
+  const have = [sensor.major, sensor.minor, sensor.internal];
+  const need = [min.major, min.minor, min.internal];
+  for (let i = 0; i < 3; i++) {
+    if (have[i] !== need[i]) {
+      if (have[i] > need[i]) break;
+      return {
+        supported: false,
+        reason: 'firmware-too-old',
+        message: `The Bluetooth module update needs ${minText} or later on the sensor.`,
+      };
+    }
+  }
+  return { supported: true };
+}

@@ -349,6 +349,8 @@ export {
   runIf820OtaUpdate,
   compareIf820Versions,
   isIf820UpdateAvailable,
+  IF820_OTA_MIN_SENSOR_FIRMWARE,
+  if820OtaSensorSupport,
 } from './devices/shimmer3r/if820Ota.js';
 export type {
   If820OtaCharacteristicLike,
@@ -358,6 +360,8 @@ export type {
   If820OtaProgress,
   If820OtaOptions,
   If820OtaResult,
+  If820OtaSensorIdentity,
+  If820OtaSensorSupport,
 } from './devices/shimmer3r/if820Ota.js';
 
 // Host-side directory-tree creation (File System Access API)

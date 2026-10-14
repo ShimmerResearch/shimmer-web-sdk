@@ -91,6 +91,7 @@ import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTranspor
 import {
   IF820_OTA_SERVICE_UUIDS,
   runIf820OtaUpdate,
+  if820OtaSensorSupport,
   type If820OtaOptions,
   type If820OtaResult,
 } from './if820Ota.js';
@@ -2202,6 +2203,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * shortly after. Reconnect with a {@link WebBluetoothTransport} given the
    * same {@link device} to avoid a second picker.
    *
+   * Refused unless the sensor is a Shimmer3R on LogAndStream
+   * {@link IF820_OTA_MIN_SENSOR_FIRMWARE} or later (see
+   * {@link if820OtaSensorSupport}).
+   *
    * A second call while an update is running on this connection is refused
    * ({@link runIf820OtaUpdate} allows one per device).
    *
@@ -2223,6 +2228,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) {
       throw new Error('Stop streaming before updating the Bluetooth module firmware.');
     }
+    /* Both reads are cached after the first on a link, so this normally costs
+     * nothing: a host reads them on connect. */
+    const hw = await this.readDeviceVersion();
+    const fw = await this.readFwVersion();
+    const support = if820OtaSensorSupport({
+      hardwareVersion: hw.hardwareVersion,
+      firmwareId: fw.fwId,
+      major: fw.major,
+      minor: fw.minor,
+      internal: fw.patch,
+    });
+    if (!support.supported) throw new Error(support.message);
     return runIf820OtaUpdate(t.device, image, opts);
   }
 

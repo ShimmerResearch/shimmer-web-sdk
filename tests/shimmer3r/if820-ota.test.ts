@@ -13,6 +13,8 @@ import {
   if820OtaStatusText,
   compareIf820Versions,
   isIf820UpdateAvailable,
+  if820OtaSensorSupport,
+  IF820_OTA_MIN_SENSOR_FIRMWARE,
   type If820OtaCharacteristicLike,
   type If820OtaGattServerLike,
   type If820OtaProgress,
@@ -518,6 +520,41 @@ describe('IF820 OTA helpers', () => {
   });
 });
 
+describe('if820OtaSensorSupport', () => {
+  const s3r = (major: number, minor: number, internal: number, firmwareId = 3) => ({
+    hardwareVersion: 10,
+    firmwareId,
+    major,
+    minor,
+    internal,
+  });
+
+  it('allows a Shimmer3R on LogAndStream v1.01.022 or later', () => {
+    expect(IF820_OTA_MIN_SENSOR_FIRMWARE).toEqual({ major: 1, minor: 1, internal: 22 });
+    expect(if820OtaSensorSupport(s3r(1, 1, 22))).toEqual({ supported: true });
+    expect(if820OtaSensorSupport(s3r(1, 1, 30))).toEqual({ supported: true });
+    expect(if820OtaSensorSupport(s3r(1, 2, 0))).toEqual({ supported: true });
+    expect(if820OtaSensorSupport(s3r(2, 0, 0))).toEqual({ supported: true });
+  });
+
+  it('refuses older firmware, other firmware, other hardware and unknowns', () => {
+    expect(if820OtaSensorSupport(s3r(1, 1, 21))).toMatchObject({
+      supported: false,
+      reason: 'firmware-too-old',
+      message: expect.stringMatching(/LogAndStream v1\.01\.022 or later/),
+    });
+    expect(if820OtaSensorSupport(s3r(1, 0, 99))).toMatchObject({ reason: 'firmware-too-old' });
+    expect(if820OtaSensorSupport(s3r(1, 1, 30, 1))).toMatchObject({ reason: 'not-logandstream' });
+    expect(if820OtaSensorSupport({ ...s3r(1, 1, 30), hardwareVersion: 3 })).toMatchObject({
+      reason: 'not-shimmer3r',
+    });
+    expect(if820OtaSensorSupport({ ...s3r(1, 1, 30), internal: null })).toMatchObject({
+      reason: 'unknown',
+    });
+    expect(if820OtaSensorSupport(null)).toMatchObject({ reason: 'unknown' });
+  });
+});
+
 describe('Shimmer3RClient IF820 update hooks', () => {
   it('requests the OTA services alongside the Shimmer3R service', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
@@ -542,5 +579,38 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     const t = new LoopbackTransport();
     (client as unknown as { _transport: unknown })._transport = t;
     await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(/BLE \(Web Bluetooth\)/);
+  });
+
+  it('refuses the update on a sensor that is not a Shimmer3R on v1.01.022 or later', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820();
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+    };
+    c._transport = t;
+    let fw = { fwId: 3, major: 1, minor: 1, patch: 21 };
+    let hw = 10;
+    c.readDeviceVersion = async () => ({ hardwareVersion: hw });
+    c.readFwVersion = async () => fw;
+
+    await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(
+      /needs LogAndStream v1\.01\.022 or later/,
+    );
+    hw = 3;
+    fw = { fwId: 3, major: 1, minor: 1, patch: 30 };
+    await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(
+      /Shimmer3R sensors only/,
+    );
+    expect(mod.commands).toEqual([]);
+
+    hw = 10;
+    await expect(client.updateBtModuleFirmware(image(10))).resolves.toMatchObject({ bytes: 10 });
   });
 });

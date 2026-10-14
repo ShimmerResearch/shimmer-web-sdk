@@ -567,8 +567,12 @@ so a host does it directly, on the BLE connection it already has open.
 ```ts
 const client = new Shimmer3RClient(); // requests the OTA services in optionalServices
 await client.connect();
+const hw = await client.readDeviceVersion();
+const fw = await client.readFwVersion();
+const sensor = { hardwareVersion: hw.hardwareVersion, firmwareId: fw.fwId,
+                 major: fw.major, minor: fw.minor, internal: fw.patch };
 const current = await client.readBtModuleVersion();
-if (isIf820UpdateAvailable(current, '1.4.18.18')) {
+if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '1.4.18.18')) {
   const image = await (await fetch('firmware/if820/module.ota.bin')).arrayBuffer();
   await client.updateBtModuleFirmware(image, {
     onProgress: ({ currentBytes, totalBytes }) => console.log(currentBytes / totalBytes),
@@ -578,6 +582,12 @@ if (isIf820UpdateAvailable(current, '1.4.18.18')) {
 }
 ```
 
+- **Shimmer3R on LogAndStream v1.01.022 or later only.** That release is the
+  first to recover by itself once the module restarts on its new image, and
+  to repair the SPP MTU an update leaves broken on v1.4.18.x.
+  `if820OtaSensorSupport` says whether a sensor qualifies, with a message to
+  show when it does not, and `updateBtModuleFirmware` refuses any other
+  sensor.
 - **BLE only.** A Classic Bluetooth or USB link cannot reach the module's GATT
   service.
 - **The OTA services must be granted at connect time.** `Shimmer3RClient`
@@ -594,9 +604,9 @@ if (isIf820UpdateAvailable(current, '1.4.18.18')) {
   old firmware running, and the update can be run again.
 - **Never arm reboot-on-disconnect for it.** Rebooting the MCU when the
   link drops after VERIFY cuts the module's power while it is still switching
-  images, and it comes back on the old one. Shimmer3R firmware with DEV-1164
-  reboots the MCU itself once the module is back, so the new version is
-  reported after reconnecting; older firmware needs a power-cycle.
+  images, and it comes back on the old one. LogAndStream v1.01.022 and later
+  reboot the MCU themselves once the module is back, so the new version is
+  reported after reconnecting.
 
 `runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
 for any object that has the `BluetoothDevice`'s `gatt` server. Run end to end
