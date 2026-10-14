@@ -741,6 +741,10 @@ async function runUpdate(
       }
     }
 
+    /* VERIFY is the commit: the module switches images once it passes. A
+     * cancel that landed during the last chunk (onProgress included) must
+     * stop it here. */
+    throwIfAborted(signal);
     onStatus('Verifying the firmware on the Bluetooth module…');
     await send(
       IF820_OTA_COMMAND.VERIFY,

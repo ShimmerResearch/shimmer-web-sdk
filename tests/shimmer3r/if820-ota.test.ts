@@ -474,6 +474,20 @@ describe('runIf820OtaUpdate', () => {
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
   });
 
+  it('never sends VERIFY when cancelled from the last progress callback', async () => {
+    const mod = new FakeIf820();
+    const ctrl = new AbortController();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(1000), {
+      signal: ctrl.signal,
+      onProgress: (p) => {
+        if (p.totalBytes > 0 && p.currentBytes >= p.totalBytes) ctrl.abort();
+      },
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+    expect(mod.commands.at(-1)).toEqual([IF820_OTA_COMMAND.ABORT]);
+  });
+
   it('refuses a second update through another wrapper of the same GATT server', async () => {
     const mod = new FakeIf820();
     const server = mod.server;
