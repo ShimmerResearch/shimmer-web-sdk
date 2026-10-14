@@ -307,6 +307,154 @@ describe('a command pending when the link drops', () => {
   });
 });
 
+describe('a multi-step operation a reconnect splits', () => {
+  /* Review finding: each step of these operations captured the link afresh,
+     so a drop and a reconnect between two steps sent the later one to the
+     device that replaced the first - and a caught reset read as a failed
+     refresh or a missing calibration group. Each operation is now bound to
+     the link it began on, and fails when that link goes. */
+  const INQ = [OPCODES.INQUIRY_RESPONSE, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0x0a, 0x0b, 0x0c];
+  const CALIB: Record<number, number> = {
+    [OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND]: OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
+    [OPCODES.GET_GYRO_CALIBRATION_COMMAND]: OPCODES.GYRO_CALIBRATION_RESPONSE,
+    [OPCODES.GET_MAG_CALIBRATION_COMMAND]: OPCODES.MAG_CALIBRATION_RESPONSE,
+    [OPCODES.GET_WR_ACCEL_CALIBRATION_COMMAND]: OPCODES.WR_ACCEL_CALIBRATION_RESPONSE,
+    [OPCODES.GET_ALT_ACCEL_CALIBRATION_COMMAND]: OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE,
+    [OPCODES.GET_ALT_MAG_CALIBRATION_COMMAND]: OPCODES.ALT_MAG_CALIBRATION_RESPONSE,
+  };
+  /** A device that answers everything these operations send - its ExG banks
+   *  held as written - except `silent`, which it never answers. */
+  function regDevice(silent?: number): LoopbackTransport {
+    const banks = [new Array<number>(10).fill(0), new Array<number>(10).fill(0)];
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      const cmd = Array.from(bytes);
+      if (cmd[0] === silent) return;
+      let reply: number[] = [];
+      if (cmd[0] === OPCODES.SET_EXG_REGS_COMMAND) banks[cmd[1]] = cmd.slice(4, 14);
+      else if (cmd[0] === OPCODES.GET_EXG_REGS_COMMAND) {
+        reply = [OPCODES.EXG_REGS_RESPONSE, 10, ...banks[cmd[1]]];
+      } else if (cmd[0] === OPCODES.INQUIRY_COMMAND) reply = INQ;
+      else if (CALIB[cmd[0]] !== undefined)
+        reply = [CALIB[cmd[0]], ...new Array<number>(21).fill(1)];
+      setTimeout(() => tr.notify(new Uint8Array([ACK, ...reply])), 0);
+    });
+    return t;
+  }
+  const sent = (t: LoopbackTransport): number[] => t.writes.map((w) => w.bytes[0]);
+
+  /** A client on `first`, and a `swap` that drops it and starts connecting `second`. */
+  async function onFirst(): Promise<{
+    client: Shimmer3RClient;
+    first: LoopbackTransport;
+    second: LoopbackTransport;
+    swap: () => void;
+    reconnected: () => Promise<void>;
+  }> {
+    const first = regDevice();
+    const second = regDevice();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    let reconnecting: Promise<void> = Promise.resolve();
+    const swap = (): void => {
+      first.emitDisconnect(new Error('dropped'));
+      reconnecting = client.connect(second);
+    };
+    return { client, first, second, swap, reconnected: () => reconnecting };
+  }
+  /** Run `swap` once, as soon as `client` reports a status starting `prefix`. */
+  function swapAtStatus(client: Shimmer3RClient, prefix: string, swap: () => void): void {
+    client.onStatus = (m) => {
+      if (!m.startsWith(prefix)) return;
+      client.onStatus = null;
+      swap();
+    };
+  }
+  /** Run `swap` once, after the private step `name` has returned for a call `when` picks. */
+  function swapAfterStep(
+    client: Shimmer3RClient,
+    name: string,
+    when: (args: unknown[]) => boolean,
+    swap: () => void,
+  ): void {
+    const priv = client as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    const step = priv[name].bind(client);
+    let done = false;
+    priv[name] = async (...a: unknown[]) => {
+      const r = await step(...a);
+      if (!done && when(a)) {
+        done = true;
+        swap();
+      }
+      return r;
+    };
+  }
+
+  it('setSensors fails, and does not re-inquire the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'Sensors ACK received', swap);
+    await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.INQUIRY_COMMAND);
+  });
+
+  it("readExgConfig does not take chip 2's bank from the next device", async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAfterStep(client, '_readExgChip', (a) => a[0] === 0, swap);
+    await expect(client.readExgConfig()).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.GET_EXG_REGS_COMMAND);
+  });
+
+  it("writeExgConfig does not verify against the next device's registers", async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAfterStep(
+      client,
+      '_writeExpectingAck',
+      (a) => {
+        const cmd = a[0] as Uint8Array;
+        return cmd[0] === OPCODES.SET_EXG_REGS_COMMAND && cmd[1] === 1;
+      },
+      swap,
+    );
+    const bank = new Uint8Array(10);
+    await expect(client.writeExgConfig(bank, bank)).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.GET_EXG_REGS_COMMAND);
+  });
+
+  it('an ExG preset dropped part-way fails, rather than finish on the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    const said: string[] = [];
+    swapAtStatus(client, 'ExG registers written', swap);
+    const onStatus = client.onStatus;
+    client.onStatus = (m) => {
+      said.push(m);
+      onStatus?.(m);
+    };
+    await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.SET_SENSORS_COMMAND);
+    expect(said.some((m) => /preset .* applied/.test(m))).toBe(false);
+  });
+
+  it('readCalibration fails at a drop, rather than read the rest from the next device', async () => {
+    const first = regDevice(OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND);
+    const second = regDevice();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    const reading = client.readCalibration().then(
+      (groups) => groups,
+      (e: Error) => e.message,
+    );
+    await tick(20); // the first group's ACK is awaited
+    first.emitDisconnect(new Error('dropped'));
+    await client.connect(second);
+    expect(await reading).toMatch(/link was reset/);
+    for (const get of Object.keys(CALIB).map(Number)) expect(sent(second)).not.toContain(get);
+  });
+});
+
 describe('the transport of a link that dropped', () => {
   it('has its late traffic and disconnect ignored on the next link', async () => {
     const first = device(answersAll);

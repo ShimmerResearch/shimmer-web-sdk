@@ -1677,6 +1677,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async setSensors(
     sensors: number,
   ): Promise<{ sensors: number; ackRemainder: Uint8Array | null; enabledSensors: number }> {
+    return this._setSensors(sensors, this._linkGeneration);
+  }
+
+  /**
+   * {@link setSensors} on `link`, the link its operation began on: the
+   * re-inquiry goes to the device that took the SET, or nowhere.
+   */
+  private async _setSensors(
+    sensors: number,
+    link: number,
+  ): Promise<{ sensors: number; ackRemainder: Uint8Array | null; enabledSensors: number }> {
     if (!Number.isFinite(sensors)) throw new Error('sensors must be a finite number');
     if (!this._transport) throw new Error('Not connected (RX missing)');
 
@@ -1689,19 +1700,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(
       `SET_SENSORS_CMD → bitmask=0x${sensors.toString(16).toUpperCase().padStart(6, '0')} waiting for ACK…`,
     );
-    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500, link);
     this._emitStatus(
       `Sensors ACK received. Bitmask 0x${sensors.toString(16).toUpperCase().padStart(6, '0')} applied.`,
     );
 
     try {
       this._emitStatus('Performing automatic inquiry to refresh schema…');
-      const info = await this.inquiry();
+      const info = await this._inquiry(link);
       this.enabledSensors = info.schema.enabledSensors;
       this._emitStatus(
         `Inquiry complete. Enabled sensors: 0x${this.enabledSensors.toString(16).toUpperCase()}`,
       );
     } catch (err: unknown) {
+      /* A reset is not a failed refresh: the schema held now is the next
+         link's business, so fail the call rather than report it as set. */
+      if (this._linkGeneration !== link) throw err;
       this._emitStatus(`Inquiry after setSensors failed: ${(err as Error).message}`);
     }
 
@@ -1746,11 +1760,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Send INQUIRY_CMD and parse the response to build the stream schema. */
   async inquiry() {
+    return this._inquiry(this._linkGeneration);
+  }
+
+  /** {@link inquiry} on `link`, the link its operation began on. */
+  private async _inquiry(link: number) {
     this._emitStatus('INQUIRY_CMD → waiting for ACK then RSP…');
-    const link = this._linkGeneration;
     const remainder = await this._writeExpectingAck(
       new Uint8Array([OPCODES.INQUIRY_COMMAND]),
       1500,
+      link,
     );
     const rsp = await this._readInquiryResponse(remainder, 2000, link);
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
@@ -1913,10 +1932,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     ackTimeoutMs = 1500,
     responseTimeoutMs = 2000,
     expectedOffset?: number,
+    // Defaulted before the write, so a reset at any later await is seen (see _waitForAck)
+    link = this._linkGeneration,
   ): Promise<Uint8Array> {
-    // Before the write, so a reset at any later await is seen (see _waitForAck)
-    const link = this._linkGeneration;
-    const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs);
+    const remainder = await this._writeExpectingAck(cmd, ackTimeoutMs, link);
     const first =
       remainder && remainder[0] === respOpcode
         ? remainder
@@ -2680,10 +2699,21 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *   the control plane, which the data plane owns for the duration of a stream.
    */
   async readExgConfig(timeoutMs = 2000): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
+    return this._readExgConfig(timeoutMs, this._linkGeneration);
+  }
+
+  /**
+   * {@link readExgConfig} on `link`, the link its operation began on: both
+   * banks come from one device.
+   */
+  private async _readExgConfig(
+    timeoutMs: number,
+    link: number,
+  ): Promise<{ exg1: Uint8Array; exg2: Uint8Array }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
-    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs);
-    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs);
+    const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs, link);
+    const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs, link);
     /* Cache for the streaming conversion: the millivolt factor needs the PGA
        gain and the reference voltage, and this is the authoritative answer for
        both — the chip's own registers rather than what the stored image says
@@ -2702,7 +2732,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * {@link _readLengthPrefixedResponse} and inherits its ACK-piggyback handling,
    * notification reassembly, and tolerance of firmware that omits the prefix.
    */
-  private async _readExgChip(chip: ExgChipIndex, timeoutMs: number): Promise<Uint8Array> {
+  private async _readExgChip(
+    chip: ExgChipIndex,
+    timeoutMs: number,
+    link: number,
+  ): Promise<Uint8Array> {
     return this._readLengthPrefixedResponse(
       buildGetExgRegsCommand(chip),
       OPCODES.EXG_REGS_RESPONSE,
@@ -2711,6 +2745,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       1,
       1500,
       timeoutMs,
+      undefined,
+      link,
     );
   }
 
@@ -2734,6 +2770,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * @throws RangeError when either bank is not exactly 10 bytes.
    */
   async writeExgConfig(exg1: Uint8Array, exg2: Uint8Array): Promise<void> {
+    return this._writeExgConfig(exg1, exg2, this._linkGeneration);
+  }
+
+  /**
+   * {@link writeExgConfig} on `link`, the link its operation began on. Both
+   * banks and the read-back go to one device: chip 2's bank must not go to
+   * whatever replaced it, nor the replacement's registers pass the verify.
+   */
+  private async _writeExgConfig(exg1: Uint8Array, exg2: Uint8Array, link: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Cannot write ExG registers while streaming');
     if (exg1.length !== EXG_BANK_LENGTH || exg2.length !== EXG_BANK_LENGTH) {
@@ -2745,10 +2790,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const b1 = this._injectOversamplingRatio(exg1);
     const b2 = this._injectOversamplingRatio(exg2);
 
-    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP1, b1), 1500);
-    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP2, b2), 1500);
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP1, b1), 1500, link);
+    await this._writeExpectingAck(buildSetExgRegsCommand(EXG_CHIP2, b2), 1500, link);
 
-    const readBack = await this.readExgConfig();
+    const readBack = await this._readExgConfig(2000, link);
     if (
       !exgBanksEqualIgnoringStatus(b1, readBack.exg1) ||
       !exgBanksEqualIgnoringStatus(b2, readBack.exg2)
@@ -2794,6 +2839,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Cannot configure ExG while streaming');
+    // Every step on one link: a preset half-applied must not finish on the next device
+    const link = this._linkGeneration;
 
     // 'off' — LIVE disable. Java never pushes zeroed register banks at the chip:
     // the ADS1292R forces its must-be bits on write (CONFIG2 bit7 = 1 etc.,
@@ -2805,7 +2852,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // path (`applyExgPreset('off')`) does zero the InfoMem banks — InfoMem is
     // passive storage, and that is what detectExgPreset keys 'off' off.
     if (preset === 'off') {
-      await this.setSensors(clearExgResolutionFlags(this.enabledSensors));
+      await this._setSensors(clearExgResolutionFlags(this.enabledSensors), link);
       this._emitStatus("ExG preset 'off' applied (ExG chips disabled). Schema updated.");
       return;
     }
@@ -2814,7 +2861,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // PRESERVE path is honoured on hardware whose joined-clock state cannot be
     // inferred from the hardware id (a classic Shimmer3 with a rev >= 4 unified
     // ExG board). On a Shimmer3R the banks are fully determined by the preset.
-    const current = await this.readExgConfig();
+    const current = await this._readExgConfig(2000, link);
     const result = applyExgPreset(
       {
         exg1: current.exg1,
@@ -2827,9 +2874,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
       resolution,
     );
 
-    await this.writeExgConfig(result.exg1, result.exg2);
+    await this._writeExgConfig(result.exg1, result.exg2, link);
     // Enabled sensors last; setSensors re-inquires and refreshes the schema.
-    await this.setSensors(result.enabledSensors);
+    await this._setSensors(result.enabledSensors, link);
     this._emitStatus(`ExG preset '${preset}' (${resolution}) applied. Schema updated.`);
   }
 
@@ -2896,6 +2943,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readCalibration(timeoutMs = 1500): Promise<InertialGroup[]> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    // Every group from one device: the next link's blocks are not this one's
+    const link = this._linkGeneration;
     const plan: Array<{ group: InertialGroup; get: number; resp: number }> = [
       {
         group: 'lnAccel',
@@ -2931,7 +2980,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const done: InertialGroup[] = [];
     for (const { group, get, resp } of plan) {
       try {
-        const cal = await this._readOneCalibration(group, get, resp, timeoutMs);
+        const cal = await this._readOneCalibration(group, get, resp, timeoutMs, link);
         if (cal) {
           /* With the range it was read at: these commands answer for the
              CONFIGURED range and do not say which that was, so the block stops
@@ -2940,6 +2989,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
           done.push(group);
         }
       } catch (err: unknown) {
+        /* A reset is not a missing calibration: skipping on would return a
+           partial result and reselect against the next link's ranges. */
+        if (this._linkGeneration !== link) throw err;
         this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
       }
     }
@@ -2952,9 +3004,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     getOpcode: number,
     respOpcode: number,
     timeoutMs: number,
+    link: number,
   ): Promise<KinematicCalibration | null> {
-    const link = this._linkGeneration;
-    const remainder = await this._writeExpectingAck(new Uint8Array([getOpcode]), timeoutMs);
+    const remainder = await this._writeExpectingAck(new Uint8Array([getOpcode]), timeoutMs, link);
     const rsp =
       remainder && remainder[0] === respOpcode
         ? remainder
@@ -4299,11 +4351,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
     });
   }
 
+  /**
+   * @param link the link the command belongs to: by default the current one,
+   *   or, for one step of a multi-step operation, the link the operation began
+   *   on - which fails the step at once if that link has since been reset.
+   */
   private async _writeExpectingAck(
     u8: Uint8Array,
     ackTimeoutMs = 1000,
+    link = this._linkGeneration,
   ): Promise<Uint8Array | null> {
-    const link = this._linkGeneration;
     this._expectingAck++;
     try {
       /* The write is asynchronous, and the link can be reset while it is
