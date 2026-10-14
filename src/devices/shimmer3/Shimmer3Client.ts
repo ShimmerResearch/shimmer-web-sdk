@@ -194,6 +194,16 @@ export class Shimmer3Client extends BaseShimmerClient {
    * nor goes on issuing commands over the next link.
    */
   private readonly _link = new LinkGeneration();
+
+  /**
+   * Whether the link in place is open: set once {@link connect}'s transport
+   * has connected, cleared by every reset. A drop leaves the transport in
+   * place for an explicit {@link disconnect}, so `_transport` alone said a
+   * dropped link was still there, and a command issued before the next
+   * `connect()` - from `onDisconnect`, say - took the new generation and was
+   * written to the dead transport.
+   */
+  private _linkLive = false;
   /**
    * The chain the status and battery reads queue on, so they run one at a
    * time. See {@link _readInstream}.
@@ -394,6 +404,8 @@ export class Shimmer3Client extends BaseShimmerClient {
 
     this._emitStatus('Opening RFCOMM connection…');
     await t.connect();
+    // Unless a disconnect or drop has already ended it during the await
+    if (this._link.isCurrent(link)) this._linkLive = true;
     /* Same split as Shimmer3RClient: the name the link reported, and no
      * invented one where it reported none. `t` rather than `this._transport`,
      * so a disconnect() racing the await above cannot make this describe a
@@ -522,6 +534,7 @@ export class Shimmer3Client extends BaseShimmerClient {
      * and does not uncount what the next link has counted. */
     this._awaitInq = 0;
     this._awaitCmd = 0;
+    this._linkLive = false;
     this._link.reset();
   }
 
@@ -643,7 +656,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     link: number,
   ): Promise<{ sensors: number; enabledSensors: number }> {
     if (!Number.isFinite(sensors)) throw new Error('sensors must be a finite number');
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
 
     sensors = (sensors >>> 0) & 0xffffff;
     const cmd = new Uint8Array([
@@ -677,10 +690,11 @@ export class Shimmer3Client extends BaseShimmerClient {
   async setSamplingRate(
     rateHz: number,
   ): Promise<{ requestedHz: number; appliedHz: number; divisor: number }> {
+    const link = this._link.current;
     if (!Number.isFinite(rateHz) || rateHz <= 0) {
       throw new Error('Sampling rate must be a positive number (Hz)');
     }
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
 
     let divisor = Math.floor(32768 / rateHz);
     divisor = Math.max(1, Math.min(0xffff, divisor));
@@ -690,7 +704,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       (divisor >> 8) & 0xff,
     ]);
     this._emitStatus(`SET_SAMPLING_RATE → ${rateHz} Hz (divisor=${divisor}) waiting for ACK…`);
-    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
     const appliedHz = 32768 / divisor;
     this.samplingRateHz = appliedHz;
     this._emitStatus(`Sampling rate ACKed. Applied ≈ ${appliedHz.toFixed(3)} Hz`);
@@ -702,14 +716,15 @@ export class Shimmer3Client extends BaseShimmerClient {
    * @param gsrRange 0 = 8–63 kΩ, 1 = 63–220 kΩ, 2 = 220–680 kΩ, 3 = 680–4700 kΩ, 4 = Auto.
    */
   async setGSRRange(gsrRange: number): Promise<{ gsrRange: number }> {
+    const link = this._link.current;
     if (!Number.isInteger(gsrRange) || gsrRange < 0 || gsrRange > 4) {
       throw new Error('gsrRange must be 0–4');
     }
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
 
     const cmd = new Uint8Array([OPCODES.SET_GSR_RANGE_COMMAND, gsrRange & 0xff]);
     this._emitStatus('SET_GSR_RANGE → waiting for ACK…');
-    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
     this.gsrRangeSetting = gsrRange;
     this._emitStatus('SET_GSR_RANGE (ACK received).');
     return { gsrRange };
@@ -720,12 +735,13 @@ export class Shimmer3Client extends BaseShimmerClient {
    * @param expPower 0 = disable, 1 = enable.
    */
   async setInternalExpPower(expPower: 0 | 1): Promise<{ expPower: number }> {
+    const link = this._link.current;
     if (expPower !== 0 && expPower !== 1) throw new Error('expPower must be 0 or 1');
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
 
     const cmd = new Uint8Array([OPCODES.SET_INTERNAL_EXP_POWER_ENABLE_COMMAND, expPower]);
     this._emitStatus(`SET_INTERNAL_EXP_POWER → ${expPower ? 'ON' : 'OFF'} waiting for ACK…`);
-    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
     this.ExpPower = expPower;
     try {
       this.onExpPowerChanged?.(expPower);
@@ -760,7 +776,7 @@ export class Shimmer3Client extends BaseShimmerClient {
    *   the versions, or on firmware without the ExG command set.
    */
   private _assertExgSupported(): void {
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
     if (this.firmwareVersion == null || this.deviceVersion == null) {
       throw new Error('ExG requires a completed connect handshake (firmware version unknown)');
     }
@@ -859,7 +875,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   async getRtcTime(
     timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<{ ticks: bigint; unixMs: number }> {
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
     if (this._streaming) throw new Error('Cannot read the real-world clock while streaming');
     this._assertRwcSupported('read');
 
@@ -892,13 +908,14 @@ export class Shimmer3Client extends BaseShimmerClient {
    * time does, which is why any existing anchor is dropped.
    */
   async setRtcTime(unixMs: number): Promise<void> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     if (!Number.isFinite(unixMs)) throw new Error('setRtcTime: unixMs must be a finite number.');
     this._assertRwcSupported('write');
     const cmd = new Uint8Array(9);
     cmd[0] = OPCODES.SET_RWC_COMMAND;
     cmd.set(msToRtcBytesLE(unixMs), 1);
-    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
     this._timeline.clearAnchor();
     this._emitStatus('RWC set');
   }
@@ -981,7 +998,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   async readPressureCalibration(
     timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<PressureCalibration | null> {
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
     if (this._streaming) throw new Error('Cannot read the pressure calibration while streaming');
 
     const attempts: Array<{ cmd: number; resp: number; label: string; legacy: 0 | 1 | null }> = [
@@ -1184,7 +1201,7 @@ export class Shimmer3Client extends BaseShimmerClient {
 
   /** {@link inquiry} on `link`, the link its operation began on. */
   private async _inquiry(link: number): Promise<Shimmer3InquiryResult> {
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
     this._emitStatus('INQUIRY → waiting for response…');
     await this._write(new Uint8Array([OPCODES.INQUIRY_COMMAND]), link);
     const rsp = await this._waitForResponse(
@@ -1198,6 +1215,11 @@ export class Shimmer3Client extends BaseShimmerClient {
     const info = interpretShimmer3InquiryResponse(rsp, this._timestampFmt, (m) =>
       this._emitStatus(`⚠️ ${m}`),
     );
+    /* Each status line runs an application callback, which can end the link.
+       The old device's inquiry must not then overwrite the next device's
+       schema and settings, nor be returned as if it were current. */
+    const gone = (): Error => linkResetError('the inquiry to be applied');
+    this._link.throwIfReset(link, gone);
     this.schema = info.schema;
     this.samplingRateHz = info.samplingRateHz;
     this.enabledSensors = info.schema.enabledSensors;
@@ -1226,6 +1248,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     } catch (e) {
       this._log('onInquiry handler error', e);
     }
+    this._link.throwIfReset(link, gone);
     return info;
   }
 
@@ -1247,11 +1270,13 @@ export class Shimmer3Client extends BaseShimmerClient {
    * firmware NACKs the unknown feature id.
    */
   async setRebootOnDisconnect(enabled: boolean): Promise<void> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
     await this._writeExpectingAck(
       new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
       SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS,
+      link,
     );
     this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
   }
@@ -1358,7 +1383,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     const link = this._link.current;
     const read = async (): Promise<Uint8Array> => {
       this._link.throwIfReset(link, () => linkResetError(`the ${what} read's turn`));
-      if (!this._transport) throw new Error('Not connected');
+      if (!this._linkLive) throw new Error('Not connected');
       if (this._streaming) throw new Error(`Cannot read the ${what} while streaming`);
       this._assertRequestSupported(what);
       // Only for a write that fails: a link reset fails the wait by itself.
@@ -1470,7 +1495,8 @@ export class Shimmer3Client extends BaseShimmerClient {
    * 0..2031 cover absolute EEPROM bytes 16..2047.
    */
   async readDaughterCardMem(offset: number, length: number): Promise<Uint8Array> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
       throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
     }
@@ -1485,7 +1511,6 @@ export class Shimmer3Client extends BaseShimmerClient {
       offset & 0xff,
       (offset >> 8) & 0xff,
     ]);
-    const link = this._link.current;
     await this._write(cmd, link);
     const rsp = await this._waitForResponse(
       OPCODES.DAUGHTER_CARD_MEM_RESPONSE,
@@ -1517,7 +1542,8 @@ export class Shimmer3Client extends BaseShimmerClient {
    * (one page), which the firmware enforces too.
    */
   async readInfoMem(address: number, length: number): Promise<Uint8Array> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
       throw new Error('InfoMem address must be an integer in 0..65535.');
     }
@@ -1543,7 +1569,6 @@ export class Shimmer3Client extends BaseShimmerClient {
       address & 0xff,
       (address >> 8) & 0xff,
     ]);
-    const link = this._link.current;
     await this._write(cmd, link);
     const rsp = await this._waitForResponse(
       OPCODES.INFOMEM_RESPONSE,
@@ -1611,7 +1636,8 @@ export class Shimmer3Client extends BaseShimmerClient {
    * {@link readDaughterCardMem}). Max 128 bytes per write.
    */
   async writeDaughterCardMem(offset: number, data: Uint8Array): Promise<void> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     if (!Number.isInteger(offset) || offset < 0 || offset > 2031) {
       throw new Error('Daughter-card mem offset must be an integer in 0..2031.');
     }
@@ -1626,7 +1652,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     cmd[2] = offset & 0xff;
     cmd[3] = (offset >> 8) & 0xff;
     cmd.set(data, 4);
-    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
     this._emitStatus('Daughter-card mem write ACKed');
   }
 
@@ -1635,10 +1661,10 @@ export class Shimmer3Client extends BaseShimmerClient {
   // ---------------------------------------------------------------------------
 
   override async startStreaming(): Promise<void> {
-    if (!this._transport) throw new Error('Not connected');
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
-    const link = this._link.current;
     // Stale buffered bytes (e.g. residual post-stop stream data) would desync
     // the ACK wait for START — drain to quiescence and discard them first. A
     // clean state (empty buffer) skips this entirely.
@@ -1677,8 +1703,8 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   override async stopStreaming(): Promise<void> {
-    this._emitStatus('STOP_STREAMING → sending, then draining residual stream…');
     const link = this._link.current;
+    this._emitStatus('STOP_STREAMING → sending, then draining residual stream…');
     try {
       await this._write(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]), link);
     } catch (err: unknown) {
@@ -1959,7 +1985,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   async readCalibration(
     timeoutMs: number = SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<InertialGroup[]> {
-    if (!this._transport) throw new Error('Not connected');
+    if (!this._linkLive) throw new Error('Not connected');
     const plan: Array<{ group: InertialGroup; get: number; resp: number }> = [
       {
         group: 'lnAccel',
@@ -2022,7 +2048,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     return this._link.run(
       link,
       async () => {
-        if (!this._transport) throw new Error('Not connected');
+        if (!this._transport || !this._linkLive) throw new Error('Not connected');
         this._log('Write', u8);
         await this._transport.write(u8);
       },
@@ -2031,14 +2057,14 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   /**
-   * @param link the link the operation began on. The default, the link now in
-   *   place, suits only an operation's first step: a later step passes the link
-   *   its operation captured before its first await.
+   * @param link the link the operation began on, captured before its first
+   *   await or callback. Required: read here, the link in place could already
+   *   be the next one, since any status line can run a handler that ends it.
    */
   private async _writeExpectingAck(
     u8: Uint8Array,
     ackTimeoutMs: number,
-    link = this._link.current,
+    link: number,
   ): Promise<void> {
     await this._write(u8, link);
     await this._waitForAck(ackTimeoutMs, link);

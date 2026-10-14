@@ -307,6 +307,48 @@ describe('an operation the drop strands part-way', () => {
   });
 });
 
+describe('a status callback that ends the link', () => {
+  it("before a SET's write leaves the command unsent, not ACKed by the dropped transport", async () => {
+    const first = device();
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    client.onStatus = (m) => {
+      if (m.startsWith('SET_GSR_RANGE →')) first.emitDisconnect(new Error('dropped'));
+    };
+    await expect(client.setGSRRange(2)).rejects.toThrow(/link was reset|Not connected/);
+    expect(client.gsrRangeSetting).toBe(0);
+    expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.SET_GSR_RANGE_COMMAND);
+  });
+
+  it("during an inquiry's warnings keeps the old device's schema from being applied", async () => {
+    // Channel 0xEE is one this SDK cannot describe, so the inquiry warns about it
+    const unknownChannel = [INQ_RSP, 0x80, 0x02, 0x00, 0x00, 0x00, 0x05, 0x01, 0x01, 0xee];
+    const first = device((cmd) =>
+      cmd[0] === OPCODES.INQUIRY_COMMAND ? [ACK, ...unknownChannel] : [ACK],
+    );
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    client.onStatus = (m) => {
+      if (m.startsWith('⚠️')) first.emitDisconnect(new Error('dropped'));
+    };
+    await expect(client.inquiry()).rejects.toThrow(/link was reset/);
+    expect(client.samplingRateHz).toBe(0); // the inquiry says 51.2 Hz
+  });
+});
+
+describe('a link that dropped, before the next connect', () => {
+  it('refuses a command rather than write it to the dropped transport', async () => {
+    const first = device();
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    first.emitDisconnect(new Error('dropped'));
+    const before = first.writes.length;
+    await expect(client.setSamplingRate(51.2)).rejects.toThrow(/Not connected/);
+    expect(first.writes.length).toBe(before);
+    expect(client.samplingRateHz).toBe(0);
+  });
+});
+
 describe('the transport of a link that dropped', () => {
   it('has its late traffic and disconnect ignored on the next link', async () => {
     const first = device();
