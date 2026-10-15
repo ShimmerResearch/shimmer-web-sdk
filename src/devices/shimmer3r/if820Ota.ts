@@ -236,10 +236,8 @@ export interface If820OtaOptions {
    * Called when the first data write is refused or stalls and the update is
    * about to start again at a smaller chunk. `reconnecting` is true when the
    * link is being dropped and re-opened to do so: a host sees that as a
-   * disconnect, which is part of the update and not the end of it. The update
-   * re-opens only the GATT server; a client whose transport was on that link
-   * (e.g. {@link Shimmer3RClient}) must reconnect before its next command,
-   * which it has to anyway once a successful update restarts the module.
+   * disconnect, which is part of the update and not the end of it. See
+   * `reconnect` for a host whose own transport is on the link.
    */
   onRetry?: (info: { fromChunkSize: number; toChunkSize: number; reconnecting: boolean }) => void;
   /** Bound on the first data write. */
@@ -248,6 +246,15 @@ export interface If820OtaOptions {
   reconnectAttempts?: number;
   /** Pause before each reconnect attempt. */
   reconnectDelayMs?: number;
+  /**
+   * Re-opens the link after a stalled first write is dropped, in place of
+   * `gatt.connect()`. A host whose own transport is on this link passes one
+   * that reconnects that transport, so its characteristics, notifications and
+   * protocol state are rebuilt as well, not just the update's;
+   * {@link Shimmer3RClient.updateBtModuleFirmware} does. The update then
+   * re-opens its own characteristics on the new connection.
+   */
+  reconnect?: () => Promise<void>;
   /** Bound on each command's status answer. */
   responseTimeoutMs?: number;
   /** Bound on the VERIFY answer. */
@@ -574,7 +581,8 @@ async function runUpdate(
         `Reconnecting to the Bluetooth module (attempt ${attempt} of ${reconnectAttempts})…`,
       );
       try {
-        await server.connect();
+        if (opts.reconnect) await opts.reconnect();
+        else await server.connect();
         await open();
         return;
       } catch (e) {

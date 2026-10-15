@@ -483,6 +483,23 @@ describe('runIf820OtaUpdate', () => {
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
   });
 
+  it('re-opens a stalled link through the reconnect hook when one is given', async () => {
+    const mod = new FakeIf820({ stallAbove: 63, stallClearsOnReconnect: true });
+    const server = mod.server;
+    let hookCalls = 0;
+    const result = await runIf820OtaUpdate({ gatt: server }, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      reconnect: async () => {
+        hookCalls++;
+        await server.connect();
+      },
+    });
+    expect(hookCalls).toBe(1);
+    expect(mod.connects).toBe(1);
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
+  });
+
   it('cancels at once during the wait before a fallback reconnect', async () => {
     const mod = new FakeIf820({ stallAbove: 63 });
     const ctrl = new AbortController();
@@ -755,5 +772,37 @@ describe('Shimmer3RClient IF820 update hooks', () => {
 
     hw = 10;
     await expect(client.updateBtModuleFirmware(image(10))).resolves.toMatchObject({ bytes: 10 });
+  });
+
+  it('reconnects through its own transport when the update falls back', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820({ stallAbove: 63, stallClearsOnReconnect: true });
+    const server = mod.server;
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+      connect: (transport?: unknown) => Promise<void>;
+    };
+    c._transport = t;
+    c.readDeviceVersion = async () => ({ hardwareVersion: 10 });
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+    const reconnectedWith: unknown[] = [];
+    c.connect = async (transport?: unknown) => {
+      reconnectedWith.push(transport);
+      await server.connect();
+    };
+
+    const result = await client.updateBtModuleFirmware(image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+    });
+    expect(reconnectedWith).toEqual([t]);
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
   });
 });

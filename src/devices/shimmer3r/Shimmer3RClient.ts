@@ -2240,7 +2240,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
       internal: fw.patch,
     });
     if (!support.supported) throw new Error(support.message);
-    return runIf820OtaUpdate(t.device, image, opts);
+    /* A fallback reconnect goes through this client, on the same transport and
+     * so the same device (no picker), so the client's own link is rebuilt with
+     * it rather than left holding the dropped connection's handles. */
+    return runIf820OtaUpdate(t.device, image, {
+      ...opts,
+      reconnect: opts.reconnect ?? (() => this.connect(t)),
+    });
   }
 
   /**
