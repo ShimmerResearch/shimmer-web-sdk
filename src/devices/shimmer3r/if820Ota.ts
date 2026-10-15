@@ -282,6 +282,22 @@ class ChunkRefused extends Error {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** {@link sleep}, cut short by a cancel, which then rejects with AbortError. */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function abortError(): Error {
   const err = new Error('Bluetooth module update cancelled');
   err.name = 'AbortError';
@@ -553,7 +569,7 @@ async function runUpdate(
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= reconnectAttempts; attempt++) {
       throwIfAborted(signal);
-      await sleep(reconnectDelayMs);
+      await sleepUnlessAborted(reconnectDelayMs, signal);
       onStatus(
         `Reconnecting to the Bluetooth module (attempt ${attempt} of ${reconnectAttempts})…`,
       );

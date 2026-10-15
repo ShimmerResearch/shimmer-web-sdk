@@ -483,6 +483,21 @@ describe('runIf820OtaUpdate', () => {
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
   });
 
+  it('cancels at once during the wait before a fallback reconnect', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(2000), {
+      signal: ctrl.signal,
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 10_000,
+      onRetry: () => setTimeout(() => ctrl.abort(), 20),
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(mod.connects).toBe(0);
+  });
+
   it('does not take a late CONTINUE / MORE_DATA for the answer to VERIFY', async () => {
     const mod = new FakeIf820({
       lateStatusesAfterLastWrite: [IF820_OTA_STATUS.CONTINUE, IF820_OTA_STATUS.MORE_DATA],

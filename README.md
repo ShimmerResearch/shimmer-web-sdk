@@ -565,6 +565,12 @@ protocol `WsOtaUpgrade.exe` uses. The Shimmer3R's own MCU cannot reflash it,
 so a host does it directly, on the BLE connection it already has open.
 
 ```ts
+import {
+  Shimmer3RClient,
+  if820OtaSensorSupport,
+  isIf820UpdateAvailable,
+} from '@shimmerresearch/shimmer-web-sdk';
+
 const client = new Shimmer3RClient(); // requests the OTA services in optionalServices
 await client.connect();
 const hw = await client.readDeviceVersion();
