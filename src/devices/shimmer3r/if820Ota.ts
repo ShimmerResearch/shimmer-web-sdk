@@ -597,6 +597,10 @@ async function runUpdate(
   };
 
   const send = async (op: number, param: number | undefined, what: string): Promise<void> => {
+    /* Before the write is even started: a callback just before this one
+     * (onStatus('Verifying…') among them) may have cancelled, and a VERIFY
+     * once written lets the module switch images. */
+    throwIfAborted(signal);
     log(`control point → ${what}`);
     /* Bounded and cancellable like the data writes: a control-point write
      * that hangs on a failing link would otherwise never reach the response
