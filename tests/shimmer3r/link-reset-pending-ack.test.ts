@@ -469,6 +469,19 @@ describe('a multi-step operation a reconnect splits', () => {
     expect(said.some((m) => /preset .* applied/.test(m))).toBe(false);
   });
 
+  it("the 'off' preset fails when the link is disconnected as its sensors are set", async () => {
+    const { client } = await onFirst();
+    let disconnected: Promise<void> = Promise.resolve();
+    const said: string[] = [];
+    client.onStatus = (m) => {
+      said.push(m);
+      if (m.startsWith('Inquiry complete')) disconnected = client.disconnect();
+    };
+    await expect(client.applyExgPresetLive('off', '16bit')).rejects.toThrow(/link was reset/);
+    await disconnected;
+    expect(said.some((m) => /preset 'off' applied/.test(m))).toBe(false);
+  });
+
   it("readExgConfig does not take chip 2's bank from the next device", async () => {
     const { client, second, swap, reconnected } = await onFirst();
     swapAfterStep(client, '_readExgChip', (a) => a[0] === 0, swap);

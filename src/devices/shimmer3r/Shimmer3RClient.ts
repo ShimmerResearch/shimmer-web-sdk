@@ -2877,6 +2877,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // passive storage, and that is what detectExgPreset keys 'off' off.
     if (preset === 'off') {
       await this._setSensors(clearExgResolutionFlags(this.enabledSensors), link);
+      if (this._linkGeneration !== link) throw this._linkResetError('the preset to be applied');
       this._emitStatus("ExG preset 'off' applied (ExG chips disabled). Schema updated.");
       return;
     }
