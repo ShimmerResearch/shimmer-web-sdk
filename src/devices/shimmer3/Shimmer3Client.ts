@@ -613,10 +613,17 @@ export class Shimmer3Client extends BaseShimmerClient {
      * first and emitting later would inspect every head byte against the gate
      * state as it was before any response was delivered, so a stray 0x02 sharing
      * a read with a genuine INQUIRY_RESPONSE would still look awaited and get
-     * framed - swallowing the ACK behind it. */
+     * framed - swallowing the ACK behind it.
+     *
+     * Bound to the link the bytes came over. A status push runs
+     * onDeviceStatus synchronously, and a handler that disconnects or
+     * reconnects resets the link mid-drain: the bytes still to come are the
+     * old link's, so the drain stops there, and its remainder must not
+     * overwrite the next link's buffer. */
+    const link = this._link.current;
     const { rest } = drainByteStream(this._rxBuf, {
       messageLength: shimmer3ControlMessageLength,
-      inspect: (buf) => this._inspectControlHead(buf),
+      inspect: (buf) => (this._link.isCurrent(link) ? this._inspectControlHead(buf) : 'stop'),
       onMessage: (msg) => {
         this._emitTemp(msg);
         this._maybeEmitDeviceStatus(msg);
@@ -628,7 +635,7 @@ export class Shimmer3Client extends BaseShimmerClient {
             : `drainControl: dropping gated byte 0x${byte.toString(16)}`,
         ),
     });
-    this._rxBuf = rest;
+    if (this._link.isCurrent(link)) this._rxBuf = rest;
   }
 
   /**
@@ -1814,6 +1821,10 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _parseStream(): void {
     if (!this.schema) return;
     const sch = this.schema;
+    /* onStreamFrame runs synchronously, and a handler that disconnects or
+       reconnects resets the link between frames. What is left is the old
+       link's: decode none of it, and leave the next link's buffer alone. */
+    const link = this._link.current;
     const preamble = sch.dataPreambleByte;
     const frameBytes = sch.frameBytes >>> 0;
     const tsBytes = sch.timestampFmt === 'u16' ? 2 : 3;
@@ -1870,6 +1881,7 @@ export class Shimmer3Client extends BaseShimmerClient {
           this._lastTs = ts;
           this._calibrateData(oc);
           this.onStreamFrame?.(oc);
+          if (!this._link.isCurrent(link)) return;
           buf = buf.subarray(frameBytes);
         } catch (e) {
           this._log('frame decode error → sliding 1 byte', (e as Error).message);

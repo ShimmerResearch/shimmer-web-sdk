@@ -423,6 +423,51 @@ describe('disconnect()', () => {
   });
 });
 
+describe('a callback that ends the link mid-parse', () => {
+  const rxBuf = (c: Shimmer3Client): Uint8Array => (c as unknown as { _rxBuf: Uint8Array })._rxBuf;
+  const statusPush = (status0: number): number[] => [
+    OPCODES.INSTREAM_CMD_RESPONSE,
+    OPCODES.STATUS_RESPONSE,
+    status0,
+  ];
+
+  it('stops the control drain, and leaves the old remainder out of the buffer', async () => {
+    const first = device();
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    const pushed: number[] = [];
+    client.onDeviceStatus = () => {
+      pushed.push(pushed.length);
+      first.emitDisconnect(new Error('dropped'));
+    };
+    // Two pushes and the start of a third, in one chunk
+    first.notify([...statusPush(0x01), ...statusPush(0x02), OPCODES.INSTREAM_CMD_RESPONSE]);
+    expect(pushed).toEqual([0]); // the second came after its link had ended
+    expect(rxBuf(client).length).toBe(0);
+  });
+
+  it('stops the stream parser after the frame whose callback ended it', async () => {
+    const first = device((cmd) =>
+      cmd[0] === OPCODES.INQUIRY_COMMAND ? [ACK, ...INQUIRY_MSG] : [ACK],
+    );
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    await client.inquiry();
+    await client.startStreaming();
+    const frameBytes = (client as unknown as { schema: { frameBytes: number } }).schema.frameBytes;
+    const frame = [0x00, ...new Array<number>(frameBytes - 1).fill(0x10)];
+    let frames = 0;
+    client.onStreamFrame = () => {
+      frames++;
+      first.emitDisconnect(new Error('dropped'));
+    };
+    // Four frames in one chunk: three decode on a link that stays up
+    first.notify([...frame, ...frame, ...frame, ...frame]);
+    expect(frames).toBe(1);
+    expect(rxBuf(client).length).toBe(0);
+  });
+});
+
 describe('a link that dropped, before the next connect', () => {
   it('refuses a command rather than write it to the dropped transport', async () => {
     const first = device();
