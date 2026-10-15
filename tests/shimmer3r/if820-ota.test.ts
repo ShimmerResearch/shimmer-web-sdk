@@ -87,6 +87,9 @@ interface FakeModuleOptions {
   dropOnServiceLookup?: boolean;
   /** Never complete the control-point write of this command. */
   hangWriteOf?: number;
+  /** Notify these flow-control statuses as VERIFY arrives, ahead of its
+   * answer - as hints sent for the last data write but delivered late. */
+  lateStatusesAfterLastWrite?: number[];
 }
 
 class FakeIf820 {
@@ -165,6 +168,9 @@ class FakeIf820 {
     this.commands.push(cmd);
     const op = cmd[0];
     if (op === this.opts.hangWriteOf) return new Promise<void>(() => {});
+    if (op === IF820_OTA_COMMAND.VERIFY) {
+      for (const late of this.opts.lateStatusesAfterLastWrite ?? []) this.control.notify([late]);
+    }
     if (op === this.opts.silentOn) return;
     const param = bytes.length >= 5 ? new DataView(bytes.buffer).getUint32(1, true) : undefined;
     switch (op) {
@@ -475,6 +481,23 @@ describe('runIf820OtaUpdate', () => {
     expect(Date.now() - started).toBeLessThan(2000);
     expect(mod.disconnects).toBe(1);
     expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+  });
+
+  it('does not take a late CONTINUE / MORE_DATA for the answer to VERIFY', async () => {
+    const mod = new FakeIf820({
+      lateStatusesAfterLastWrite: [IF820_OTA_STATUS.CONTINUE, IF820_OTA_STATUS.MORE_DATA],
+    });
+    const lines: string[] = [];
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, image(1000), {
+      onLog: (l) => lines.push(l),
+    });
+    expect(result.bytes).toBe(1000);
+    expect(mod.commands.map((c) => c[0])).toEqual([
+      IF820_OTA_COMMAND.PREPARE_DOWNLOAD,
+      IF820_OTA_COMMAND.DOWNLOAD,
+      IF820_OTA_COMMAND.VERIFY,
+    ]);
+    expect(lines.filter((l) => /skipping a late/.test(l))).toHaveLength(2);
   });
 
   it('times out a control-point write that hangs, drops the link, and calls it transient', async () => {

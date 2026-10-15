@@ -594,7 +594,17 @@ async function runUpdate(
   };
 
   const expectOk = async (what: string, timeoutMs: number): Promise<void> => {
-    const status = await statuses.next(timeoutMs, what, signal);
+    /* A transfer's flow-control hints (CONTINUE / MORE_DATA) arrive as their
+     * own notifications, so one can land after the last data write has
+     * resolved and sit in the queue ahead of the command's answer. They are
+     * never a command's answer: skip them, within the same deadline. */
+    const deadline = Date.now() + timeoutMs;
+    let status: number;
+    for (;;) {
+      status = await statuses.next(Math.max(1, deadline - Date.now()), what, signal);
+      if (status !== IF820_OTA_STATUS.CONTINUE && status !== IF820_OTA_STATUS.MORE_DATA) break;
+      log(`skipping a late ${if820OtaStatusText(status)} while waiting for ${what}`);
+    }
     if (status !== IF820_OTA_STATUS.OK) {
       throw new If820OtaError(`Bluetooth module refused ${what}: ${if820OtaStatusText(status)}`, {
         status,
