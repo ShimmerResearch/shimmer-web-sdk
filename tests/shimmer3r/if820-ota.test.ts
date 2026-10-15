@@ -787,6 +787,36 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await expect(client.updateBtModuleFirmware(image(10))).resolves.toMatchObject({ bytes: 10 });
   });
 
+  it('refuses a second update call before it reads anything from the sensor', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820();
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+    };
+    c._transport = t;
+    let reads = 0;
+    c.readDeviceVersion = async () => {
+      reads++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { hardwareVersion: 10 };
+    };
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+
+    const first = client.updateBtModuleFirmware(image(500));
+    await expect(client.updateBtModuleFirmware(image(500))).rejects.toThrow(/already running/);
+    expect(reads).toBe(1);
+    await expect(first).resolves.toMatchObject({ bytes: 500 });
+    // Released afterwards, success or not.
+    await expect(client.updateBtModuleFirmware(image(10))).resolves.toBeDefined();
+  });
+
   it('reconnects through its own transport when the update falls back', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
     const { WebBluetoothTransport } =

@@ -92,6 +92,7 @@ import {
   IF820_OTA_SERVICE_UUIDS,
   runIf820OtaUpdate,
   if820OtaSensorSupport,
+  If820OtaError,
   type If820OtaOptions,
   type If820OtaResult,
 } from './if820Ota.js';
@@ -2228,26 +2229,41 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) {
       throw new Error('Stop streaming before updating the Bluetooth module firmware.');
     }
-    /* Both reads are cached after the first on a link, so this normally costs
-     * nothing: a host reads them on connect. */
-    const hw = await this.readDeviceVersion();
-    const fw = await this.readFwVersion();
-    const support = if820OtaSensorSupport({
-      hardwareVersion: hw.hardwareVersion,
-      firmwareId: fw.fwId,
-      major: fw.major,
-      minor: fw.minor,
-      internal: fw.patch,
-    });
-    if (!support.supported) throw new Error(support.message);
-    /* A fallback reconnect goes through this client, on the same transport and
-     * so the same device (no picker), so the client's own link is rebuilt with
-     * it rather than left holding the dropped connection's handles. */
-    return runIf820OtaUpdate(t.device, image, {
-      ...opts,
-      reconnect: opts.reconnect ?? (() => this.connect(t)),
-    });
+    /* Taken before the version reads below, not just inside
+     * runIf820OtaUpdate: a second call must not get as far as putting its own
+     * reads on the link alongside the first's. */
+    if (this._btModuleUpdateRunning) {
+      throw new If820OtaError('A Bluetooth module update is already running on this device');
+    }
+    this._btModuleUpdateRunning = true;
+    try {
+      /* Both reads are cached after the first on a link, so this normally
+       * costs nothing: a host reads them on connect. */
+      const hw = await this.readDeviceVersion();
+      const fw = await this.readFwVersion();
+      const support = if820OtaSensorSupport({
+        hardwareVersion: hw.hardwareVersion,
+        firmwareId: fw.fwId,
+        major: fw.major,
+        minor: fw.minor,
+        internal: fw.patch,
+      });
+      if (!support.supported) throw new Error(support.message);
+      /* A fallback reconnect goes through this client, on the same transport
+       * and so the same device (no picker), so the client's own link is
+       * rebuilt with it rather than left holding the dropped connection's
+       * handles. */
+      return await runIf820OtaUpdate(t.device, image, {
+        ...opts,
+        reconnect: opts.reconnect ?? (() => this.connect(t)),
+      });
+    } finally {
+      this._btModuleUpdateRunning = false;
+    }
   }
+
+  /** Set for the whole of {@link updateBtModuleFirmware}. */
+  private _btModuleUpdateRunning = false;
 
   /**
    * Read from the daughter-card (expansion board) EEPROM memory. `offset` is a
