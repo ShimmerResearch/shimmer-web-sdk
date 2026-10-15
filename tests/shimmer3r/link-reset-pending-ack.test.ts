@@ -412,6 +412,35 @@ describe('a multi-step operation a reconnect splits', () => {
     expect(client.getEnabledSensors()).toBe(0);
   });
 
+  it('setSensors fails when its onInquiry callback disconnects', async () => {
+    const { client } = await onFirst();
+    let disconnected: Promise<void> = Promise.resolve();
+    client.onInquiry = () => {
+      client.onInquiry = null;
+      disconnected = client.disconnect(); // resets the link only after its own await
+    };
+    await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
+    await disconnected;
+    // The old device's bitmap did not land after the disconnect cleared it
+    expect(client.getEnabledSensors()).toBe(0);
+  });
+
+  it('readCalibration fails when the skip of its last group reconnects', async () => {
+    const first = regDevice(OPCODES.GET_ALT_MAG_CALIBRATION_COMMAND);
+    const second = regDevice();
+    const client = new Shimmer3RClient({ debug: false });
+    await client.connect(first);
+    let reconnected: Promise<void> = Promise.resolve();
+    client.onStatus = (m) => {
+      if (!m.startsWith('readCalibration(altMag) skipped')) return;
+      client.onStatus = null;
+      first.emitDisconnect(new Error('dropped'));
+      reconnected = client.connect(second);
+    };
+    await expect(client.readCalibration(100)).rejects.toThrow(/link was reset/);
+    await reconnected;
+  });
+
   it("readExgConfig does not take chip 2's bank from the next device", async () => {
     const { client, second, swap, reconnected } = await onFirst();
     swapAfterStep(client, '_readExgChip', (a) => a[0] === 0, swap);

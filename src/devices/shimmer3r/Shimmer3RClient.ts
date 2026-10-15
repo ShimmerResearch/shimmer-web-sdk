@@ -1711,6 +1711,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     try {
       this._emitStatus('Performing automatic inquiry to refresh schema…');
       const info = await this._inquiry(link);
+      /* Again here: an onInquiry that called disconnect() resets the link only
+         after its own await, so _inquiry's check can pass while the reset is
+         still to come. The old device's bitmap must not land after it. */
+      if (this._linkGeneration !== link) throw this._linkResetError('the sensors to be applied');
       this.enabledSensors = info.schema.enabledSensors;
       this._emitStatus(
         `Inquiry complete. Enabled sensors: 0x${this.enabledSensors.toString(16).toUpperCase()}`,
@@ -1721,6 +1725,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (this._linkGeneration !== link) throw err;
       this._emitStatus(`Inquiry after setSensors failed: ${(err as Error).message}`);
     }
+    // Either status line runs onStatus, which can end the link too
+    if (this._linkGeneration !== link) throw this._linkResetError('the sensors to be applied');
 
     return { sensors, ackRemainder, enabledSensors: this.enabledSensors };
   }
@@ -3011,6 +3017,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
         this._emitStatus(`readCalibration(${group}) skipped: ${(err as Error).message}`);
       }
     }
+    /* The skip's status line runs onStatus, which can end the link after the
+       last group, with no further step left to notice. */
+    if (this._linkGeneration !== link) throw this._linkResetError('the calibration reads');
     this._reselectDeviceCalibrations();
     return done;
   }
