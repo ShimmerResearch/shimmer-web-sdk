@@ -1782,7 +1782,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     );
     const rsp = await this._readInquiryResponse(remainder, 2000, link);
     this._emitStatus(`Inquiry RSP (${rsp.length} bytes)`);
-    const info = this._interpretInquiryResponseShimmer3R(rsp);
+    const info = this._interpretInquiryResponseShimmer3R(rsp, link);
     this.onInquiry?.(info);
     /* The callback can itself drop or replace the link. The answer is then the
        old device's, and a caller such as setSensors must not apply it to the
@@ -2727,6 +2727,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._streaming) throw new Error('Cannot read ExG registers while streaming');
     const exg1 = await this._readExgChip(EXG_CHIP1, timeoutMs, link);
     const exg2 = await this._readExgChip(EXG_CHIP2, timeoutMs, link);
+    // A disconnect() begun meanwhile may have reset the link since the read settled
+    if (this._linkGeneration !== link) throw this._linkResetError('the ExG registers');
     /* Cache for the streaming conversion: the millivolt factor needs the PGA
        gain and the reference voltage, and this is the authoritative answer for
        both — the chip's own registers rather than what the stored image says
@@ -2899,6 +2901,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     await this._writeExgConfig(result.exg1, result.exg2, link);
     // Enabled sensors last; setSensors re-inquires and refreshes the schema.
     await this._setSensors(result.enabledSensors, link);
+    if (this._linkGeneration !== link) throw this._linkResetError('the preset to be applied');
     this._emitStatus(`ExG preset '${preset}' (${resolution}) applied. Schema updated.`);
   }
 
@@ -3634,7 +3637,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Inquiry response / schema building
   // ---------------------------------------------------------------------------
 
-  private _interpretInquiryResponseShimmer3R(u8: Uint8Array) {
+  private _interpretInquiryResponseShimmer3R(u8: Uint8Array, link: number) {
+    /* The status line just before this runs onStatus, which can end the link:
+       the old device's answer must not then be stored over the next link's. */
+    if (this._linkGeneration !== link) throw this._linkResetError('the inquiry to be applied');
     /* Whether the opcode byte is present, decided on the byte alone. It used
        to also require `u8.length >= 2`, which made a lone `[0x02]` chunk look
        headerless: the offsets below then described a different layout than the
@@ -3717,7 +3723,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const bufSize = u8[base + 10];
     const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
 
-    const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24');
+    const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24', link);
     this.schema = schema;
 
     this._log(
@@ -3765,7 +3771,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) === null;
   }
 
-  private _buildSchemaFromChannels(channelIds: number[], timestampFmt: TimestampFmt): StreamSchema {
+  private _buildSchemaFromChannels(
+    channelIds: number[],
+    timestampFmt: TimestampFmt,
+    link: number,
+  ): StreamSchema {
     const schema = buildStreamSchema(channelIds, timestampFmt, {
       generation: this.generation,
       generationAssumed: this.generationIsAssumed,
@@ -3775,6 +3785,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // fails silently rather than throwing.
       onProblem: (m) => this._emitStatus(`⚠️ ${m}`),
     });
+    // Each problem ran onStatus, which can end the link before the schema lands
+    if (this._linkGeneration !== link) throw this._linkResetError('the inquiry to be applied');
     this.enabledSensors = schema.enabledSensors;
     return schema;
   }

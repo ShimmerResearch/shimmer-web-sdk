@@ -441,6 +441,34 @@ describe('a multi-step operation a reconnect splits', () => {
     await reconnected;
   });
 
+  it('an inquiry reply does not land on the next link when its status line reconnects', async () => {
+    const { client, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'Inquiry RSP', swap);
+    await expect(client.setSensors(0x000080)).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect((client as unknown as { schema: unknown }).schema).toBeNull();
+    expect(client.getEnabledSensors()).toBe(0);
+  });
+
+  it('an ExG preset fails when the link is disconnected as its last step completes', async () => {
+    const { client } = await onFirst();
+    let disconnected: Promise<void> = Promise.resolve();
+    client.onStatus = (m) => {
+      if (!m.startsWith('Inquiry complete')) return;
+      client.onStatus = null;
+      disconnected = client.disconnect(); // resets the link only after its own await
+    };
+    const said: string[] = [];
+    const onStatus = client.onStatus;
+    client.onStatus = (m) => {
+      said.push(m);
+      onStatus?.(m);
+    };
+    await expect(client.applyExgPresetLive('ecg', '16bit')).rejects.toThrow(/link was reset/);
+    await disconnected;
+    expect(said.some((m) => /preset .* applied/.test(m))).toBe(false);
+  });
+
   it("readExgConfig does not take chip 2's bank from the next device", async () => {
     const { client, second, swap, reconnected } = await onFirst();
     swapAfterStep(client, '_readExgChip', (a) => a[0] === 0, swap);
