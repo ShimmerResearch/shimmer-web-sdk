@@ -396,9 +396,14 @@ export class Shimmer3Client extends BaseShimmerClient {
     /* The schema describes the old device's channel layout, and the
      * enabled-sensor bitmap is the one it was built with: a reconnect -
      * possibly to a different sensor - inherits neither until it inquires.
-     * Same reset as Shimmer3RClient.connect. */
+     * Same reset as Shimmer3RClient.connect. Nor its versions: a command
+     * gated on them, run from a status callback before the handshake reads
+     * the new device's, would be judged against the old one's, and a failed
+     * handshake would leave them describing a device no longer connected. */
     this.schema = null;
     this.enabledSensors = 0x000000;
+    this.deviceVersion = null;
+    this.firmwareVersion = null;
     /* And the previous transport's subscriptions go. After a drop nothing else
      * removes them, and a late notification or disconnect event from that
      * transport would be taken as this link's. */
@@ -478,35 +483,48 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._emitStatus(
       `FW version = ${this.firmwareVersion.major}.${this.firmwareVersion.minor}.${this.firmwareVersion.internal} (type ${this.firmwareVersion.firmwareIdentifier})`,
     );
+    /* Each status line runs an application callback, which can end this link.
+       The old device's firmware must not then set the next link's timestamp
+       width, nor this connect() resolve as if it had succeeded. */
+    this._link.throwIfReset(link, gone);
+    const fw = this.firmwareVersion;
 
     // Derive timestamp width from firmware unless the caller forced one.
     if (this._forceTimestampFmt === undefined) {
-      this._timestampFmt = shimmer3UsesThreeByteTimestamp(this.firmwareVersion) ? 'u24' : 'u16';
+      this._timestampFmt = shimmer3UsesThreeByteTimestamp(fw) ? 'u24' : 'u16';
     }
     this._emitStatus(`Handshake complete (timestamp = ${this._timestampFmt}).`);
+    this._link.throwIfReset(link, gone);
   }
 
   override async disconnect(): Promise<void> {
     // Application-initiated teardown is not a fault, so `onDisconnect` stays
     // silent — including when this call is the cleanup that follows a drop.
     this._suppressDisconnectNotification();
+    /* The link ends first, and the transport closes after. Closing can take a
+       while - a WebSerialTransport waits for its reader to cancel and its port
+       to close - and until the link ended, the commands waiting on it stayed
+       pending and new ones passed the live check and wrote to a closing port.
+       Every reset happens before the await, so a connect() begun during it
+       has nothing of its own cleared afterwards. */
+    const t = this._transport;
+    this._notifyUnsub?.();
+    this._disconnectUnsub?.();
+    this._notifyUnsub = this._disconnectUnsub = null;
+    this._transport = null;
+    this._resetLinkProtocolState();
+    const ended = this._link.current;
+    this.schema = null;
+    this.enabledSensors = 0x000000;
+    this.ExpPower = 0;
+    this._timeline.reset();
     try {
-      this._notifyUnsub?.();
-      this._disconnectUnsub?.();
-      await this._transport?.disconnect();
+      await t?.disconnect();
     } catch {
       /* ignore */
-    } finally {
-      this._notifyUnsub = this._disconnectUnsub = null;
-      this._transport = null;
-      this._resetLinkProtocolState();
-      this.schema = null;
-      this.enabledSensors = 0x000000;
-      this.ExpPower = 0;
-      this._resetCalibrationState();
-      this._timeline.reset();
-      this._emitStatus('Disconnected');
     }
+    // Not over a connect() begun meanwhile, which is not disconnected
+    if (this._link.isCurrent(ended)) this._emitStatus('Disconnected');
   }
 
   /**
@@ -542,6 +560,11 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._awaitInq = 0;
     this._awaitCmd = 0;
     this._linkLive = false;
+    /* So does the device's calibration - its stored blocks, ExG banks and
+       pressure trim. Cleared only by disconnect(), it was applied to the
+       stream of whatever sensor a drop or a direct reconnect led to, even
+       after that sensor's ranges were read. Same as Shimmer3RClient. */
+    this._resetCalibrationState();
     this._link.reset();
   }
 

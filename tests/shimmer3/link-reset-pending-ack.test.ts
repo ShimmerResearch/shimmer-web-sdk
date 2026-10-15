@@ -355,6 +355,74 @@ describe('a status callback that ends the link', () => {
   });
 });
 
+describe('a reconnect', () => {
+  it("does not judge the new device by the old one's versions", async () => {
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(device(undefined, 15));
+    let seen: unknown = 'not seen';
+    client.onStatus = (m) => {
+      if (m.startsWith('Connected')) seen = client.firmwareVersion;
+    };
+    await client.connect(device(undefined, 16));
+    expect(seen).toBeNull(); // before the new handshake has read them
+    expect(client.firmwareVersion?.minor).toBe(16);
+  });
+
+  it("does not stream the next sensor with the old one's calibration", async () => {
+    const bmp581 = (cmd: Uint8Array): number[] | null =>
+      cmd[0] === OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND
+        ? [ACK, OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE, 1, 3]
+        : [ACK];
+    const first = device(bmp581);
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    await client.readPressureCalibration();
+    expect(client.pressureCalibration?.sensor).toBe('bmp581');
+    first.emitDisconnect(new Error('dropped'));
+    await client.connect(device(undefined, 16));
+    expect(client.pressureCalibration).toBeNull();
+  });
+});
+
+describe("the handshake's last status callbacks", () => {
+  it.each(['FW version =', 'Handshake complete'])(
+    'ending the link at "%s" fails the connect',
+    async (line) => {
+      const first = device();
+      const client = new Shimmer3Client({ debug: false });
+      client.onStatus = (m) => {
+        if (m.startsWith(line)) first.emitDisconnect(new Error('dropped'));
+      };
+      await expect(client.connect(first)).rejects.toThrow(/link was reset/);
+    },
+  );
+});
+
+describe('disconnect()', () => {
+  it('ends the link before the transport has finished closing', async () => {
+    const first = device(silentTo(OPCODES.GET_INFOMEM_COMMAND));
+    let closed = (): void => undefined;
+    first.disconnect = () => new Promise<void>((r) => (closed = r)); // a slow port close
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    const waiting = client.readInfoMem(0, 16).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await tick(20);
+    const disconnecting = client.disconnect();
+    // The waiter fails, and a new command is refused, while the port still closes
+    expect(await Promise.race([waiting, tick(100).then(() => 'still waiting')])).toMatch(
+      /link was reset/,
+    );
+    const before = first.writes.length;
+    await expect(client.setGSRRange(1)).rejects.toThrow(/Not connected/);
+    expect(first.writes.length).toBe(before);
+    closed();
+    await disconnecting;
+  });
+});
+
 describe('a link that dropped, before the next connect', () => {
   it('refuses a command rather than write it to the dropped transport', async () => {
     const first = device();
