@@ -819,6 +819,34 @@ describe('runIf820OtaUpdate', () => {
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 
+  it('bounds and cancels the first connect and the first service discovery', async () => {
+    const hangingConnect = {
+      connected: false,
+      connect: () => new Promise<never>(() => {}),
+      getPrimaryService: () => new Promise<never>(() => {}),
+    } as unknown as If820OtaGattServerLike;
+    const timedOut = await runIf820OtaUpdate({ gatt: hangingConnect }, image(10), {
+      responseTimeoutMs: 50,
+    }).catch((e) => e);
+    expect(timedOut).toBeInstanceOf(If820OtaError);
+    expect(timedOut.transient).toBe(true);
+    expect(timedOut.message).toMatch(/Connecting timed out/);
+
+    const hangingDiscovery = {
+      connected: true,
+      connect: async () => hangingDiscovery,
+      getPrimaryService: () => new Promise<never>(() => {}),
+    } as unknown as If820OtaGattServerLike;
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 30);
+    const started = Date.now();
+    const cancelled = await runIf820OtaUpdate({ gatt: hangingDiscovery }, image(10), {
+      signal: ctrl.signal,
+    }).catch((e) => e);
+    expect(cancelled.name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;

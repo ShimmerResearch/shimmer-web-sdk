@@ -601,7 +601,11 @@ async function runUpdate(
   try {
     if (!server.connected) {
       onStatus('Connecting to the Bluetooth module…');
-      await server.connect();
+      /* Bounded and cancellable like every later step: a connect the stack
+       * never settles must not hold the update forever. */
+      await settleWithin(server.connect(), responseTimeoutMs, signal, () => {
+        return new If820OtaError('Connecting timed out', { transient: true });
+      });
     }
   } catch (e) {
     throw wrapGattError(e, 'Connecting');
@@ -949,7 +953,20 @@ async function runUpdate(
 
   try {
     onStatus('Opening the Bluetooth module update service…');
-    await open();
+    {
+      /* Discovery and the subscription, bounded and cancellable; a discovery
+       * given up on is invalidated by its generation, so it can never commit
+       * its handles late (see open). */
+      const generation = ++reopenGeneration;
+      try {
+        await settleWithin(open(generation), responseTimeoutMs, signal, () => {
+          return new If820OtaError('Opening the update service timed out', { transient: true });
+        });
+      } catch (e) {
+        reopenGeneration++;
+        throw e;
+      }
+    }
 
     let step = 0;
     let crc: number;
