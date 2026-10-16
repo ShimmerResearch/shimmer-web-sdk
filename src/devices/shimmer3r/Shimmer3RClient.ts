@@ -90,7 +90,8 @@ import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import {
   IF820_OTA_SERVICE_UUIDS,
-  runIf820OtaUpdate,
+  acquireIf820OtaDeviceLease,
+  runIf820OtaUpdateUnderLease,
   if820OtaSensorSupport,
   If820OtaError,
   type If820OtaOptions,
@@ -2235,6 +2236,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._btModuleUpdateRunning) {
       throw new If820OtaError('A Bluetooth module update is already running on this device');
     }
+    /* The per-device lease too, before any link traffic: another client, or
+     * a direct runIf820OtaUpdate, on this same device must not be mid-update
+     * while this one sends its version reads, nor get past them alongside. */
+    const releaseLease = acquireIf820OtaDeviceLease(t.device);
     this._btModuleUpdateRunning = true;
     try {
       /* Both reads are cached after the first on a link, so this normally
@@ -2258,12 +2263,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * and so the same device (no picker), so the client's own link is
        * rebuilt with it rather than left holding the dropped connection's
        * handles. */
-      return await runIf820OtaUpdate(t.device, image, {
+      return await runIf820OtaUpdateUnderLease(t.device, image, {
         ...opts,
         reconnect: opts.reconnect ?? (() => this.connect(t)),
       });
     } finally {
       this._btModuleUpdateRunning = false;
+      releaseLease();
     }
   }
 

@@ -508,18 +508,51 @@ export async function runIf820OtaUpdate(
   image: ArrayBuffer | Uint8Array,
   opts: If820OtaOptions = {},
 ): Promise<If820OtaResult> {
-  /* Keyed by the GATT server, not the object passed in: two `{ gatt }`
-   * wrappers around one device are still one device. */
+  const release = acquireIf820OtaDeviceLease(device);
+  try {
+    return await runUpdate(device, image, opts);
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Take the one-update-per-device lease, or throw if an update already holds
+ * it; returns its release. Keyed by the GATT server, not the object passed
+ * in: two `{ gatt }` wrappers around one device are still one device.
+ *
+ * Package-internal: {@link Shimmer3RClient.updateBtModuleFirmware} takes it
+ * before its own pre-update reads, so another client or a direct
+ * {@link runIf820OtaUpdate} on the same device is refused before any link
+ * traffic, and then runs the update under it with
+ * {@link runIf820OtaUpdateUnderLease}.
+ * @internal
+ */
+export function acquireIf820OtaDeviceLease(device: If820OtaDeviceLike): () => void {
   const key: object = device.gatt ?? device;
   if (updatesInFlight.has(key)) {
     throw new If820OtaError('A Bluetooth module update is already running on this device');
   }
   updatesInFlight.add(key);
-  try {
-    return await runUpdate(device, image, opts);
-  } finally {
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
     updatesInFlight.delete(key);
-  }
+  };
+}
+
+/**
+ * {@link runIf820OtaUpdate} for a caller that already holds the device's
+ * lease from {@link acquireIf820OtaDeviceLease} (and releases it).
+ * @internal
+ */
+export function runIf820OtaUpdateUnderLease(
+  device: If820OtaDeviceLike,
+  image: ArrayBuffer | Uint8Array,
+  opts: If820OtaOptions = {},
+): Promise<If820OtaResult> {
+  return runUpdate(device, image, opts);
 }
 
 /** How long a cancelled first write may take to settle before the link is

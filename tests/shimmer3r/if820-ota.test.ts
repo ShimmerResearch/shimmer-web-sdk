@@ -1019,6 +1019,50 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await starting;
   });
 
+  it('refuses before any reads when another client or a direct run holds the device', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820();
+    const device = { gatt: mod.server };
+    const makeClient = () => {
+      const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+      Object.defineProperty(t, 'device', { value: device });
+      const client = new Shimmer3RClient();
+      const c = client as unknown as {
+        _transport: unknown;
+        readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+        readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+      };
+      c._transport = t;
+      const reads = { n: 0 };
+      c.readDeviceVersion = async () => {
+        reads.n++;
+        await new Promise((r) => setTimeout(r, 20));
+        return { hardwareVersion: 10 };
+      };
+      c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+      return { client, reads };
+    };
+
+    // A direct run on the device: a client is refused before it reads anything.
+    const direct = runIf820OtaUpdate(device, image(2000));
+    const a = makeClient();
+    await expect(a.client.updateBtModuleFirmware(image(10))).rejects.toThrow(/already running/);
+    expect(a.reads.n).toBe(0);
+    await direct;
+
+    // Two clients on one device: the second is refused before it reads anything.
+    const b = makeClient();
+    const c2 = makeClient();
+    const first = b.client.updateBtModuleFirmware(image(500));
+    await expect(c2.client.updateBtModuleFirmware(image(10))).rejects.toThrow(/already running/);
+    expect(c2.reads.n).toBe(0);
+    await expect(first).resolves.toMatchObject({ bytes: 500 });
+    // And the lease is free again afterwards.
+    await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
+  });
+
   it('reconnects through its own transport when the update falls back', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
     const { WebBluetoothTransport } =
