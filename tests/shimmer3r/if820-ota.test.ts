@@ -44,10 +44,18 @@ class FakeChar implements If820OtaCharacteristicLike {
     return this._listeners.size;
   }
   async writeValueWithResponse(value: BufferSource): Promise<void> {
-    const bytes =
-      value instanceof Uint8Array
-        ? new Uint8Array(value)
-        : new Uint8Array(value instanceof ArrayBuffer ? value : (value as ArrayBufferView).buffer);
+    /* A copy of exactly the bytes the view covers: `new Uint8Array(view)`
+     * copies a Uint8Array's own elements, and any other view is read through
+     * its byteOffset/byteLength rather than its whole backing buffer. */
+    let bytes: Uint8Array;
+    if (value instanceof Uint8Array) {
+      bytes = new Uint8Array(value);
+    } else if (value instanceof ArrayBuffer) {
+      bytes = new Uint8Array(value.slice(0));
+    } else {
+      const v = value as ArrayBufferView;
+      bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength).slice();
+    }
     await this._onWrite(bytes);
   }
   notify(bytes: number[]): void {
@@ -236,6 +244,18 @@ function image(n: number): Uint8Array {
 }
 
 describe('runIf820OtaUpdate', () => {
+  it('the fake receives each chunk, not its backing buffer', async () => {
+    const seen: number[][] = [];
+    const ch = new FakeChar((b) => void seen.push(Array.from(b)));
+    const backing = Uint8Array.from([1, 2, 3, 4, 5, 6]);
+    await ch.writeValueWithResponse(backing.subarray(2, 4));
+    await ch.writeValueWithResponse(new DataView(backing.buffer, 3, 2));
+    expect(seen).toEqual([
+      [3, 4],
+      [4, 5],
+    ]);
+  });
+
   it('prepares, downloads in chunks, and verifies with the image CRC', async () => {
     const mod = new FakeIf820();
     const img = image(1000);
