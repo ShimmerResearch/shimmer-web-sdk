@@ -591,22 +591,40 @@ async function runUpdate(
   /** Resolve the service and characteristics on the current connection and
    * subscribe to the control point. Run again after a reconnect, which hands
    * out new GATT objects. */
-  const open = async (): Promise<void> => {
-    control?.removeEventListener('characteristicvaluechanged', onValue);
+  const open = async (generation?: number): Promise<void> => {
+    /* Discovery runs into locals and is committed to the session only at the
+     * end, and only while this attempt is still current: a reconnect attempt
+     * given up on (see reopen) may still be part-way through it when a later
+     * one starts, and must not leave its handles or listener behind. */
+    const current = (): boolean => generation === undefined || generation === reopenGeneration;
     const resolved = await resolveService(server, log);
-    serviceUuid = resolved.uuid;
+    if (!current()) return;
+    let ctrl: If820OtaCharacteristicLike;
+    let dat: If820OtaCharacteristicLike;
     try {
-      control = await resolved.service.getCharacteristic(IF820_OTA.CONTROL_POINT_UUID);
-      data = await resolved.service.getCharacteristic(IF820_OTA.DATA_UUID);
+      ctrl = await resolved.service.getCharacteristic(IF820_OTA.CONTROL_POINT_UUID);
+      dat = await resolved.service.getCharacteristic(IF820_OTA.DATA_UUID);
     } catch (e) {
       throw wrapGattError(e, 'Opening the update characteristics');
     }
-    control.addEventListener('characteristicvaluechanged', onValue);
+    if (!current()) return;
+    ctrl.addEventListener('characteristicvaluechanged', onValue);
     try {
-      await control.startNotifications();
+      await ctrl.startNotifications();
     } catch (e) {
+      if (ctrl !== control) ctrl.removeEventListener('characteristicvaluechanged', onValue);
       throw wrapGattError(e, 'Subscribing to the update control point');
     }
+    if (!current()) {
+      if (ctrl !== control) ctrl.removeEventListener('characteristicvaluechanged', onValue);
+      return;
+    }
+    if (control && control !== ctrl) {
+      control.removeEventListener('characteristicvaluechanged', onValue);
+    }
+    control = ctrl;
+    data = dat;
+    serviceUuid = resolved.uuid;
   };
 
   /** Bumped per reconnect attempt and whenever one is given up on; an
@@ -641,7 +659,7 @@ async function runUpdate(
         if (opts.reconnect) await opts.reconnect();
         else await server.connect();
         if (generation !== reopenGeneration) return;
-        await open();
+        await open(generation);
       })();
       try {
         await settleWithin(reopened, responseTimeoutMs, signal, () => {

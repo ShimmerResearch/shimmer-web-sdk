@@ -581,6 +581,38 @@ describe('runIf820OtaUpdate', () => {
     expect(lookups).toBe(lookupsAfterUpdate);
   });
 
+  it('a stale attempt whose service discovery finishes late leaves nothing behind', async () => {
+    const mod = new FakeIf820({ stallAbove: 63, stallClearsOnReconnect: true });
+    const server = mod.server;
+    const realGetPrimaryService = server.getPrimaryService.bind(server);
+    let lookups = 0;
+    let releaseStale!: () => void;
+    const gated = {
+      get connected() {
+        return server.connected;
+      },
+      connect: () => server.connect(),
+      disconnect: () => server.disconnect?.(),
+      getPrimaryService: async (uuid: string) => {
+        lookups++;
+        // The first reconnect attempt's discovery hangs past its timeout.
+        if (lookups === 2) await new Promise<void>((r) => (releaseStale = r));
+        return realGetPrimaryService(uuid);
+      },
+    } as typeof server;
+    const result = await runIf820OtaUpdate({ gatt: gated }, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      responseTimeoutMs: 100,
+      reconnect: () => server.connect().then(() => undefined),
+    });
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
+    expect(mod.control.listenerCount).toBe(0);
+    releaseStale();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mod.control.listenerCount).toBe(0);
+  });
+
   it('cancels at once during the wait before a fallback reconnect', async () => {
     const mod = new FakeIf820({ stallAbove: 63 });
     const ctrl = new AbortController();
