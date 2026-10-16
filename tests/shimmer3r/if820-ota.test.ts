@@ -1083,6 +1083,48 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 
+  it('never runs two client reconnects at once, and holds off a new update until one settles', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+      connect: (transport?: unknown) => Promise<void>;
+    };
+    c._transport = t;
+    c.readDeviceVersion = async () => ({ hardwareVersion: 10 });
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+    let connects = 0;
+    let finish!: () => void;
+    c.connect = () => {
+      connects++;
+      return new Promise<void>((r) => (finish = r));
+    };
+
+    const err = await client
+      .updateBtModuleFirmware(image(2000), {
+        firstWriteTimeoutMs: 50,
+        reconnectDelayMs: 1,
+        reconnectAttempts: 3,
+        responseTimeoutMs: 50,
+      })
+      .catch((e) => e);
+    expect(err.transient).toBe(true);
+    expect(connects).toBe(1);
+    await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(
+      /reconnect is still in progress/,
+    );
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(connects).toBe(1);
+  });
+
   it('reconnects through its own transport when the update falls back', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
     const { WebBluetoothTransport } =

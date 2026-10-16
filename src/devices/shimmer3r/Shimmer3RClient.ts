@@ -2236,6 +2236,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (this._btModuleUpdateRunning) {
       throw new If820OtaError('A Bluetooth module update is already running on this device');
     }
+    if (this._btModuleReconnect) {
+      throw new If820OtaError(
+        "The previous Bluetooth module update's reconnect is still in progress; try again shortly.",
+      );
+    }
     /* The per-device lease too, before any link traffic: another client, or
      * a direct runIf820OtaUpdate, on this same device must not be mid-update
      * while this one sends its version reads, nor get past them alongside. */
@@ -2265,7 +2270,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * handles. */
       return await runIf820OtaUpdateUnderLease(t.device, image, {
         ...opts,
-        reconnect: opts.reconnect ?? (() => this.connect(t)),
+        reconnect: opts.reconnect ?? (() => this._reconnectForBtModuleUpdate(t)),
       });
     } finally {
       this._btModuleUpdateRunning = false;
@@ -2275,6 +2280,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Set for the whole of {@link updateBtModuleFirmware}. */
   private _btModuleUpdateRunning = false;
+  /** The update's fallback reconnect while it is in flight; see below. */
+  private _btModuleReconnect: Promise<void> | null = null;
+
+  /**
+   * The module update's fallback reconnect, one at a time. The update gives
+   * up on an attempt that runs past its timeout, but connect() itself cannot
+   * be stopped, and a second one started alongside it would leave the two
+   * resetting this client's link and protocol state over each other. So a
+   * later attempt waits on the same connect rather than starting another,
+   * and a new update is refused until it has settled; a late one that
+   * completes after the update has ended just leaves the client connected.
+   */
+  private _reconnectForBtModuleUpdate(t: ShimmerTransport): Promise<void> {
+    if (!this._btModuleReconnect) {
+      this._btModuleReconnect = this.connect(t).finally(() => {
+        this._btModuleReconnect = null;
+      });
+    }
+    return this._btModuleReconnect;
+  }
   /** Stream starts still waiting for their ACK, before `_streaming` is set. */
   private _streamStarting = 0;
 
