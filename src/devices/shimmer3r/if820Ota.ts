@@ -609,6 +609,10 @@ async function runUpdate(
     }
   };
 
+  /** Bumped per reconnect attempt and whenever one is given up on; an
+   * attempt whose number is no longer current never calls open(). */
+  let reopenGeneration = 0;
+
   /** Drop a stalled link and open a fresh one to the same device. */
   const reopen = async (): Promise<void> => {
     if (server.connected) {
@@ -627,12 +631,16 @@ async function runUpdate(
         `Reconnecting to the Bluetooth module (attempt ${attempt} of ${reconnectAttempts})…`,
       );
       /* Each attempt is bounded and cancellable: a connect that never settles
-       * must not hold the update forever, nor outlast a cancel. A connect that
-       * completes after it was given up on resumes nothing, because this
-       * attempt has already thrown or moved on. */
+       * must not hold the update forever, nor outlast a cancel. An attempt
+       * given up on is invalidated by its generation, so a connect that
+       * completes late never goes on to open() - which would swap the control
+       * point and its listener out from under a later attempt, or under an
+       * update that has already ended. */
+      const generation = ++reopenGeneration;
       const reopened = (async (): Promise<void> => {
         if (opts.reconnect) await opts.reconnect();
         else await server.connect();
+        if (generation !== reopenGeneration) return;
         await open();
       })();
       try {
@@ -641,6 +649,7 @@ async function runUpdate(
         });
         return;
       } catch (e) {
+        reopenGeneration++;
         if ((e as Error)?.name === 'AbortError') throw e;
         lastError = e;
         log(`reconnect attempt ${attempt} failed: ${String(e)}`);
@@ -938,6 +947,8 @@ async function runUpdate(
     if (server.connected) await abortQuietly();
     throw e;
   } finally {
+    /* A reconnect still in flight resumes nothing once the update has ended. */
+    reopenGeneration++;
     control?.removeEventListener('characteristicvaluechanged', onValue);
   }
 }

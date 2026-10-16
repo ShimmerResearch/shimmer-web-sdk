@@ -542,6 +542,45 @@ describe('runIf820OtaUpdate', () => {
     expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
   });
 
+  it('never lets a reconnect that completes late re-open the update service', async () => {
+    const mod = new FakeIf820({ stallAbove: 63, stallClearsOnReconnect: true });
+    const server = mod.server;
+    let calls = 0;
+    let finishFirst!: () => void;
+    let lookups = 0;
+    const realGetPrimaryService = server.getPrimaryService.bind(server);
+    const counted = {
+      get connected() {
+        return server.connected;
+      },
+      connect: () => server.connect(),
+      disconnect: () => server.disconnect?.(),
+      getPrimaryService: (uuid: string) => {
+        lookups++;
+        return realGetPrimaryService(uuid);
+      },
+    } as typeof server;
+    const result = await runIf820OtaUpdate({ gatt: counted }, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      responseTimeoutMs: 100,
+      reconnect: async () => {
+        calls++;
+        if (calls === 1) {
+          await new Promise<void>((r) => (finishFirst = r));
+          return;
+        }
+        await server.connect();
+      },
+    });
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
+    const lookupsAfterUpdate = lookups;
+    // The first attempt's connect lands only now, long after it was given up.
+    finishFirst();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lookups).toBe(lookupsAfterUpdate);
+  });
+
   it('cancels at once during the wait before a fallback reconnect', async () => {
     const mod = new FakeIf820({ stallAbove: 63 });
     const ctrl = new AbortController();
