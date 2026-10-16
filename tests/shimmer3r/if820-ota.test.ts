@@ -87,6 +87,8 @@ interface FakeModuleOptions {
   dropOnServiceLookup?: boolean;
   /** Never complete the control-point write of this command. */
   hangWriteOf?: number;
+  /** Answer VERIFY only after this long. */
+  verifyDelayMs?: number;
   /** Notify these flow-control statuses as VERIFY arrives, ahead of its
    * answer - as hints sent for the last data write but delivered late. */
   lateStatusesAfterLastWrite?: number[];
@@ -187,7 +189,12 @@ class FakeIf820 {
         const got = Uint8Array.from(this.received);
         if (this.opts.corrupt && got.length) got[0] ^= 0xff;
         const ok = got.length === this.expectedLength && crc32(got) === param;
-        this._answer(ok ? IF820_OTA_STATUS.OK : IF820_OTA_STATUS.VERIFICATION_FAILED);
+        const status = ok ? IF820_OTA_STATUS.OK : IF820_OTA_STATUS.VERIFICATION_FAILED;
+        if (this.opts.verifyDelayMs) {
+          setTimeout(() => this.control.notify([status]), this.opts.verifyDelayMs);
+        } else {
+          this._answer(status);
+        }
         break;
       }
       case IF820_OTA_COMMAND.ABORT:
@@ -558,6 +565,30 @@ describe('runIf820OtaUpdate', () => {
     expect(err.name).toBe('AbortError');
     expect(mod.disconnects).toBe(1);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('runs to completion when cancelled after VERIFY was written', async () => {
+    const mod = new FakeIf820({ verifyDelayMs: 100 });
+    const ctrl = new AbortController();
+    const result = await runIf820OtaUpdate({ gatt: mod.server }, image(1000), {
+      signal: ctrl.signal,
+      onLog: (line) => {
+        if (line.startsWith('control point → VERIFY')) setTimeout(() => ctrl.abort(), 20);
+      },
+    });
+    expect(result.bytes).toBe(1000);
+    expect(mod.commands.at(-1)?.[0]).toBe(IF820_OTA_COMMAND.VERIFY);
+  });
+
+  it('after VERIFY, sends no ABORT and says the module may have taken the image', async () => {
+    const mod = new FakeIf820({ silentOn: IF820_OTA_COMMAND.VERIFY });
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100), {
+      verifyTimeoutMs: 50,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(If820OtaError);
+    expect(err.transient).toBe(true);
+    expect(err.message).toMatch(/did not answer VERIFY.*may already have accepted/);
+    expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.ABORT)).toBe(false);
   });
 
   it('never sends VERIFY when cancelled from the Verifying status callback', async () => {

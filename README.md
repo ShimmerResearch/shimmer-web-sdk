@@ -616,7 +616,10 @@ if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '
   `reconnect` that does the same.
 - **Interruption is safe.** The module switches images only after it has
   verified the whole image's CRC-32, so a dropped link or a cancel leaves the
-  old firmware running, and the update can be run again.
+  old firmware running, and the update can be run again. The one exception
+  is the VERIFY itself: once it is written the module may already be
+  switching, so a cancel then is ignored, and a failure after it says the
+  new firmware may have been accepted (reconnect and read the version).
 - **Never arm reboot-on-disconnect for it.** Rebooting the MCU when the
   link drops after VERIFY cuts the module's power while it is still switching
   images, and it comes back on the old one. LogAndStream v1.01.022 and later

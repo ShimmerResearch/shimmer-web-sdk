@@ -228,7 +228,12 @@ export interface If820OtaOptions {
   onProgress?: (progress: If820OtaProgress) => void;
   /** Diagnostic lines (protocol chatter; not for end users). */
   onLog?: (message: string) => void;
-  /** Cancels the update. The module is sent ABORT and keeps its old firmware. */
+  /**
+   * Cancels the update. The module is sent ABORT and keeps its old firmware.
+   * Honoured up to the moment VERIFY is written; after that the module may
+   * already be switching images, so the update runs to its end and a cancel
+   * then has no effect.
+   */
   signal?: AbortSignal;
   /** First chunk size to try. Default {@link IF820_OTA_DEFAULT_CHUNK_SIZE}. */
   chunkSize?: number;
@@ -596,7 +601,12 @@ async function runUpdate(
     );
   };
 
-  const send = async (op: number, param: number | undefined, what: string): Promise<void> => {
+  const send = async (
+    op: number,
+    param: number | undefined,
+    what: string,
+    cancellable = true,
+  ): Promise<void> => {
     /* Before the write is even started: a callback just before this one
      * (onStatus('Verifying…') among them) may have cancelled, and a VERIFY
      * once written lets the module switch images. */
@@ -615,13 +625,14 @@ async function runUpdate(
             transient: true,
           }),
         true,
+        cancellable,
       );
     } catch (e) {
       throw wrapGattError(e, what);
     }
   };
 
-  const expectOk = async (what: string, timeoutMs: number): Promise<void> => {
+  const expectOk = async (what: string, timeoutMs: number, cancellable = true): Promise<void> => {
     /* A transfer's flow-control hints (CONTINUE / MORE_DATA) arrive as their
      * own notifications, so one can land after the last data write has
      * resolved and sit in the queue ahead of the command's answer. They are
@@ -629,7 +640,11 @@ async function runUpdate(
     const deadline = Date.now() + timeoutMs;
     let status: number;
     for (;;) {
-      status = await statuses.next(Math.max(1, deadline - Date.now()), what, signal);
+      status = await statuses.next(
+        Math.max(1, deadline - Date.now()),
+        what,
+        cancellable ? signal : undefined,
+      );
       if (status !== IF820_OTA_STATUS.CONTINUE && status !== IF820_OTA_STATUS.MORE_DATA) break;
       log(`skipping a late ${if820OtaStatusText(status)} while waiting for ${what}`);
     }
@@ -670,7 +685,9 @@ async function runUpdate(
     timeoutMs: number,
     onTimeout: () => unknown,
     dropOnTimeout: boolean,
+    cancellable = true,
   ): Promise<void> => {
+    const sig = cancellable ? signal : undefined;
     /* Whatever an abandoned write eventually settles with, it is no longer
      * anyone's concern, and must not surface as an unhandled rejection. */
     attempt.catch(() => {});
@@ -694,13 +711,13 @@ async function runUpdate(
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(abortError());
-      if (signal?.aborted) onAbort();
-      else signal?.addEventListener('abort', onAbort, { once: true });
+      if (sig?.aborted) onAbort();
+      else sig?.addEventListener('abort', onAbort, { once: true });
     });
     try {
       await Promise.race([attempt, timeout, aborted]);
     } catch (e) {
-      if (signal?.aborted) {
+      if (sig?.aborted) {
         const settled = await Promise.race([
           attempt.then(
             () => true,
@@ -715,7 +732,7 @@ async function runUpdate(
       throw e;
     } finally {
       clearTimeout(timer);
-      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      if (onAbort) sig?.removeEventListener('abort', onAbort);
     }
   };
 
@@ -737,6 +754,10 @@ async function runUpdate(
       throw new ChunkRefused(e, !server.connected);
     }
   };
+
+  /** Set once VERIFY is about to be written: from there the update can no
+   * longer be cancelled, and is not ABORTed on failure. */
+  let verifySent = false;
 
   /** One full pass at a given chunk size. Throws {@link ChunkRefused} when the
    * very first data write fails, so the caller can retry smaller. */
@@ -796,12 +817,19 @@ async function runUpdate(
      * stop it here. */
     throwIfAborted(signal);
     onStatus('Verifying the firmware on the Bluetooth module…');
+    /* VERIFY is the commit. A cancel is honoured up to the moment it is
+     * written (send checks first); from then on the module may already be
+     * switching images, which an ABORT cannot undo, so the write and its
+     * answer run to completion or to their timeouts, never to a cancel. */
+    throwIfAborted(signal);
+    verifySent = true;
     await send(
       IF820_OTA_COMMAND.VERIFY,
       crc,
       `VERIFY (crc32 0x${crc.toString(16).padStart(8, '0')})`,
+      false,
     );
-    await expectOk('VERIFY', verifyTimeoutMs);
+    await expectOk('VERIFY', verifyTimeoutMs, false);
     return crc;
   };
 
@@ -844,6 +872,18 @@ async function runUpdate(
       durationMs: Date.now() - started,
     };
   } catch (e) {
+    if (verifySent) {
+      /* An ABORT cannot undo a VERIFY the module accepted, so none is sent,
+       * and the failure says the new image may be running anyway. */
+      if (e instanceof If820OtaError && e.status === null) {
+        throw new If820OtaError(
+          `${e.message}. The module may already have accepted the new firmware: ` +
+            'reconnect and read its version.',
+          { transient: e.transient },
+        );
+      }
+      throw e;
+    }
     if (server.connected) await abortQuietly();
     throw e;
   } finally {
