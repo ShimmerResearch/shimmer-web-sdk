@@ -557,6 +557,85 @@ writes nothing when the LED is already as asked, and throws rather than
 reporting success if the sensor's flag does not follow. Bluetooth only: the
 dock protocol has no LED command.
 
+## Shimmer3R Bluetooth Module Update (IF820 OTA)
+
+The Shimmer3R's Bluetooth module (Ezurio Vela IF820, an Infineon CYW20820)
+is updated over BLE through Infineon's OTA firmware upgrade service: the same
+protocol `WsOtaUpgrade.exe` uses. The Shimmer3R's own MCU cannot reflash it,
+so a host does it directly, on the BLE connection it already has open.
+
+```ts
+import {
+  Shimmer3RClient,
+  if820OtaSensorSupport,
+  isIf820UpdateAvailable,
+} from '@shimmerresearch/shimmer-web-sdk';
+
+const client = new Shimmer3RClient(); // requests the OTA services in optionalServices
+await client.connect();
+const hw = await client.readDeviceVersion();
+const fw = await client.readFwVersion();
+const sensor = {
+  hardwareVersion: hw.hardwareVersion,
+  firmwareId: fw.fwId,
+  major: fw.major,
+  minor: fw.minor,
+  internal: fw.patch,
+};
+const current = await client.readBtModuleVersion();
+if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '1.4.18.18')) {
+  const image = await (await fetch('firmware/if820/module.ota.bin')).arrayBuffer();
+  await client.updateBtModuleFirmware(image, {
+    onProgress: ({ currentBytes, totalBytes }) => console.log(currentBytes / totalBytes),
+  });
+  // The module resets onto the new image and the link drops. Reconnect without
+  // a picker by handing the same BluetoothDevice to a new WebBluetoothTransport.
+}
+```
+
+- **Shimmer3R on LogAndStream v1.01.022 or later only.** That release is the
+  first to recover by itself once the module restarts on its new image, and
+  to repair the SPP MTU an update leaves broken on v1.4.18.x.
+  `if820OtaSensorSupport` says whether a sensor qualifies, with a message to
+  show when it does not, and `updateBtModuleFirmware` refuses any other
+  sensor.
+- **One update per device at a time.** A second update on the same device,
+  from any client or a direct `runIf820OtaUpdate`, is refused until the first
+  has finished, including any connect, reconnect or write it gave up on but
+  which may still be running on the link. A failed update whose command
+  answer timed out leaves the link dropped; reconnect before trying again.
+- **BLE only.** A Classic Bluetooth or USB link cannot reach the module's GATT
+  service.
+- **The OTA services must be granted at connect time.** `Shimmer3RClient`
+  requests them by default. A host that builds its own `requestDevice` options
+  must include `client.requestedOptionalServices()`, or the update cannot run
+  without a second device picker.
+- **512-byte writes first, 63 if the link stalls.** Whether the module accepts
+  large writes depends on the packet airtime the two radios agreed, which a
+  page cannot see. A stalled first write makes the update drop and re-open
+  the link (no picker) and continue at 63 bytes, so expect one disconnect
+  during the update in that case; `onRetry` reports it. Through
+  `updateBtModuleFirmware` that reconnect goes through the client's own
+  transport, so the client is fully connected again afterwards; a host
+  calling `runIf820OtaUpdate` with its own transport on the link passes a
+  `reconnect` that does the same.
+- **Interruption is safe.** The module switches images only after it has
+  verified the whole image's CRC-32, so a dropped link or a cancel leaves the
+  old firmware running, and the update can be run again. The one exception
+  is the VERIFY itself: once it is written the module may already be
+  switching, so a cancel then is ignored, and a failure after it says the
+  new firmware may have been accepted (reconnect and read the version).
+- **Never arm reboot-on-disconnect for it.** Rebooting the MCU when the
+  link drops after VERIFY cuts the module's power while it is still switching
+  images, and it comes back on the old one. LogAndStream v1.01.022 and later
+  reboot the MCU themselves once the module is back, so the new version is
+  reported after reconnecting.
+
+`runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
+for any object that has the `BluetoothDevice`'s `gatt` server. Run end to end
+on a Shimmer3R from Chrome; the stalled-link fallback (reconnect, then 63-byte
+writes) is not yet hardware-verified under Web Bluetooth: `HARDWARE-VERIFY:`.
+
 ## Building
 
 ```bash

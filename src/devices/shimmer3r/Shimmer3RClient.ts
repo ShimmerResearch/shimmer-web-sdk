@@ -88,6 +88,15 @@ import {
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
+import {
+  IF820_OTA_SERVICE_UUIDS,
+  acquireIf820OtaDeviceLease,
+  runIf820OtaUpdateUnderLease,
+  if820OtaSensorSupport,
+  If820OtaError,
+  type If820OtaOptions,
+  type If820OtaResult,
+} from './if820Ota.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
@@ -361,6 +370,14 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * Default true. Set false to keep the pre-calibration behaviour (raw only).
    */
   emitCalibratedInertial?: boolean;
+  /**
+   * Extra GATT services to grant at `requestDevice` time, on top of the
+   * Shimmer3R service and the Bluetooth module's OTA update services
+   * ({@link IF820_OTA_SERVICE_UUIDS}), which are always requested so that
+   * {@link Shimmer3RClient.updateBtModuleFirmware} can run on the existing
+   * connection. Web Bluetooth only lets a page reach services listed here.
+   */
+  optionalServices?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +420,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   // Transport (byte pipe). Injected via options/connect, or a WebBluetoothTransport by default.
   private _injectedTransport: ShimmerTransport | null = null;
+  private readonly _extraOptionalServices: string[];
   private _transport: ShimmerTransport | null = null;
   private _notifyUnsub: Unsubscribe | null = null;
   private _disconnectUnsub: Unsubscribe | null = null;
@@ -718,6 +736,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.forceTimestampFmt = opts.timestampFmt ?? 'u24';
     this._injectedTransport = opts.transport ?? null;
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
+    this._extraOptionalServices = opts.optionalServices ?? [];
   }
 
   /**
@@ -770,7 +789,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       rxFlowCharUUID: SHIMMER3R_DEFAULTS.CHAR_RX_FLOW_UUID,
       requestDeviceOptions: {
         filters: [{ services: [this.serviceUUID] }],
-        optionalServices: [this.serviceUUID],
+        optionalServices: this.requestedOptionalServices(),
       },
       defaultWriteWithResponse: true,
       debug: this.debug,
@@ -2150,6 +2169,166 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * The `optionalServices` this client requests when it opens the Web
+   * Bluetooth picker: the Shimmer3R service, the Bluetooth module's OTA
+   * update services, and any {@link Shimmer3RClientOptions.optionalServices}.
+   * A host that builds its own `requestDevice` options must request the same
+   * list, or {@link updateBtModuleFirmware} cannot run on that connection.
+   */
+  requestedOptionalServices(): string[] {
+    return [
+      ...new Set([this.serviceUUID, ...IF820_OTA_SERVICE_UUIDS, ...this._extraOptionalServices]),
+    ];
+  }
+
+  /**
+   * Update the Bluetooth module's (IF820) firmware over this BLE connection.
+   * `image` is the module's `.ota.bin`. See {@link runIf820OtaUpdate} for the
+   * protocol.
+   *
+   * Refused while streaming, and only possible over Web Bluetooth — the
+   * module is updated by its own GATT service, which a Bluetooth Classic or
+   * USB link cannot reach.
+   *
+   * Deliberately does NOT arm reboot-on-disconnect. After VERIFY the module
+   * resets and spends a moment switching to the new image; on the transparent
+   * data path (every fielded v1.4.16.16 module) the MCU sees that reset as a
+   * disconnect at once, and an armed reboot then cuts the module's power
+   * mid-switch, so it comes back on the OLD image although VERIFY succeeded
+   * (bench, 15BC, SWO-logged, 2026-10-11). Firmware with DEV-1164's
+   * unexpected-module-boot handling reboots the MCU itself once the module
+   * has come back, and so reports the new version; older firmware keeps the
+   * old version string, and possibly a dead module link, until the sensor is
+   * power-cycled.
+   *
+   * Resolves once the module has accepted the image; expect a disconnect
+   * shortly after. Reconnect with a {@link WebBluetoothTransport} given the
+   * same {@link device} to avoid a second picker.
+   *
+   * Refused unless the sensor is a Shimmer3R on LogAndStream
+   * {@link IF820_OTA_MIN_SENSOR_FIRMWARE} or later (see
+   * {@link if820OtaSensorSupport}).
+   *
+   * A second call while an update is running on this connection is refused
+   * ({@link runIf820OtaUpdate} allows one per device).
+   *
+   * HARDWARE-VERIFY: run end to end on a Shimmer3R from Chrome; the fallback
+   * that reconnects after a stalled 512-byte write has not been, on hardware —
+   * see the note in `if820Ota.ts`.
+   */
+  async updateBtModuleFirmware(
+    image: ArrayBuffer | Uint8Array,
+    opts: If820OtaOptions = {},
+  ): Promise<If820OtaResult> {
+    const t = this._transport;
+    if (!t) throw new Error('Not connected');
+    if (!(t instanceof WebBluetoothTransport) || !t.device) {
+      throw new Error(
+        'The Bluetooth module can only be updated over a BLE (Web Bluetooth) connection.',
+      );
+    }
+    if (this._streaming || this._streamStarting > 0) {
+      throw new Error('Stop streaming before updating the Bluetooth module firmware.');
+    }
+    /* Taken before the version reads below, not just inside
+     * runIf820OtaUpdate: a second call must not get as far as putting its own
+     * reads on the link alongside the first's. */
+    if (this._btModuleUpdateRunning) {
+      throw new If820OtaError('A Bluetooth module update is already running on this device');
+    }
+    if (this._btModuleReconnect) {
+      throw new If820OtaError(
+        "The previous Bluetooth module update's reconnect is still in progress; try again shortly.",
+      );
+    }
+    /* The per-device lease too, before any link traffic: another client, or
+     * a direct runIf820OtaUpdate, on this same device must not be mid-update
+     * while this one sends its version reads, nor get past them alongside. */
+    const releaseLease = acquireIf820OtaDeviceLease(t.device);
+    const abandoned: Promise<unknown>[] = [];
+    this._btModuleUpdateRunning = true;
+    try {
+      /* Both reads are cached after the first on a link, so this normally
+       * costs nothing: a host reads them on connect. */
+      const hw = await this.readDeviceVersion();
+      const fw = await this.readFwVersion();
+      const support = if820OtaSensorSupport({
+        hardwareVersion: hw.hardwareVersion,
+        firmwareId: fw.fwId,
+        major: fw.major,
+        minor: fw.minor,
+        internal: fw.patch,
+      });
+      if (!support.supported) throw new Error(support.message);
+      /* Again, after the reads: startStreaming refuses once the guard above is
+       * set, but a stream started just before it is only visible now. */
+      if (this._streaming || this._streamStarting > 0) {
+        throw new Error('Stop streaming before updating the Bluetooth module firmware.');
+      }
+      /* A fallback reconnect goes through this client, on the same transport
+       * and so the same device (no picker), so the client's own link is
+       * rebuilt with it rather than left holding the dropped connection's
+       * handles. */
+      return await runIf820OtaUpdateUnderLease(
+        t.device,
+        image,
+        {
+          ...opts,
+          reconnect: opts.reconnect ?? (() => this._reconnectForBtModuleUpdate(t)),
+        },
+        (work) => abandoned.push(work),
+      );
+    } finally {
+      this._btModuleUpdateRunning = false;
+      /* Link work still in flight keeps the device leased until it settles:
+       * this client's own fallback reconnect, and anything the update gave up
+       * on (a caller's own reconnect, an unanswered write) - any of it may
+       * still change the link, which no other update on the device may
+       * share. */
+      // Re-read: the update may have set it since the check at the top.
+      const pending = this._btModuleReconnect as Promise<void> | null;
+      if (pending) abandoned.push(pending);
+      if (abandoned.length) {
+        void Promise.allSettled(abandoned).then(releaseLease);
+      } else {
+        releaseLease();
+      }
+    }
+  }
+
+  /** Set for the whole of {@link updateBtModuleFirmware}. */
+  private _btModuleUpdateRunning = false;
+  /** The update's fallback reconnect while it is in flight; see below. */
+  private _btModuleReconnect: Promise<void> | null = null;
+
+  /**
+   * The module update's fallback reconnect, one at a time. The update gives
+   * up on an attempt that runs past its timeout, but connect() itself cannot
+   * be stopped, and a second one started alongside it would leave the two
+   * resetting this client's link and protocol state over each other. So a
+   * later attempt waits on the same connect rather than starting another,
+   * and a new update is refused until it has settled; a late one that
+   * completes after the update has ended just leaves the client connected.
+   */
+  private _reconnectForBtModuleUpdate(t: ShimmerTransport): Promise<void> {
+    if (!this._btModuleReconnect) {
+      this._btModuleReconnect = this.connect(t).finally(() => {
+        this._btModuleReconnect = null;
+      });
+    }
+    return this._btModuleReconnect;
+  }
+  /** Stream starts still waiting for their ACK, before `_streaming` is set. */
+  private _streamStarting = 0;
+
+  /** Streaming would share the link with the module update's transfer. */
+  private _refuseWhileBtModuleUpdating(what: string): void {
+    if (this._btModuleUpdateRunning) {
+      throw new Error(`${what} is not possible while the Bluetooth module firmware is updating.`);
+    }
+  }
+
+  /**
    * Read from the daughter-card (expansion board) EEPROM memory. `offset` is a
    * HOST offset — firmware maps it past the first (HW details) EEPROM page, so
    * host offsets 0..2031 cover absolute EEPROM bytes 16..2047.
@@ -3394,6 +3573,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   override async startStreaming(): Promise<void> {
+    this._refuseWhileBtModuleUpdating('Streaming');
+    this._streamStarting++;
+    try {
+      await this._startStreaming();
+    } finally {
+      this._streamStarting--;
+    }
+  }
+
+  private async _startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -3509,6 +3698,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Start streaming AND SD card logging simultaneously. */
   async startStreamingAndLogging(): Promise<void> {
+    this._refuseWhileBtModuleUpdating('Streaming');
+    this._streamStarting++;
+    try {
+      await this._startStreamingAndLogging();
+    } finally {
+      this._streamStarting--;
+    }
+  }
+
+  private async _startStreamingAndLogging(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
