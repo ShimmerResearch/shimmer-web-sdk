@@ -782,11 +782,16 @@ async function runUpdate(
     const deadline = Date.now() + timeoutMs;
     let status: number;
     for (;;) {
-      status = await statuses.next(
-        Math.max(1, deadline - Date.now()),
-        what,
-        cancellable ? signal : undefined,
-      );
+      try {
+        status = await statuses.next(
+          Math.max(1, deadline - Date.now()),
+          what,
+          cancellable ? signal : undefined,
+        );
+      } catch (e) {
+        if ((e as Error)?.name !== 'AbortError') answerTimedOut = true;
+        throw e;
+      }
       if (status !== IF820_OTA_STATUS.CONTINUE && status !== IF820_OTA_STATUS.MORE_DATA) break;
       log(`skipping a late ${if820OtaStatusText(status)} while waiting for ${what}`);
     }
@@ -914,6 +919,9 @@ async function runUpdate(
       throw new ChunkRefused(e, !server.connected);
     }
   };
+
+  /** Set when a command's answer timed out: see the failure path. */
+  let answerTimedOut = false;
 
   /** Set once VERIFY is about to be written: from there the update can no
    * longer be cancelled, and is not ABORTed on failure. */
@@ -1048,7 +1056,21 @@ async function runUpdate(
       durationMs: Date.now() - started,
     };
   } catch (e) {
+    /* A command whose answer timed out may still be answered late, and on a
+     * link left up that answer would reach whatever update runs next on it.
+     * So a timed-out answer leaves the link dropped (after the best-effort
+     * ABORT), and nothing from this update can be read as the next one's. */
+    const dropStaleLink = (): void => {
+      if (!answerTimedOut || !server.connected) return;
+      log('a command answer timed out; dropping the link so no late answer reaches a later update');
+      try {
+        server.disconnect?.();
+      } catch {
+        /* already going */
+      }
+    };
     if (verifySent) {
+      dropStaleLink();
       /* An ABORT cannot undo a VERIFY the module accepted, so none is sent,
        * and the failure says the new image may be running anyway. */
       if (e instanceof If820OtaError && e.status === null) {
@@ -1061,6 +1083,7 @@ async function runUpdate(
       throw e;
     }
     if (server.connected) await abortQuietly();
+    dropStaleLink();
     throw e;
   } finally {
     /* A reconnect still in flight resumes nothing once the update has ended. */

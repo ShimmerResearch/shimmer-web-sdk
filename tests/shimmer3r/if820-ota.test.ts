@@ -949,6 +949,23 @@ describe('runIf820OtaUpdate', () => {
     expect(String(next?.message)).not.toMatch(/already running/);
   });
 
+  it('drops the link after a command answer times out, so no late answer carries over', async () => {
+    const mod = new FakeIf820({ silentOn: IF820_OTA_COMMAND.PREPARE_DOWNLOAD });
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100), {
+      responseTimeoutMs: 50,
+    }).catch((e) => e);
+    expect(err.message).toMatch(/did not answer PREPARE_DOWNLOAD/);
+    expect(mod.commands.at(-1)).toEqual([IF820_OTA_COMMAND.ABORT]);
+    expect(mod.disconnects).toBe(1);
+  });
+
+  it('keeps the link after a refusal, which is a complete answer', async () => {
+    const mod = new FakeIf820({ corrupt: true });
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100)).catch((e) => e);
+    expect(err.status).toBe(IF820_OTA_STATUS.VERIFICATION_FAILED);
+    expect(mod.disconnects).toBe(0);
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
