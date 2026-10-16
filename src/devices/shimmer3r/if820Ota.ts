@@ -509,10 +509,18 @@ export async function runIf820OtaUpdate(
   opts: If820OtaOptions = {},
 ): Promise<If820OtaResult> {
   const release = acquireIf820OtaDeviceLease(device);
+  const abandoned: Promise<unknown>[] = [];
   try {
-    return await runUpdate(device, image, opts);
+    return await runUpdate(device, image, opts, (p) => abandoned.push(p));
   } finally {
-    release();
+    /* A connect or reconnect the update gave up on cannot be stopped, and may
+     * still change the link after this returns; the device stays leased
+     * until it settles, so no other update starts on a link it is changing. */
+    if (abandoned.length) {
+      void Promise.allSettled(abandoned).then(release);
+    } else {
+      release();
+    }
   }
 }
 
@@ -566,6 +574,8 @@ async function runUpdate(
   device: If820OtaDeviceLike,
   image: ArrayBuffer | Uint8Array,
   opts: If820OtaOptions,
+  /** Told of link work given up on that may still be running. */
+  onAbandoned: (work: Promise<unknown>) => void = () => {},
 ): Promise<If820OtaResult> {
   /* A private copy: the image cannot change under the CRC mid-transfer, and
    * it is ArrayBuffer-backed, which the GATT write signature requires. */
@@ -603,8 +613,12 @@ async function runUpdate(
       onStatus('Connecting to the Bluetooth module…');
       /* Bounded and cancellable like every later step: a connect the stack
        * never settles must not hold the update forever. */
-      await settleWithin(server.connect(), responseTimeoutMs, signal, () => {
+      const connecting = server.connect();
+      await settleWithin(connecting, responseTimeoutMs, signal, () => {
         return new If820OtaError('Connecting timed out', { transient: true });
+      }).catch((e: unknown) => {
+        onAbandoned(connecting);
+        throw e;
       });
     }
   } catch (e) {
@@ -645,20 +659,21 @@ async function runUpdate(
       throw wrapGattError(e, 'Opening the update characteristics');
     }
     if (!current()) return;
-    ctrl.addEventListener('characteristicvaluechanged', onValue);
+    /* The listener goes on only once the subscription has started, and only
+     * for the current attempt: a startNotifications() that never settles is
+     * abandoned by its caller's timeout, and must leave nothing attached.
+     * Nothing arrives on the control point before a command is sent, so no
+     * status is missed by subscribing first. */
     try {
       await ctrl.startNotifications();
     } catch (e) {
-      if (ctrl !== control) ctrl.removeEventListener('characteristicvaluechanged', onValue);
       throw wrapGattError(e, 'Subscribing to the update control point');
     }
-    if (!current()) {
-      if (ctrl !== control) ctrl.removeEventListener('characteristicvaluechanged', onValue);
-      return;
-    }
+    if (!current()) return;
     if (control && control !== ctrl) {
       control.removeEventListener('characteristicvaluechanged', onValue);
     }
+    ctrl.addEventListener('characteristicvaluechanged', onValue);
     control = ctrl;
     data = dat;
     serviceUuid = resolved.uuid;
@@ -705,6 +720,7 @@ async function runUpdate(
         return;
       } catch (e) {
         reopenGeneration++;
+        onAbandoned(reopened);
         if ((e as Error)?.name === 'AbortError') throw e;
         lastError = e;
         log(`reconnect attempt ${attempt} failed: ${String(e)}`);

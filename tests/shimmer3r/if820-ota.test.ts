@@ -847,6 +847,45 @@ describe('runIf820OtaUpdate', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it('leaves no listener behind when the subscription never starts', async () => {
+    const listeners = new Set<unknown>();
+    const char = {
+      value: null,
+      startNotifications: () => new Promise<never>(() => {}),
+      addEventListener: (_t: string, l: unknown) => void listeners.add(l),
+      removeEventListener: (_t: string, l: unknown) => void listeners.delete(l),
+      writeValueWithResponse: async () => {},
+    };
+    const server = {
+      connected: true,
+      connect: async () => server,
+      getPrimaryService: async () => ({ getCharacteristic: async () => char }),
+    } as unknown as If820OtaGattServerLike;
+    const err = await runIf820OtaUpdate({ gatt: server }, image(10), {
+      responseTimeoutMs: 50,
+    }).catch((e) => e);
+    expect(err.message).toMatch(/Opening the update service timed out/);
+    expect(listeners.size).toBe(0);
+  });
+
+  it('keeps the device leased until a reconnect it gave up on settles', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const device = { gatt: mod.server };
+    let finish!: () => void;
+    const err = await runIf820OtaUpdate(device, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      reconnectAttempts: 1,
+      responseTimeoutMs: 50,
+      reconnect: () => new Promise<void>((r) => (finish = r)),
+    }).catch((e) => e);
+    expect(err.transient).toBe(true);
+    await expect(runIf820OtaUpdate(device, image(10))).rejects.toThrow(/already running/);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
