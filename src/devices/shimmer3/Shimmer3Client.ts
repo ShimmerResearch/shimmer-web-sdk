@@ -553,10 +553,19 @@ export class Shimmer3Client extends BaseShimmerClient {
    * stranded part-way - the connect handshake, a stop's drain - went on over
    * the next link.
    *
-   * HARDWARE-VERIFY: failing the old link's commands here assumes nothing that
-   * answers them can arrive over the next link, or nothing that the connect
-   * handshake's flush does not discard. Exercised on loopback only; no Shimmer3
-   * has dropped and reconnected under this code.
+   * Failing the old link's commands here assumes nothing that answers them can
+   * arrive over the next link, or nothing that the connect handshake's flush
+   * does not discard. Run on hardware (bench-tools shimmer3-link-drop.mjs,
+   * 2026-10-16): a Base6 reset dropped the link of a Shimmer3 on each shipped
+   * radio (RN42 v4.77 and v6.15, RN4678 V1.00.5 and V1.23, LogAndStream
+   * v1.01.006) with a command, a status read and a battery read stranded, and
+   * the app's disconnect() and reconnect left nothing crossing over, 12 runs of
+   * 12.
+   *
+   * HARDWARE-VERIFY: the reset reached from a transport-reported drop. Over a
+   * Windows Bluetooth COM port the drop is never reported - writes still
+   * succeed and the bridge sees no error - so that run reached this reset
+   * through disconnect() alone. Web Serial in Chrome is untested.
    */
   private _resetLinkProtocolState(): void {
     this._rxBuf = new Uint8Array(0);
