@@ -1374,9 +1374,16 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     void client.whenBtModuleUpdateIdle().then(() => (idle = true));
     await new Promise((r) => setTimeout(r, 20));
     expect(idle).toBe(false);
+    // Still waits for that device after the host drops or switches the link.
+    c._transport = new LoopbackTransport();
+    let idleAfterSwitch = false;
+    void client.whenBtModuleUpdateIdle().then(() => (idleAfterSwitch = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idleAfterSwitch).toBe(false);
     finish();
     await new Promise((r) => setTimeout(r, 0));
     expect(idle).toBe(true);
+    expect(idleAfterSwitch).toBe(true);
   });
 
   it('reconnects through its own transport when the update falls back', async () => {
