@@ -1334,6 +1334,51 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 
+  it('whenBtModuleUpdateIdle waits for abandoned reconnect work, and resolves at once off Web Bluetooth', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const { LoopbackTransport } = await import('../../src/core/transport/LoopbackTransport.js');
+
+    // Not connected, and connected over a non-Web-Bluetooth link: at once.
+    const plain = new Shimmer3RClient();
+    await expect(plain.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+    (plain as unknown as { _transport: unknown })._transport = new LoopbackTransport();
+    await expect(plain.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+
+    // Over Web Bluetooth: pending while an abandoned reconnect holds the device.
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+    };
+    c._transport = t;
+    c.readDeviceVersion = async () => ({ hardwareVersion: 10 });
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+    await expect(client.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+    let finish!: () => void;
+    await client
+      .updateBtModuleFirmware(image(2000), {
+        firstWriteTimeoutMs: 50,
+        reconnectDelayMs: 1,
+        reconnectAttempts: 1,
+        responseTimeoutMs: 50,
+        reconnect: () => new Promise<void>((r) => (finish = r)),
+      })
+      .catch(() => {});
+    let idle = false;
+    void client.whenBtModuleUpdateIdle().then(() => (idle = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idle).toBe(false);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(idle).toBe(true);
+  });
+
   it('reconnects through its own transport when the update falls back', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
     const { WebBluetoothTransport } =
