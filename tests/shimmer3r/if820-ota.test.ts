@@ -163,10 +163,23 @@ class FakeIf820 {
       disconnect: () => {
         this.connected = false;
         this.disconnects++;
+        this._dropPending();
       },
     } as unknown as If820OtaGattServerLike;
     Object.defineProperty(server, 'connected', { get: () => this.connected });
     return server;
+  }
+
+  /** Writes the module never answers. As in Web Bluetooth, they reject once
+   * the link drops; until then they stay pending. */
+  private readonly _pending: Array<(e: Error) => void> = [];
+  private _hang(): Promise<void> {
+    return new Promise<void>((_, reject) => this._pending.push(reject));
+  }
+  private _dropPending(): void {
+    const e = new Error('GATT Server is disconnected. Cannot perform GATT operations.');
+    e.name = 'NetworkError';
+    for (const reject of this._pending.splice(0)) reject(e);
   }
 
   private _answer(status: number): void {
@@ -177,7 +190,7 @@ class FakeIf820 {
     const cmd = Array.from(bytes);
     this.commands.push(cmd);
     const op = cmd[0];
-    if (op === this.opts.hangWriteOf) return new Promise<void>(() => {});
+    if (op === this.opts.hangWriteOf) return this._hang();
     if (op === IF820_OTA_COMMAND.VERIFY) {
       for (const late of this.opts.lateStatusesAfterLastWrite ?? []) this.control.notify([late]);
     }
@@ -215,10 +228,10 @@ class FakeIf820 {
 
   private _onData(bytes: Uint8Array): void | Promise<void> {
     if (this.opts.stallAbove !== undefined && bytes.length > this.opts.stallAbove) {
-      return new Promise<void>(() => {});
+      return this._hang();
     }
     if (this.opts.stallAtOffset !== undefined && this.received.length >= this.opts.stallAtOffset) {
-      return new Promise<void>(() => {});
+      return this._hang();
     }
     if (this.opts.dropAtOffset !== undefined && this.received.length >= this.opts.dropAtOffset) {
       this.connected = false;
@@ -886,6 +899,27 @@ describe('runIf820OtaUpdate', () => {
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 
+  it('an ABORT that goes unanswered drops the link, freeing the device once it settles', async () => {
+    const mod = new FakeIf820({
+      silentOn: IF820_OTA_COMMAND.DOWNLOAD,
+      hangWriteOf: IF820_OTA_COMMAND.ABORT,
+    });
+    const device = { gatt: mod.server };
+    const err = await runIf820OtaUpdate(device, image(100), { responseTimeoutMs: 50 }).catch(
+      (e) => e,
+    );
+    expect(err.message).toMatch(/did not answer DOWNLOAD/);
+    expect(mod.commands.at(-1)).toEqual([IF820_OTA_COMMAND.ABORT]);
+    // Dropped as a stalled link; the drop rejects the hung ABORT, as Web
+    // Bluetooth does, and only then is the device free for another update.
+    expect(mod.disconnects).toBe(1);
+    await new Promise((r) => setTimeout(r, 0));
+    const next = await runIf820OtaUpdate(device, image(10), { responseTimeoutMs: 50 }).catch(
+      (e) => e,
+    );
+    expect(String(next?.message)).not.toMatch(/already running/);
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
@@ -1195,6 +1229,40 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     finish();
     await new Promise((r) => setTimeout(r, 0));
     expect(connects).toBe(1);
+    await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
+  });
+
+  it("keeps the device leased while a caller's own reconnect it gave up on is still running", async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const device = { gatt: mod.server };
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: device });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+    };
+    c._transport = t;
+    c.readDeviceVersion = async () => ({ hardwareVersion: 10 });
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+    let finish!: () => void;
+    const err = await client
+      .updateBtModuleFirmware(image(2000), {
+        firstWriteTimeoutMs: 50,
+        reconnectDelayMs: 1,
+        reconnectAttempts: 1,
+        responseTimeoutMs: 50,
+        reconnect: () => new Promise<void>((r) => (finish = r)),
+      })
+      .catch((e) => e);
+    expect(err.transient).toBe(true);
+    await expect(runIf820OtaUpdate(device, image(10))).rejects.toThrow(/already running/);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 

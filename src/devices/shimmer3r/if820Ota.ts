@@ -559,8 +559,11 @@ export function runIf820OtaUpdateUnderLease(
   device: If820OtaDeviceLike,
   image: ArrayBuffer | Uint8Array,
   opts: If820OtaOptions = {},
+  /** Told of link work the update gave up on that may still be running; the
+   * caller keeps the lease until it settles. */
+  onAbandoned?: (work: Promise<unknown>) => void,
 ): Promise<If820OtaResult> {
-  return runUpdate(device, image, opts);
+  return runUpdate(device, image, opts, onAbandoned);
 }
 
 /** How long a cancelled first write may take to settle before the link is
@@ -799,7 +802,21 @@ async function runUpdate(
         sent.then(() => true),
         sleep(IF820_OTA_ABORT_GRACE_MS).then(() => false),
       ]);
-      if (landed) log('control point → ABORT');
+      if (landed) {
+        log('control point → ABORT');
+      } else {
+        /* An ABORT that is not even accepted means a stalled link: drop it,
+         * and keep the device leased until the write settles. */
+        onAbandoned(sent);
+        if (server.connected) {
+          log('ABORT went unanswered; dropping the link');
+          try {
+            server.disconnect?.();
+          } catch {
+            /* already going */
+          }
+        }
+      }
     } catch {
       /* Best effort: the link may already be gone. Without a VERIFY the
        * module never switches images, so nothing depends on this landing. */
@@ -860,9 +877,13 @@ async function runUpdate(
           ),
           sleep(IF820_OTA_ABORT_GRACE_MS).then(() => false),
         ]);
-        if (!settled) dropStalled('cancelled during a stalled write');
+        if (!settled) {
+          onAbandoned(attempt);
+          dropStalled('cancelled during a stalled write');
+        }
         throw abortError();
       }
+      if (timedOut) onAbandoned(attempt);
       if (timedOut && dropOnTimeout) dropStalled('a data write went unanswered');
       throw e;
     } finally {

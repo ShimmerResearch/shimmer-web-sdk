@@ -2245,6 +2245,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * a direct runIf820OtaUpdate, on this same device must not be mid-update
      * while this one sends its version reads, nor get past them alongside. */
     const releaseLease = acquireIf820OtaDeviceLease(t.device);
+    const abandoned: Promise<unknown>[] = [];
     this._btModuleUpdateRunning = true;
     try {
       /* Both reads are cached after the first on a link, so this normally
@@ -2268,19 +2269,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * and so the same device (no picker), so the client's own link is
        * rebuilt with it rather than left holding the dropped connection's
        * handles. */
-      return await runIf820OtaUpdateUnderLease(t.device, image, {
-        ...opts,
-        reconnect: opts.reconnect ?? (() => this._reconnectForBtModuleUpdate(t)),
-      });
+      return await runIf820OtaUpdateUnderLease(
+        t.device,
+        image,
+        {
+          ...opts,
+          reconnect: opts.reconnect ?? (() => this._reconnectForBtModuleUpdate(t)),
+        },
+        (work) => abandoned.push(work),
+      );
     } finally {
       this._btModuleUpdateRunning = false;
-      /* A fallback reconnect still in flight keeps the device leased until it
-       * settles: until then it may still reset this client's link, which no
-       * other update on the device may share. */
+      /* Link work still in flight keeps the device leased until it settles:
+       * this client's own fallback reconnect, and anything the update gave up
+       * on (a caller's own reconnect, an unanswered write) - any of it may
+       * still change the link, which no other update on the device may
+       * share. */
       // Re-read: the update may have set it since the check at the top.
       const pending = this._btModuleReconnect as Promise<void> | null;
-      if (pending) {
-        pending.then(releaseLease, releaseLease);
+      if (pending) abandoned.push(pending);
+      if (abandoned.length) {
+        void Promise.allSettled(abandoned).then(releaseLease);
       } else {
         releaseLease();
       }
