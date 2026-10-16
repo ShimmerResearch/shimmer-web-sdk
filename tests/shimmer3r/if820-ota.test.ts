@@ -673,6 +673,20 @@ describe('runIf820OtaUpdate', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it('never writes VERIFY when cancelled from the onLog line that announces it', async () => {
+    const mod = new FakeIf820();
+    const ctrl = new AbortController();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(1000), {
+      signal: ctrl.signal,
+      onLog: (line) => {
+        if (line.startsWith('control point → VERIFY')) ctrl.abort();
+      },
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(mod.commands.some((c) => c[0] === IF820_OTA_COMMAND.VERIFY)).toBe(false);
+    expect(mod.commands.at(-1)).toEqual([IF820_OTA_COMMAND.ABORT]);
+  });
+
   it('runs to completion when cancelled after VERIFY was written', async () => {
     const mod = new FakeIf820({ verifyDelayMs: 100 });
     const ctrl = new AbortController();

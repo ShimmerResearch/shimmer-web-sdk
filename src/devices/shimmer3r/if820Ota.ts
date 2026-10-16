@@ -690,6 +690,10 @@ async function runUpdate(
      * once written lets the module switch images. */
     throwIfAborted(signal);
     log(`control point → ${what}`);
+    /* Again after log(): onLog is the caller's code and may itself cancel. */
+    throwIfAborted(signal);
+    /* From here the command is on its way; for VERIFY that is the commit. */
+    if (op === IF820_OTA_COMMAND.VERIFY) verifySent = true;
     /* Bounded and cancellable like the data writes: a control-point write
      * that hangs on a failing link would otherwise never reach the response
      * wait, where the timeout and the cancel apply. (awaitWrite is declared
@@ -900,7 +904,6 @@ async function runUpdate(
      * switching images, which an ABORT cannot undo, so the write and its
      * answer run to completion or to their timeouts, never to a cancel. */
     throwIfAborted(signal);
-    verifySent = true;
     await send(
       IF820_OTA_COMMAND.VERIFY,
       crc,
