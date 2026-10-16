@@ -445,9 +445,13 @@ function wrapGattError(e: unknown, what: string): unknown {
 async function resolveService(
   server: If820OtaGattServerLike,
   log: (m: string) => void,
+  /** False once the caller has given up on this discovery: stop issuing
+   * lookups on the link. */
+  stillWanted: () => boolean = () => true,
 ): Promise<{ service: If820OtaServiceLike; uuid: string }> {
   let lastError: unknown = null;
   for (const uuid of IF820_OTA_SERVICE_UUIDS) {
+    if (!stillWanted()) throw abortError();
     try {
       const service = await server.getPrimaryService(uuid);
       log(`OTA service ${uuid} found`);
@@ -651,7 +655,7 @@ async function runUpdate(
      * given up on (see reopen) may still be part-way through it when a later
      * one starts, and must not leave its handles or listener behind. */
     const current = (): boolean => generation === undefined || generation === reopenGeneration;
-    const resolved = await resolveService(server, log);
+    const resolved = await resolveService(server, log, current);
     if (!current()) return;
     let ctrl: If820OtaCharacteristicLike;
     let dat: If820OtaCharacteristicLike;
@@ -995,12 +999,16 @@ async function runUpdate(
        * given up on is invalidated by its generation, so it can never commit
        * its handles late (see open). */
       const generation = ++reopenGeneration;
+      const opening = open(generation);
       try {
-        await settleWithin(open(generation), responseTimeoutMs, signal, () => {
+        await settleWithin(opening, responseTimeoutMs, signal, () => {
           return new If820OtaError('Opening the update service timed out', { transient: true });
         });
       } catch (e) {
         reopenGeneration++;
+        /* Still discovering or subscribing on the link: the device stays
+         * leased until it settles, as for a reconnect attempt. */
+        onAbandoned(opening);
         throw e;
       }
     }

@@ -920,6 +920,35 @@ describe('runIf820OtaUpdate', () => {
     expect(String(next?.message)).not.toMatch(/already running/);
   });
 
+  it('keeps the device leased until an abandoned first service discovery settles', async () => {
+    let finish!: () => void;
+    let lookups = 0;
+    const server = {
+      connected: true,
+      connect: async () => server,
+      getPrimaryService: () => {
+        lookups++;
+        return new Promise<never>((_, reject) => {
+          finish = () => reject(Object.assign(new Error('gone'), { name: 'NetworkError' }));
+        });
+      },
+    } as unknown as If820OtaGattServerLike;
+    const device = { gatt: server };
+    const err = await runIf820OtaUpdate(device, image(10), { responseTimeoutMs: 50 }).catch(
+      (e) => e,
+    );
+    expect(err.message).toMatch(/Opening the update service timed out/);
+    await expect(runIf820OtaUpdate(device, image(10))).rejects.toThrow(/already running/);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    // The stale discovery stopped rather than trying the next service UUID.
+    expect(lookups).toBe(1);
+    const next = await runIf820OtaUpdate(device, image(10), { responseTimeoutMs: 50 }).catch(
+      (e) => e,
+    );
+    expect(String(next?.message)).not.toMatch(/already running/);
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
