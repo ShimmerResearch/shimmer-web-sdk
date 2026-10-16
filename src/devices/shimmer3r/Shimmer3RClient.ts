@@ -2249,6 +2249,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
         internal: fw.patch,
       });
       if (!support.supported) throw new Error(support.message);
+      /* Again, after the reads: startStreaming refuses once the guard above is
+       * set, but a stream started just before it is only visible now. */
+      if (this._streaming) {
+        throw new Error('Stop streaming before updating the Bluetooth module firmware.');
+      }
       /* A fallback reconnect goes through this client, on the same transport
        * and so the same device (no picker), so the client's own link is
        * rebuilt with it rather than left holding the dropped connection's
@@ -2264,6 +2269,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Set for the whole of {@link updateBtModuleFirmware}. */
   private _btModuleUpdateRunning = false;
+
+  /** Streaming would share the link with the module update's transfer. */
+  private _refuseWhileBtModuleUpdating(what: string): void {
+    if (this._btModuleUpdateRunning) {
+      throw new Error(`${what} is not possible while the Bluetooth module firmware is updating.`);
+    }
+  }
 
   /**
    * Read from the daughter-card (expansion board) EEPROM memory. `offset` is a
@@ -3510,6 +3522,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   override async startStreaming(): Promise<void> {
+    this._refuseWhileBtModuleUpdating('Streaming');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -3625,6 +3638,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Start streaming AND SD card logging simultaneously. */
   async startStreamingAndLogging(): Promise<void> {
+    this._refuseWhileBtModuleUpdating('Streaming');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
