@@ -393,15 +393,14 @@ export class Shimmer3Client extends BaseShimmerClient {
      * the previous one fails here, rather than take this link's ACK or reply. */
     this._resetLinkProtocolState();
     const link = this._link.current;
-    /* The schema describes the old device's channel layout, and the
-     * enabled-sensor bitmap is the one it was built with: a reconnect -
-     * possibly to a different sensor - inherits neither until it inquires.
-     * Same reset as Shimmer3RClient.connect. Nor its versions: a command
+    /* The schema describes the old device's channel layout, and the settings
+     * beside it were read from that device's config word: a reconnect -
+     * possibly to a different sensor - inherits none of them until it
+     * inquires. Same reset as Shimmer3RClient.connect. Nor its versions: a command
      * gated on them, run from a status callback before the handshake reads
      * the new device's, would be judged against the old one's, and a failed
      * handshake would leave them describing a device no longer connected. */
-    this.schema = null;
-    this.enabledSensors = 0x000000;
+    this._resetInquiredConfig();
     this.deviceVersion = null;
     this.firmwareVersion = null;
     /* And the previous transport's subscriptions go. After a drop nothing else
@@ -497,6 +496,24 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._link.throwIfReset(link, gone);
   }
 
+  /**
+   * Forget everything an inquiry set: the schema and every setting read from
+   * the device's config word. They describe the device at the far end, so a
+   * link to the next device - perhaps a different sensor - starts from the
+   * declared defaults until it inquires. An inquiry stores them before its
+   * status line and onInquiry run, so a reconnect made from either relies on
+   * this too. Same reset as Shimmer3RClient's.
+   */
+  private _resetInquiredConfig(): void {
+    this.schema = null;
+    this.enabledSensors = 0x000000;
+    this.samplingRateHz = 0;
+    this.gsrRangeSetting = 0;
+    this.ExpPower = 0;
+    this.imuRanges = { lnAccel: 0, wrAccel: 0, gyro: 0, mag: 0, altAccel: 0, altMag: 0 };
+    this.pressureOversampling = 0;
+  }
+
   override async disconnect(): Promise<void> {
     // Application-initiated teardown is not a fault, so `onDisconnect` stays
     // silent — including when this call is the cleanup that follows a drop.
@@ -514,9 +531,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._transport = null;
     this._resetLinkProtocolState();
     const ended = this._link.current;
-    this.schema = null;
-    this.enabledSensors = 0x000000;
-    this.ExpPower = 0;
+    this._resetInquiredConfig();
     this._timeline.reset();
     try {
       await t?.disconnect();

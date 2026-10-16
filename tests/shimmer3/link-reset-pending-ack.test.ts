@@ -267,7 +267,7 @@ describe('an operation the drop strands part-way', () => {
     expect(first.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.INQUIRY_COMMAND);
   });
 
-  it("a reconnect from onInquiry does not leave the old device's schema on the next link", async () => {
+  it("a reconnect from onInquiry does not leave the old device's schema or settings on the next link", async () => {
     const inquiry: Answer = (cmd) =>
       cmd[0] === OPCODES.INQUIRY_COMMAND ? [ACK, ...INQUIRY_MSG] : [ACK];
     const first = device(inquiry);
@@ -284,6 +284,12 @@ describe('an operation the drop strands part-way', () => {
     // Stored before the callback ran, and the next device has not inquired
     expect(client.enabledSensors).toBe(0);
     expect((client as unknown as { schema: unknown }).schema).toBeNull();
+    // INQUIRY_MSG sets 51.2 Hz, expansion power on and GSR range 2
+    expect(client.samplingRateHz).toBe(0);
+    expect(client.ExpPower).toBe(0);
+    expect(client.gsrRangeSetting).toBe(0);
+    expect(client.pressureOversampling).toBe(0);
+    expect(Object.values(client.imuRanges).every((r) => r === 0)).toBe(true);
   });
 
   it('an ExG preset dropped part-way fails, rather than finish on the next device', async () => {
