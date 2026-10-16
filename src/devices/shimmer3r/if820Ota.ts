@@ -247,7 +247,8 @@ export interface If820OtaOptions {
   onRetry?: (info: { fromChunkSize: number; toChunkSize: number; reconnecting: boolean }) => void;
   /** Bound on the first data write. */
   firstWriteTimeoutMs?: number;
-  /** Reconnect attempts after dropping a stalled link. */
+  /** Reconnect attempts after dropping a stalled link. Each is bounded by
+   * `responseTimeoutMs` and ends at once on a cancel. */
   reconnectAttempts?: number;
   /** Pause before each reconnect attempt. */
   reconnectDelayMs?: number;
@@ -293,6 +294,46 @@ class ChunkRefused extends Error {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * `p`, unless `timeoutMs` passes first (rejects with `onTimeout()`) or the
+ * signal is cancelled (rejects with AbortError). `p`'s own late result is
+ * ignored.
+ */
+function settleWithin<T>(
+  p: Promise<T>,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  onTimeout: () => unknown,
+): Promise<T> {
+  p.catch(() => {});
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      done();
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      done();
+      reject(onTimeout());
+    }, timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => {
+        done();
+        resolve(v);
+      },
+      (e: unknown) => {
+        done();
+        reject(e);
+      },
+    );
+  });
+}
 
 /** {@link sleep}, cut short by a cancel, which then rejects with AbortError. */
 function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
@@ -585,12 +626,22 @@ async function runUpdate(
       onStatus(
         `Reconnecting to the Bluetooth module (attempt ${attempt} of ${reconnectAttempts})…`,
       );
-      try {
+      /* Each attempt is bounded and cancellable: a connect that never settles
+       * must not hold the update forever, nor outlast a cancel. A connect that
+       * completes after it was given up on resumes nothing, because this
+       * attempt has already thrown or moved on. */
+      const reopened = (async (): Promise<void> => {
         if (opts.reconnect) await opts.reconnect();
         else await server.connect();
         await open();
+      })();
+      try {
+        await settleWithin(reopened, responseTimeoutMs, signal, () => {
+          return new If820OtaError('Reconnecting timed out', { transient: true });
+        });
         return;
       } catch (e) {
+        if ((e as Error)?.name === 'AbortError') throw e;
         lastError = e;
         log(`reconnect attempt ${attempt} failed: ${String(e)}`);
       }

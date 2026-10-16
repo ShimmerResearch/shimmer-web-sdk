@@ -507,6 +507,41 @@ describe('runIf820OtaUpdate', () => {
     expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
   });
 
+  it('cancels at once during a fallback reconnect that never completes', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const err = await runIf820OtaUpdate({ gatt: mod.server }, image(2000), {
+      signal: ctrl.signal,
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      reconnect: () => {
+        setTimeout(() => ctrl.abort(), 20);
+        return new Promise<void>(() => {});
+      },
+    }).catch((e) => e);
+    expect(err.name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('gives up on a reconnect attempt that never completes and tries again', async () => {
+    const mod = new FakeIf820({ stallAbove: 63, stallClearsOnReconnect: true });
+    const server = mod.server;
+    let calls = 0;
+    const result = await runIf820OtaUpdate({ gatt: server }, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      responseTimeoutMs: 100,
+      reconnect: async () => {
+        calls++;
+        if (calls === 1) return new Promise<void>(() => {});
+        await server.connect();
+      },
+    });
+    expect(calls).toBe(2);
+    expect(result.chunkSize).toBe(IF820_OTA_SAFE_CHUNK_SIZE);
+  });
+
   it('cancels at once during the wait before a fallback reconnect', async () => {
     const mod = new FakeIf820({ stallAbove: 63 });
     const ctrl = new AbortController();
