@@ -876,6 +876,29 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await expect(update).resolves.toMatchObject({ bytes: 500 });
   });
 
+  it('refuses the update while a stream start is still waiting for its ACK', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const mod = new FakeIf820();
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      _startStreaming: () => Promise<void>;
+    };
+    c._transport = t;
+    let release!: () => void;
+    c._startStreaming = () => new Promise<void>((r) => (release = r));
+
+    const starting = client.startStreaming();
+    await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(/Stop streaming/);
+    expect(mod.commands).toEqual([]);
+    release();
+    await starting;
+  });
+
   it('reconnects through its own transport when the update falls back', async () => {
     const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
     const { WebBluetoothTransport } =

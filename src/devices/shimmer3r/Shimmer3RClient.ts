@@ -2226,7 +2226,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         'The Bluetooth module can only be updated over a BLE (Web Bluetooth) connection.',
       );
     }
-    if (this._streaming) {
+    if (this._streaming || this._streamStarting > 0) {
       throw new Error('Stop streaming before updating the Bluetooth module firmware.');
     }
     /* Taken before the version reads below, not just inside
@@ -2251,7 +2251,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (!support.supported) throw new Error(support.message);
       /* Again, after the reads: startStreaming refuses once the guard above is
        * set, but a stream started just before it is only visible now. */
-      if (this._streaming) {
+      if (this._streaming || this._streamStarting > 0) {
         throw new Error('Stop streaming before updating the Bluetooth module firmware.');
       }
       /* A fallback reconnect goes through this client, on the same transport
@@ -2269,6 +2269,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /** Set for the whole of {@link updateBtModuleFirmware}. */
   private _btModuleUpdateRunning = false;
+  /** Stream starts still waiting for their ACK, before `_streaming` is set. */
+  private _streamStarting = 0;
 
   /** Streaming would share the link with the module update's transfer. */
   private _refuseWhileBtModuleUpdating(what: string): void {
@@ -3523,6 +3525,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   override async startStreaming(): Promise<void> {
     this._refuseWhileBtModuleUpdating('Streaming');
+    this._streamStarting++;
+    try {
+      await this._startStreaming();
+    } finally {
+      this._streamStarting--;
+    }
+  }
+
+  private async _startStreaming(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -3639,6 +3650,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Start streaming AND SD card logging simultaneously. */
   async startStreamingAndLogging(): Promise<void> {
     this._refuseWhileBtModuleUpdating('Streaming');
+    this._streamStarting++;
+    try {
+      await this._startStreamingAndLogging();
+    } finally {
+      this._streamStarting--;
+    }
+  }
+
+  private async _startStreamingAndLogging(): Promise<void> {
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_BT_STREAM_SD_LOGGING → waiting for ACK…');
