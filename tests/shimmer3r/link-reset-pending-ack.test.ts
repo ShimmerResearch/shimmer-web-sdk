@@ -344,6 +344,10 @@ describe('a multi-step operation a reconnect splits', () => {
    *  held as written - except `silent`, which it never answers. */
   function regDevice(silent?: number): LoopbackTransport {
     const banks = [new Array<number>(10).fill(0), new Array<number>(10).fill(0)];
+    // A 200-byte dump: two GET_CALIB_DUMP reads at 128 bytes a chunk
+    const dump = Array.from({ length: 200 }, (_, k) => k & 0xff);
+    dump[0] = 198;
+    dump[1] = 0;
     const t = new LoopbackTransport();
     t.setOnWrite((bytes, tr) => {
       const cmd = Array.from(bytes);
@@ -353,7 +357,15 @@ describe('a multi-step operation a reconnect splits', () => {
       else if (cmd[0] === OPCODES.GET_EXG_REGS_COMMAND) {
         reply = [OPCODES.EXG_REGS_RESPONSE, 10, ...banks[cmd[1]]];
       } else if (cmd[0] === OPCODES.INQUIRY_COMMAND) reply = INQ;
-      else if (CALIB[cmd[0]] !== undefined)
+      else if (cmd[0] === OPCODES.GET_DEVICE_VERSION_COMMAND) reply = DEVVER;
+      else if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) reply = FW;
+      else if (cmd[0] === OPCODES.GET_INFOMEM_COMMAND) {
+        reply = [OPCODES.INFOMEM_RESPONSE, cmd[1], ...new Array<number>(cmd[1]).fill(0x5a)];
+      } else if (cmd[0] === OPCODES.GET_CALIB_DUMP_COMMAND) {
+        const off = cmd[2] | (cmd[3] << 8);
+        const data = dump.slice(off, off + cmd[1]);
+        reply = [OPCODES.RSP_CALIB_DUMP_COMMAND, cmd[1], cmd[2], cmd[3], ...data];
+      } else if (CALIB[cmd[0]] !== undefined)
         reply = [CALIB[cmd[0]], ...new Array<number>(21).fill(1)];
       setTimeout(() => tr.notify(new Uint8Array([ACK, ...reply])), 0);
     });
@@ -381,9 +393,10 @@ describe('a multi-step operation a reconnect splits', () => {
     return { client, first, second, swap, reconnected: () => reconnecting };
   }
   /** Run `swap` once, as soon as `client` reports a status starting `prefix`. */
-  function swapAtStatus(client: Shimmer3RClient, prefix: string, swap: () => void): void {
+  function swapAtStatus(client: Shimmer3RClient, prefix: string, swap: () => void, nth = 1): void {
+    let seen = 0;
     client.onStatus = (m) => {
-      if (!m.startsWith(prefix)) return;
+      if (!m.startsWith(prefix) || ++seen < nth) return;
       client.onStatus = null;
       swap();
     };
@@ -511,6 +524,68 @@ describe('a multi-step operation a reconnect splits', () => {
     expect(client.pressureOversampling).toBe(0);
     expect(Object.values(client.imuRanges).every((r) => r === 0)).toBe(true);
     expect((client as unknown as { schema: unknown }).schema).toBeNull();
+  });
+
+  it('setSensors fails when onInquiry starts a disconnect the transport is slow to finish', async () => {
+    const { client, first } = await onFirst();
+    let release = (): void => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    const close = first.disconnect.bind(first);
+    first.disconnect = async () => {
+      await held; // a BLE transport awaiting stopNotifications
+      await close();
+    };
+    let disconnected: Promise<void> = Promise.resolve();
+    client.onInquiry = () => {
+      client.onInquiry = null;
+      disconnected = client.disconnect();
+    };
+    const setting = client.setSensors(0x000080).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    const got = await Promise.race([setting, tick(500).then(() => 'still waiting')]);
+    release();
+    await disconnected;
+    expect(got).toMatch(/link was reset/);
+    expect(client.getEnabledSensors()).toBe(0);
+  });
+
+  /* Chunked operations: one link for every chunk. The status line before each
+     chunk is where a callback reconnects, between two chunks. */
+  it('readInfoMemBytes does not read its later pages from the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'GET_INFOMEM', swap, 2);
+    await expect(client.readInfoMemBytes()).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.GET_INFOMEM_COMMAND);
+  });
+
+  it('writeInfoMemBytes does not finish its image on the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'SET_INFOMEM', swap, 2);
+    await expect(client.writeInfoMemBytes(new Uint8Array(384))).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.SET_INFOMEM_COMMAND);
+  });
+
+  it('readCalibDump does not read its later chunks from the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'GET_CALIB_DUMP', swap, 2);
+    await expect(client.readCalibDump()).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.GET_CALIB_DUMP_COMMAND);
+  });
+
+  it('writeCalibDump does not finish, or apply, its dump on the next device', async () => {
+    const { client, second, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'SET_CALIB_DUMP', swap, 2);
+    const dump = new Uint8Array(200);
+    dump[0] = 198;
+    await expect(client.writeCalibDump(dump)).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(sent(second)).not.toContain(OPCODES.SET_CALIB_DUMP_COMMAND);
+    expect(sent(second)).not.toContain(OPCODES.UPD_CALIB_DUMP_COMMAND);
   });
 
   it("readExgConfig does not take chip 2's bank from the next device", async () => {

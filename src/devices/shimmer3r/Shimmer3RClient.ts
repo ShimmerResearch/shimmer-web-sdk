@@ -927,22 +927,30 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // coming, so there is nothing left to drain, and a caller awaiting the
     // report must be told rather than left on a timer for the whole budget.
     this._failFactoryTest('Disconnected while the factory self-test was running.');
+    /* The link ends first, and the transport closes after, as in
+       Shimmer3Client.disconnect. Closing can take a while - a BLE transport
+       awaits stopNotifications - and until the link ended, an operation whose
+       callback started this disconnect passed its link checks and went on as
+       if the link were current. Every reset happens before the await, so a
+       connect() begun during it has nothing of its own cleared afterwards. */
+    const t = this._transport;
+    this._notifyUnsub?.();
+    this._disconnectUnsub?.();
+    this._notifyUnsub = this._disconnectUnsub = null;
+    this._transport = null;
+    this.device = null;
+    this._resetLinkProtocolState();
+    const ended = this._linkGeneration;
+    this._unframed = false;
+    this._resetInquiredConfig();
+    this._deviceCalibrations = {};
     try {
-      this._notifyUnsub?.();
-      this._disconnectUnsub?.();
-      await this._transport?.disconnect();
+      await t?.disconnect();
     } catch {
       /* ignore */
-    } finally {
-      this._notifyUnsub = this._disconnectUnsub = null;
-      this._transport = null;
-      this.device = null;
-      this._resetLinkProtocolState();
-      this._unframed = false;
-      this._resetInquiredConfig();
-      this._deviceCalibrations = {};
-      this._emitStatus('Disconnected');
     }
+    // Not over a connect() begun meanwhile, which is not disconnected
+    if (this._linkGeneration === ended) this._emitStatus('Disconnected');
   }
 
   /**
@@ -2075,6 +2083,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   async readInfoMem(address: number, length: number): Promise<Uint8Array> {
+    return this._readInfoMem(address, length, this._linkGeneration);
+  }
+
+  /** {@link readInfoMem} on `link`, the link its operation began on. */
+  private async _readInfoMem(address: number, length: number, link: number): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
       throw new Error('InfoMem address must be an integer in 0..65535.');
@@ -2095,7 +2108,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * opcode-less chunk could be an unrelated notification, e.g. a 0x00-preamble
      * data frame, and must not be mis-captured as InfoMem payload); the length
      * byte is optional. Reads longer than one BLE notification are reassembled. */
-    return this._readLengthPrefixedResponse(cmd, OPCODES.INFOMEM_RESPONSE, length, 'InfoMem read');
+    return this._readLengthPrefixedResponse(
+      cmd,
+      OPCODES.INFOMEM_RESPONSE,
+      length,
+      'InfoMem read',
+      1,
+      1500,
+      2000,
+      undefined,
+      link,
+    );
   }
 
   /**
@@ -2299,6 +2322,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * but the round trip is unconfirmed.
    */
   async writeInfoMem(address: number, data: Uint8Array): Promise<void> {
+    return this._writeInfoMem(address, data, this._linkGeneration);
+  }
+
+  /** {@link writeInfoMem} on `link`, the link its operation began on. */
+  private async _writeInfoMem(address: number, data: Uint8Array, link: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!Number.isInteger(address) || address < 0 || address > 0xffff) {
       throw new Error('InfoMem address must be an integer in 0..65535.');
@@ -2313,7 +2341,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     cmd[2] = address & 0xff;
     cmd[3] = (address >> 8) & 0xff;
     cmd.set(data, 4);
-    await this._writeExpectingAck(cmd, 1500);
+    await this._writeExpectingAck(cmd, 1500, link);
     this._emitStatus('InfoMem write ACKed');
   }
 
@@ -2331,7 +2359,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readInfoMemBytes(): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
-    return this._readInfoMemBytesImpl(await this._infoMemCtx());
+    // Every page from one device: a reconnect between pages must not mix two
+    const link = this._linkGeneration;
+    return this._readInfoMemBytesImpl(await this._infoMemCtx(), link);
   }
 
   /**
@@ -2366,10 +2396,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
       throw new Error(`writeInfoMemBytes expects ${INFOMEM_SIZE} bytes, got ${bytes.length}`);
     }
     this._assertNotSensingForConfigWrite('InfoMem write');
+    // Every chunk to one device: a reconnect must not finish the image on another
+    const link = this._linkGeneration;
     return this._writeInfoMemBytesImpl(
       await this._infoMemCtx(),
       bytes,
       this._infoMemChunkBytes(opts.chunkBytes),
+      link,
     );
   }
 
@@ -2380,8 +2413,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readInfoMemConfig(): Promise<InfoMemDeviceConfig> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
     const ctx = await this._infoMemCtx();
-    const config = parseInfoMem(await this._readInfoMemBytesImpl(ctx), ctx);
+    const config = parseInfoMem(await this._readInfoMemBytesImpl(ctx, link), ctx);
+    // Not the old device's settings over the next link's, after a reset since
+    if (this._linkGeneration !== link) throw this._linkResetError('the configuration');
     this._adoptConfigForCalibration(config);
     return config;
   }
@@ -2449,15 +2485,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
   ): Promise<{ verified: boolean | null }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._assertNotSensingForConfigWrite('Configuration write');
+    // The clock, every chunk and the read-back on one device
+    const link = this._linkGeneration;
     const ctx = await this._infoMemCtx();
     // (1) RTC first, exactly as desktop CallableWriteConfig orders it. A
     //     rejection here propagates, so nothing is written to the InfoMem.
-    if (opts.setRtc ?? true) await this.setRtcTime(Date.now());
+    if (opts.setRtc ?? true) await this._setRtcTime(Date.now(), link);
     // (2) the chunked image write.
     const bytes = generateInfoMem(config, ctx, { base: config.raw, forDeviceWrite: true });
-    await this._writeInfoMemBytesImpl(ctx, bytes, this._infoMemChunkBytes());
+    await this._writeInfoMemBytesImpl(ctx, bytes, this._infoMemChunkBytes(), link);
     if (!(opts.verify ?? true)) return { verified: null };
-    const readback = await this._readInfoMemBytesImpl(ctx);
+    const readback = await this._readInfoMemBytesImpl(ctx, link);
     const verified = compareInfoMemExcluding(bytes, readback, deviceWriteDivergentRanges(ctx));
     this._emitStatus(`Configuration write ${verified ? 'verified' : 'MISMATCHED on read-back'}`);
     return { verified };
@@ -2499,10 +2537,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * NACKed while sensing.
    */
   async updateCalibDump(): Promise<void> {
+    return this._updateCalibDump(this._linkGeneration);
+  }
+
+  /** {@link updateCalibDump} on `link`, the link its operation began on. */
+  private async _updateCalibDump(link: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._assertNotSensingForConfigWrite('Calibration dump update');
     this._emitStatus('UPD_CALIB_DUMP → waiting for ACK…');
-    await this._writeExpectingAck(new Uint8Array([OPCODES.UPD_CALIB_DUMP_COMMAND]), 1500);
+    await this._writeExpectingAck(new Uint8Array([OPCODES.UPD_CALIB_DUMP_COMMAND]), 1500, link);
     this._emitStatus('Calibration dump applied to configuration bytes');
   }
 
@@ -2582,12 +2625,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /** Paged InfoMem read (D → C → B) against an already-resolved context. */
-  private async _readInfoMemBytesImpl(ctx: InfoMemContext): Promise<Uint8Array> {
+  private async _readInfoMemBytesImpl(ctx: InfoMemContext, link: number): Promise<Uint8Array> {
     const layout = resolveInfoMemLayout(ctx);
     const pageAddrs = [layout.addrD, layout.addrC, layout.addrB];
     const out = new Uint8Array(INFOMEM_SIZE);
     for (let i = 0; i < pageAddrs.length; i++) {
-      const chunk = await this.readInfoMem(pageAddrs[i], INFOMEM_PAGE_SIZE);
+      const chunk = await this._readInfoMem(pageAddrs[i], INFOMEM_PAGE_SIZE, link);
       if (chunk.length < INFOMEM_PAGE_SIZE) {
         throw new Error(
           `InfoMem page ${i} short read: expected ${INFOMEM_PAGE_SIZE} bytes, got ${chunk.length}`,
@@ -2611,11 +2654,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     ctx: InfoMemContext,
     bytes: Uint8Array,
     chunkBytes: number,
+    link: number,
   ): Promise<void> {
     const base = resolveInfoMemLayout(ctx).addrD;
     for (let off = 0; off < INFOMEM_SIZE; off += chunkBytes) {
       const end = Math.min(off + chunkBytes, INFOMEM_SIZE);
-      await this.writeInfoMem(base + off, bytes.subarray(off, end));
+      await this._writeInfoMem(base + off, bytes.subarray(off, end), link);
     }
     this._emitStatus(`InfoMem image written (${INFOMEM_SIZE}B in ${chunkBytes}B chunks)`);
   }
@@ -2689,6 +2733,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * For drift measurement only the rate matters, not the epoch.
    */
   async setRtcTime(unixMs: number): Promise<void> {
+    return this._setRtcTime(unixMs, this._linkGeneration);
+  }
+
+  /** {@link setRtcTime} on `link`, the link its operation began on. */
+  private async _setRtcTime(unixMs: number, link: number): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (!Number.isFinite(unixMs)) {
       throw new Error('setRtcTime: unixMs must be a finite number.');
@@ -2696,7 +2745,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const cmd = new Uint8Array(9);
     cmd[0] = OPCODES.SET_RWC_COMMAND;
     cmd.set(msToRtcBytesLE(unixMs), 1);
-    await this._writeExpectingAck(cmd, 1500);
+    await this._writeExpectingAck(cmd, 1500, link);
     /* The write steps the very counter the samples are timed by, so any anchor
        taken before it is now void. Dropped rather than adjusted: the host knows
        what it asked for but not what the device rounded it to, and a re-read is
@@ -2869,10 +2918,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * call rather than finish the preset on whatever device reconnects.
    *
    * HARDWARE-VERIFY: that binding - here and in {@link setSensors},
-   * {@link readExgConfig}, {@link writeExgConfig} and {@link readCalibration} -
-   * has only been run against a scripted loopback device that drops and
-   * reconnects between steps. No real Shimmer3R link has dropped part-way
-   * through one of them.
+   * {@link readExgConfig}, {@link writeExgConfig}, {@link readCalibration}, the
+   * chunked InfoMem reads and writes ({@link readInfoMemBytes},
+   * {@link writeInfoMemBytes}, {@link readInfoMemConfig},
+   * {@link writeInfoMemConfig}) and the calibration dump ({@link readCalibDump},
+   * {@link writeCalibDump}) - has only been run against a scripted loopback
+   * device that drops and reconnects between steps. No real Shimmer3R link has
+   * dropped part-way through one of them.
    */
   async applyExgPresetLive(preset: ApplicableExgPreset, resolution: ExgResolution): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
@@ -3091,7 +3143,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readCalibDump(): Promise<{ bytes: Uint8Array; dump: CalibDump }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
-    const head = await this._readCalibDumpChunk(0, CALIB_DUMP_CHUNK_BYTES);
+    // Every chunk from one device: a reconnect between them must not mix two dumps
+    const link = this._linkGeneration;
+    const head = await this._readCalibDumpChunk(0, CALIB_DUMP_CHUNK_BYTES, link);
     if (head.length < 2) {
       throw new Error(`Calibration dump header too short (${head.length} bytes).`);
     }
@@ -3109,7 +3163,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     bytes.set(head.subarray(0, Math.min(head.length, total)), 0);
     for (let off = head.length; off < total; off += CALIB_DUMP_CHUNK_BYTES) {
       const len = Math.min(CALIB_DUMP_CHUNK_BYTES, total - off);
-      const chunk = await this._readCalibDumpChunk(off, len);
+      const chunk = await this._readCalibDumpChunk(off, len, link);
       if (chunk.length < len) {
         throw new Error(
           `Calibration dump short read at offset ${off}: expected ${len} bytes, got ${chunk.length}`,
@@ -3158,6 +3212,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
     }
     this._assertNotSensingForConfigWrite('Calibration dump write');
+    // Every chunk, and the apply, to one device
+    const link = this._linkGeneration;
     const chunkBytes = this._infoMemChunkBytes(opts.chunkBytes);
     for (let off = 0; off < bytes.length; off += chunkBytes) {
       const chunk = bytes.subarray(off, Math.min(off + chunkBytes, bytes.length));
@@ -3168,10 +3224,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
       cmd[3] = (off >> 8) & 0xff;
       cmd.set(chunk, 4);
       this._emitStatus(`SET_CALIB_DUMP ${chunk.length}B @ ${off} → waiting for ACK…`);
-      await this._writeExpectingAck(cmd, 1500);
+      await this._writeExpectingAck(cmd, 1500, link);
     }
     this._emitStatus(`Calibration dump written (${bytes.length}B in ${chunkBytes}B chunks)`);
-    if (opts.update ?? true) await this.updateCalibDump();
+    if (opts.update ?? true) await this._updateCalibDump(link);
   }
 
   /**
@@ -3180,7 +3236,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * the request back — so the shared length-prefixed reader is told to skip
    * three rather than one.
    */
-  private async _readCalibDumpChunk(offset: number, length: number): Promise<Uint8Array> {
+  private async _readCalibDumpChunk(
+    offset: number,
+    length: number,
+    link: number,
+  ): Promise<Uint8Array> {
     const cmd = new Uint8Array([
       OPCODES.GET_CALIB_DUMP_COMMAND,
       length & 0xff,
@@ -3197,6 +3257,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       1500,
       2000,
       offset,
+      link,
     );
   }
 
