@@ -2274,7 +2274,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
       });
     } finally {
       this._btModuleUpdateRunning = false;
-      releaseLease();
+      /* A fallback reconnect still in flight keeps the device leased until it
+       * settles: until then it may still reset this client's link, which no
+       * other update on the device may share. */
+      // Re-read: the update may have set it since the check at the top.
+      const pending = this._btModuleReconnect as Promise<void> | null;
+      if (pending) {
+        pending.then(releaseLease, releaseLease);
+      } else {
+        releaseLease();
+      }
     }
   }
 

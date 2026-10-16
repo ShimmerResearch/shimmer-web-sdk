@@ -1120,9 +1120,15 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     await expect(client.updateBtModuleFirmware(image(10))).rejects.toThrow(
       /reconnect is still in progress/,
     );
+    // The device stays leased to it too, so no other update can start there.
+    const device = (t as { device: { gatt: unknown } }).device as Parameters<
+      typeof runIf820OtaUpdate
+    >[0];
+    await expect(runIf820OtaUpdate(device, image(10))).rejects.toThrow(/already running/);
     finish();
     await new Promise((r) => setTimeout(r, 0));
     expect(connects).toBe(1);
+    await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
   });
 
   it('reconnects through its own transport when the update falls back', async () => {
