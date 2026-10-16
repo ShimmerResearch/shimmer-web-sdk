@@ -808,10 +808,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._unframed = t.capabilities.framed === false;
     /* Both version caches describe the device at the far end, and the schema
      * describes its channel layout, so a reconnect - possibly to a DIFFERENT
-     * sensor - must not inherit any of them. Nor the enabled-sensor bitmap the
-     * schema was built with: it is the old device's until an inquiry here. */
-    this.schema = null;
-    this.enabledSensors = 0x000000;
+     * sensor - must not inherit any of them. Nor anything else the old
+     * device's inquiry set: it is the old device's until an inquiry here. */
+    this._resetInquiredConfig();
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
     this._statusPayloadBytes = null;
@@ -903,6 +902,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
   }
 
+  /**
+   * Forget everything an inquiry set: the schema and every setting read from
+   * the device's config word. They describe the device at the far end, so a
+   * link to the next device - perhaps a different sensor - starts from the
+   * declared defaults until it inquires. An inquiry stores them before its
+   * last status line, so a reconnect made from that line relies on this too.
+   */
+  private _resetInquiredConfig(): void {
+    this.schema = null;
+    this.enabledSensors = 0x000000;
+    this.samplingRateHz = 0;
+    this.gsrRangeSetting = 0;
+    this.ExpPower = 0;
+    this.imuRanges = { lnAccel: 0, wrAccel: 0, gyro: 0, mag: 0, altAccel: 0, altMag: 0 };
+    this.pressureOversampling = 0;
+  }
+
   override async disconnect(): Promise<void> {
     // Application-initiated teardown is not a fault, so `onDisconnect` stays
     // silent — including when this call is the cleanup that follows a drop.
@@ -923,9 +939,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this.device = null;
       this._resetLinkProtocolState();
       this._unframed = false;
-      this.schema = null;
-      this.enabledSensors = 0x000000;
-      this.ExpPower = 0;
+      this._resetInquiredConfig();
       this._deviceCalibrations = {};
       this._emitStatus('Disconnected');
     }

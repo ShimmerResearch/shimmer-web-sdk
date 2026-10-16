@@ -313,7 +313,25 @@ describe('a multi-step operation a reconnect splits', () => {
      device that replaced the first - and a caught reset read as a failed
      refresh or a missing calibration group. Each operation is now bound to
      the link it began on, and fails when that link goes. */
-  const INQ = [OPCODES.INQUIRY_RESPONSE, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0x0a, 0x0b, 0x0c];
+  /** 51.2 Hz, and a config word that sets the wide-range accel to range 3,
+   *  expansion power on and GSR range 2, so a stale setting is visible. */
+  const INQ = [
+    OPCODES.INQUIRY_RESPONSE,
+    0x80,
+    0x02,
+    0x0c,
+    0,
+    0,
+    0x05,
+    0,
+    0,
+    0,
+    3,
+    1,
+    0x0a,
+    0x0b,
+    0x0c,
+  ];
   const CALIB: Record<number, number> = {
     [OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND]: OPCODES.LN_ACCEL_CALIBRATION_RESPONSE,
     [OPCODES.GET_GYRO_CALIBRATION_COMMAND]: OPCODES.GYRO_CALIBRATION_RESPONSE,
@@ -480,6 +498,19 @@ describe('a multi-step operation a reconnect splits', () => {
     await expect(client.applyExgPresetLive('off', '16bit')).rejects.toThrow(/link was reset/);
     await disconnected;
     expect(said.some((m) => /preset 'off' applied/.test(m))).toBe(false);
+  });
+
+  it("the old device's inquired settings do not survive a reconnect from the inquiry's last status", async () => {
+    const { client, swap, reconnected } = await onFirst();
+    swapAtStatus(client, 'Expansion power', swap);
+    await expect(client.inquiry()).rejects.toThrow(/link was reset/);
+    await reconnected();
+    expect(client.samplingRateHz).toBe(0);
+    expect(client.ExpPower).toBe(0);
+    expect(client.gsrRangeSetting).toBe(0);
+    expect(client.pressureOversampling).toBe(0);
+    expect(Object.values(client.imuRanges).every((r) => r === 0)).toBe(true);
+    expect((client as unknown as { schema: unknown }).schema).toBeNull();
   });
 
   it("readExgConfig does not take chip 2's bank from the next device", async () => {
