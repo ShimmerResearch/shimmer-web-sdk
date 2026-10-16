@@ -503,7 +503,12 @@ async function resolveService(
  * `onRetry` for telling the host.
  *
  * One update at a time per device: a second call for a device whose update is
- * still running is refused before it touches the module. Two runs would share
+ * still running is refused before it touches the module. "Running" lasts
+ * until any link work the update gave up on (a connect, reconnect or write
+ * that timed out or was cancelled, which cannot itself be stopped) has
+ * settled, since it may still change the link; dropping the link settles it.
+ * A browser whose Bluetooth stack never settles such a call therefore keeps
+ * the device unavailable for updates until the page is reloaded. Two runs would share
  * the control point, each hearing the other's status bytes, and interleave
  * their writes into the one image buffer the module has.
  */

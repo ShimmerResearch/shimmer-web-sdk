@@ -599,6 +599,11 @@ if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '
   `if820OtaSensorSupport` says whether a sensor qualifies, with a message to
   show when it does not, and `updateBtModuleFirmware` refuses any other
   sensor.
+- **One update per device at a time.** A second update on the same device,
+  from any client or a direct `runIf820OtaUpdate`, is refused until the first
+  has finished, including any connect, reconnect or write it gave up on but
+  which may still be running on the link. A failed update whose command
+  answer timed out leaves the link dropped; reconnect before trying again.
 - **BLE only.** A Classic Bluetooth or USB link cannot reach the module's GATT
   service.
 - **The OTA services must be granted at connect time.** `Shimmer3RClient`
