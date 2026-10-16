@@ -92,6 +92,7 @@ import {
   IF820_OTA_SERVICE_UUIDS,
   acquireIf820OtaDeviceLease,
   runIf820OtaUpdateUnderLease,
+  whenIf820OtaDeviceIdle,
   if820OtaSensorSupport,
   If820OtaError,
   type If820OtaOptions,
@@ -2245,6 +2246,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * a direct runIf820OtaUpdate, on this same device must not be mid-update
      * while this one sends its version reads, nor get past them alongside. */
     const releaseLease = acquireIf820OtaDeviceLease(t.device);
+    this._btModuleUpdateDevice = t.device;
     const abandoned: Promise<unknown>[] = [];
     this._btModuleUpdateRunning = true;
     try {
@@ -2295,6 +2297,27 @@ export class Shimmer3RClient extends BaseShimmerClient {
       }
     }
   }
+
+  /**
+   * Resolves once no Bluetooth module update holds this connection's device:
+   * at once if none does, or when the link is not Web Bluetooth. A failed or
+   * cancelled {@link updateBtModuleFirmware} can keep the device for a while
+   * after it rejects, until link work it gave up on has settled; a host that
+   * locks its UI during the update waits on this before unlocking.
+   */
+  whenBtModuleUpdateIdle(): Promise<void> {
+    /* The device the last update ran on, as well as the current link's: a
+     * host that disconnected or switched link after a failed update must
+     * still wait for the device that update is holding. */
+    const devices = new Set<BluetoothDevice>();
+    if (this._btModuleUpdateDevice) devices.add(this._btModuleUpdateDevice);
+    const t = this._transport;
+    if (t instanceof WebBluetoothTransport && t.device) devices.add(t.device);
+    return Promise.all([...devices].map((d) => whenIf820OtaDeviceIdle(d))).then(() => {});
+  }
+
+  /** The device {@link updateBtModuleFirmware} last ran on. */
+  private _btModuleUpdateDevice: BluetoothDevice | null = null;
 
   /** Set for the whole of {@link updateBtModuleFirmware}. */
   private _btModuleUpdateRunning = false;

@@ -14,6 +14,7 @@ import {
   compareIf820Versions,
   isIf820UpdateAvailable,
   if820OtaSensorSupport,
+  whenIf820OtaDeviceIdle,
   IF820_OTA_MIN_SENSOR_FIRMWARE,
   type If820OtaCharacteristicLike,
   type If820OtaGattServerLike,
@@ -966,6 +967,27 @@ describe('runIf820OtaUpdate', () => {
     expect(mod.disconnects).toBe(0);
   });
 
+  it('whenIf820OtaDeviceIdle resolves once abandoned work has released the device', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const device = { gatt: mod.server };
+    await expect(whenIf820OtaDeviceIdle(device)).resolves.toBeUndefined();
+    let finish!: () => void;
+    await runIf820OtaUpdate(device, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      reconnectAttempts: 1,
+      responseTimeoutMs: 50,
+      reconnect: () => new Promise<void>((r) => (finish = r)),
+    }).catch(() => {});
+    let idle = false;
+    void whenIf820OtaDeviceIdle(device).then(() => (idle = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idle).toBe(false);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(idle).toBe(true);
+  });
+
   it('connects a GATT server that is not connected', async () => {
     const mod = new FakeIf820();
     mod.connected = false;
@@ -1310,6 +1332,58 @@ describe('Shimmer3RClient IF820 update hooks', () => {
     finish();
     await new Promise((r) => setTimeout(r, 0));
     await expect(runIf820OtaUpdate(device, image(10))).resolves.toBeDefined();
+  });
+
+  it('whenBtModuleUpdateIdle waits for abandoned reconnect work, and resolves at once off Web Bluetooth', async () => {
+    const { Shimmer3RClient } = await import('../../src/devices/shimmer3r/Shimmer3RClient.js');
+    const { WebBluetoothTransport } =
+      await import('../../src/core/transport/WebBluetoothTransport.js');
+    const { LoopbackTransport } = await import('../../src/core/transport/LoopbackTransport.js');
+
+    // Not connected, and connected over a non-Web-Bluetooth link: at once.
+    const plain = new Shimmer3RClient();
+    await expect(plain.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+    (plain as unknown as { _transport: unknown })._transport = new LoopbackTransport();
+    await expect(plain.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+
+    // Over Web Bluetooth: pending while an abandoned reconnect holds the device.
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const t = Object.create(WebBluetoothTransport.prototype) as { device: unknown };
+    Object.defineProperty(t, 'device', { value: { gatt: mod.server } });
+    const client = new Shimmer3RClient();
+    const c = client as unknown as {
+      _transport: unknown;
+      readDeviceVersion: () => Promise<{ hardwareVersion: number }>;
+      readFwVersion: () => Promise<{ fwId: number; major: number; minor: number; patch: number }>;
+    };
+    c._transport = t;
+    c.readDeviceVersion = async () => ({ hardwareVersion: 10 });
+    c.readFwVersion = async () => ({ fwId: 3, major: 1, minor: 1, patch: 22 });
+    await expect(client.whenBtModuleUpdateIdle()).resolves.toBeUndefined();
+    let finish!: () => void;
+    await client
+      .updateBtModuleFirmware(image(2000), {
+        firstWriteTimeoutMs: 50,
+        reconnectDelayMs: 1,
+        reconnectAttempts: 1,
+        responseTimeoutMs: 50,
+        reconnect: () => new Promise<void>((r) => (finish = r)),
+      })
+      .catch(() => {});
+    let idle = false;
+    void client.whenBtModuleUpdateIdle().then(() => (idle = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idle).toBe(false);
+    // Still waits for that device after the host drops or switches the link.
+    c._transport = new LoopbackTransport();
+    let idleAfterSwitch = false;
+    void client.whenBtModuleUpdateIdle().then(() => (idleAfterSwitch = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idleAfterSwitch).toBe(false);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(idle).toBe(true);
+    expect(idleAfterSwitch).toBe(true);
   });
 
   it('reconnects through its own transport when the update falls back', async () => {

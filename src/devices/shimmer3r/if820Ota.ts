@@ -550,13 +550,27 @@ export function acquireIf820OtaDeviceLease(device: If820OtaDeviceLike): () => vo
   if (updatesInFlight.has(key)) {
     throw new If820OtaError('A Bluetooth module update is already running on this device');
   }
-  updatesInFlight.add(key);
+  let idle!: () => void;
+  updatesInFlight.set(key, new Promise<void>((r) => (idle = r)));
   let held = true;
   return () => {
     if (!held) return;
     held = false;
     updatesInFlight.delete(key);
+    idle();
   };
+}
+
+/**
+ * Resolves once no Bluetooth module update holds `device` - at once if none
+ * does. An update that has failed or been cancelled can keep the device for
+ * a while after its promise settles, until link work it gave up on has
+ * settled too (see {@link runIf820OtaUpdate}); a host that locks its own UI
+ * for the update waits on this before unlocking it.
+ */
+export function whenIf820OtaDeviceIdle(device: If820OtaDeviceLike): Promise<void> {
+  const key: object = device.gatt ?? device;
+  return updatesInFlight.get(key) ?? Promise.resolve();
 }
 
 /**
@@ -579,8 +593,9 @@ export function runIf820OtaUpdateUnderLease(
  * treated as stalled and dropped. A healthy write settles in tens of ms. */
 const IF820_OTA_ABORT_GRACE_MS = 500;
 
-/** Devices with an update running, for {@link runIf820OtaUpdate}'s guard. */
-const updatesInFlight = new WeakSet<object>();
+/** Devices with an update running, for {@link runIf820OtaUpdate}'s guard,
+ * each with the promise that resolves when it is released. */
+const updatesInFlight = new WeakMap<object, Promise<void>>();
 
 async function runUpdate(
   device: If820OtaDeviceLike,
