@@ -472,6 +472,73 @@ describe('a callback that ends the link mid-parse', () => {
     expect(frames).toBe(1);
     expect(rxBuf(client).length).toBe(0);
   });
+
+  it('stops the stream parser when the callback that ended the link then throws', async () => {
+    const first = device((cmd) =>
+      cmd[0] === OPCODES.INQUIRY_COMMAND ? [ACK, ...INQUIRY_MSG] : [ACK],
+    );
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    await client.inquiry();
+    await client.startStreaming();
+    const frameBytes = (client as unknown as { schema: { frameBytes: number } }).schema.frameBytes;
+    const frame = [0x00, ...new Array<number>(frameBytes - 1).fill(0x10)];
+    let frames = 0;
+    client.onStreamFrame = () => {
+      frames++;
+      first.emitDisconnect(new Error('dropped'));
+      throw new Error('handler failed');
+    };
+    first.notify([...frame, ...frame, ...frame, ...frame]);
+    expect(frames).toBe(1);
+    expect(rxBuf(client).length).toBe(0);
+  });
+});
+
+describe('a stream start that a callback overtakes', () => {
+  /** Whether a stream start asked the timeline to anchor to this host's clock. */
+  const anchorRequested = (c: Shimmer3Client): boolean =>
+    (c as unknown as { _timeline: { hasAnchorRequest: boolean } })._timeline.hasAnchorRequest;
+
+  it("does not prepare the next link's timeline when its warning reconnects", async () => {
+    const first = device();
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    let reconnected: Promise<void> = Promise.resolve();
+    client.onStatus = (m) => {
+      if (!m.startsWith('Starting stream without schema')) return;
+      client.onStatus = null;
+      first.emitDisconnect(new Error('dropped'));
+      reconnected = client.connect(device());
+    };
+    await expect(client.startStreaming()).rejects.toThrow(/link was reset/);
+    await reconnected;
+    expect(anchorRequested(client)).toBe(false);
+  });
+
+  it('fails, rather than report the stream started, when its first frame ends the link', async () => {
+    let frame: number[] = [];
+    const first = device((cmd) =>
+      cmd[0] === OPCODES.INQUIRY_COMMAND
+        ? [ACK, ...INQUIRY_MSG]
+        : cmd[0] === OPCODES.START_STREAMING_COMMAND
+          ? [ACK, ...frame, ...frame, ...frame] // the first data packed in behind the ACK
+          : [ACK],
+    );
+    const client = new Shimmer3Client({ debug: false });
+    await client.connect(first);
+    await client.inquiry();
+    const frameBytes = (client as unknown as { schema: { frameBytes: number } }).schema.frameBytes;
+    frame = [0x00, ...new Array<number>(frameBytes - 1).fill(0x10)];
+    const said: string[] = [];
+    client.onStatus = (m) => said.push(m);
+    client.onStreamFrame = () => {
+      client.onStreamFrame = null;
+      first.emitDisconnect(new Error('dropped'));
+    };
+    await expect(client.startStreaming()).rejects.toThrow(/link was reset/);
+    expect(said.some((m) => m.startsWith('START_STREAMING ACK received'))).toBe(false);
+  });
 });
 
 describe('a link that dropped, before the next connect', () => {

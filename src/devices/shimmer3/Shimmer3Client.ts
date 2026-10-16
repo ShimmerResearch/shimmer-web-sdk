@@ -1724,8 +1724,13 @@ export class Shimmer3Client extends BaseShimmerClient {
   override async startStreaming(): Promise<void> {
     const link = this._link.current;
     if (!this._linkLive) throw new Error('Not connected');
+    /* Both status lines run onStatus, which can end the link: the timeline
+       is the next link's then, and must not be prepared for this start. */
+    const gone = (): Error => linkResetError('the stream to start');
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
+    this._link.throwIfReset(link, gone);
     this._prepareStreamTimeline();
+    this._link.throwIfReset(link, gone);
     // Stale buffered bytes (e.g. residual post-stop stream data) would desync
     // the ACK wait for START — drain to quiescence and discard them first. A
     // clean state (empty buffer) skips this entirely.
@@ -1760,7 +1765,10 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._streamStarting = false;
     // Bytes that arrived after the ACK are the first data — parse them now.
     this._parseStream();
+    // onStreamFrame may have ended the link: a stream that has gone is not started
+    this._link.throwIfReset(link, gone);
     this._emitStatus('START_STREAMING ACK received; frames should follow.');
+    this._link.throwIfReset(link, gone);
   }
 
   override async stopStreaming(): Promise<void> {
@@ -1908,6 +1916,8 @@ export class Shimmer3Client extends BaseShimmerClient {
           if (!this._link.isCurrent(link)) return;
           buf = buf.subarray(frameBytes);
         } catch (e) {
+          // A handler that ended the link and then threw: the rest is the old link's too
+          if (!this._link.isCurrent(link)) return;
           this._log('frame decode error → sliding 1 byte', (e as Error).message);
           buf = buf.subarray(1);
         }
