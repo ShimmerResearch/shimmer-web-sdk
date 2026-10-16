@@ -92,6 +92,7 @@ import {
   IF820_OTA_SERVICE_UUIDS,
   acquireIf820OtaDeviceLease,
   runIf820OtaUpdateUnderLease,
+  whenIf820OtaDeviceIdle,
   if820OtaSensorSupport,
   If820OtaError,
   type If820OtaOptions,
@@ -2294,6 +2295,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
         releaseLease();
       }
     }
+  }
+
+  /**
+   * Resolves once no Bluetooth module update holds this connection's device:
+   * at once if none does, or when the link is not Web Bluetooth. A failed or
+   * cancelled {@link updateBtModuleFirmware} can keep the device for a while
+   * after it rejects, until link work it gave up on has settled; a host that
+   * locks its UI during the update waits on this before unlocking.
+   */
+  whenBtModuleUpdateIdle(): Promise<void> {
+    const t = this._transport;
+    if (!(t instanceof WebBluetoothTransport) || !t.device) return Promise.resolve();
+    return whenIf820OtaDeviceIdle(t.device);
   }
 
   /** Set for the whole of {@link updateBtModuleFirmware}. */

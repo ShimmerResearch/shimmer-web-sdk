@@ -14,6 +14,7 @@ import {
   compareIf820Versions,
   isIf820UpdateAvailable,
   if820OtaSensorSupport,
+  whenIf820OtaDeviceIdle,
   IF820_OTA_MIN_SENSOR_FIRMWARE,
   type If820OtaCharacteristicLike,
   type If820OtaGattServerLike,
@@ -964,6 +965,27 @@ describe('runIf820OtaUpdate', () => {
     const err = await runIf820OtaUpdate({ gatt: mod.server }, image(100)).catch((e) => e);
     expect(err.status).toBe(IF820_OTA_STATUS.VERIFICATION_FAILED);
     expect(mod.disconnects).toBe(0);
+  });
+
+  it('whenIf820OtaDeviceIdle resolves once abandoned work has released the device', async () => {
+    const mod = new FakeIf820({ stallAbove: 63 });
+    const device = { gatt: mod.server };
+    await expect(whenIf820OtaDeviceIdle(device)).resolves.toBeUndefined();
+    let finish!: () => void;
+    await runIf820OtaUpdate(device, image(2000), {
+      firstWriteTimeoutMs: 50,
+      reconnectDelayMs: 1,
+      reconnectAttempts: 1,
+      responseTimeoutMs: 50,
+      reconnect: () => new Promise<void>((r) => (finish = r)),
+    }).catch(() => {});
+    let idle = false;
+    void whenIf820OtaDeviceIdle(device).then(() => (idle = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(idle).toBe(false);
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(idle).toBe(true);
   });
 
   it('connects a GATT server that is not connected', async () => {

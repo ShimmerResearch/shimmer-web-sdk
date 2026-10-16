@@ -351,6 +351,7 @@ export {
   isIf820UpdateAvailable,
   IF820_OTA_MIN_SENSOR_FIRMWARE,
   if820OtaSensorSupport,
+  whenIf820OtaDeviceIdle,
 } from './devices/shimmer3r/if820Ota.js';
 export type {
   If820OtaCharacteristicLike,
