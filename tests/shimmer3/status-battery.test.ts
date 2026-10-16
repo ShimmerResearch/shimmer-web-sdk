@@ -488,7 +488,7 @@ describe('Shimmer3Client status and battery reads', () => {
     const stranded = client.getStatus(5000);
     await settle();
     await client.disconnect();
-    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    await expect(stranded).rejects.toThrow(/link was reset while waiting/);
     expect(Date.now() - started).toBeLessThan(1000);
 
     // Nothing from the old link is left waiting to take this push as its reply.
@@ -504,8 +504,32 @@ describe('Shimmer3Client status and battery reads', () => {
     const stranded = client.getBattery(5000);
     await settle();
     t.emitDisconnect(new Error('link lost'));
-    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    await expect(stranded).rejects.toThrow(/link was reset while waiting/);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('fails a read queued on a dropped link at its turn, rather than run it (DEV-573)', async () => {
+    // The read is bound to the link it was asked on. Run at its turn, it wrote
+    // GET_VBATT after the drop and then took the next link's battery reply.
+    const asked: number[] = [];
+    const { t, client } = await connected((bytes) => {
+      asked.push(bytes[0]);
+    });
+    const inFlight = client.getStatus(5000).catch(() => undefined);
+    const queued = client.getBattery(5000).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await settle();
+    t.emitDisconnect(new Error('dropped'));
+    await inFlight;
+
+    const t2 = new LoopbackTransport({ capabilities: { framed: false } });
+    await connected(undefined, { t: t2, client });
+    t2.notify([ACK, INSTREAM, VBATT, ...BATT_RAW]);
+    expect(await queued).toMatch(/link was reset/);
+    expect(asked).toContain(OPCODES.GET_STATUS_COMMAND);
+    expect(asked).not.toContain(OPCODES.GET_VBATT_COMMAND);
   });
 
   it('fails at once when its write fails, and leaves nothing waiting', async () => {
