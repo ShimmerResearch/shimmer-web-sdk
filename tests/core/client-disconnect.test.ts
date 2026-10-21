@@ -122,6 +122,8 @@ describe('Shimmer3Client onDisconnect', () => {
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
       else if (op === OPCODES.GET_FW_VERSION_COMMAND)
         setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
     });
     const client = new Shimmer3Client({ debug: false, transport: t });
     await client.connect();

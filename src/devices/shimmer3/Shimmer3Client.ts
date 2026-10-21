@@ -118,10 +118,12 @@ export interface Shimmer3ClientOptions extends ShimmerClientOptions {
    * selects the default inertial calibration and, on an old-IMU board, decodes
    * the streamed mag big-endian (`SHIMMER3_OLD_IMU_MAG_FORMATS`).
    *
-   * When omitted, {@link Shimmer3Client.readExpansionBoard} decides it from the
-   * daughter-card id, as the Java driver does. Until then the default
-   * calibration is the old-IMU one, as before, while the mag stays
-   * little-endian: a byte order is only flipped on a known old-IMU board.
+   * When omitted, the connect handshake decides it from the daughter-card id
+   * on firmware code 5 and up, as the Java driver does
+   * ({@link Shimmer3Client.readExpansionBoard}). Where the id is not read, or
+   * the read fails, the default calibration is the old-IMU one, as before,
+   * while the mag stays little-endian: a byte order is only flipped on a known
+   * old-IMU board.
    */
   imuGeneration?: 'old' | 'new';
   /**
@@ -394,6 +396,9 @@ export class Shimmer3Client extends BaseShimmerClient {
    *   2. dummy GET_SAMPLING_RATE write + drain to flush the RFCOMM buffer,
    *   3. GET_DEVICE_VERSION_COMMAND (0x3F) → DEVICE_VERSION_RESPONSE (HW version),
    *   4. GET_FW_VERSION_COMMAND (0x2E) → FW_VERSION_RESPONSE (firmware version),
+   *   5. on firmware code 5 and up, best effort, GET_DAUGHTER_CARD_ID_COMMAND
+   *      (0x66) → DAUGHTER_CARD_ID_RESPONSE, which sets {@link imuGeneration}
+   *      (ShimmerBluetooth.java:1606-1610; see {@link readExpansionBoard}),
    *   then the streaming timestamp width is derived from the firmware code.
    */
   override async connect(transport?: ShimmerTransport): Promise<void> {
@@ -508,6 +513,26 @@ export class Shimmer3Client extends BaseShimmerClient {
        width, nor this connect() resolve as if it had succeeded. */
     this._link.throwIfReset(link, gone);
     const fw = this.firmwareVersion;
+
+    /* 5) Daughter-card id, as the Java driver reads it here
+     *    (ShimmerBluetooth.java:1606-1610): it decides the IMU generation, and
+     *    so the old-IMU big-endian mag, before the host's first inquiry builds
+     *    the schema. Best effort - a board that does not answer leaves the
+     *    generation unknown (mag little-endian, as before this read existed)
+     *    rather than fail the connect. A reset still fails it, as above. */
+    if (deriveShimmer3FirmwareVersionCode(fw, this.deviceVersion.hardwareVersion) >= 5) {
+      try {
+        await this._readExpansionBoardOn(link);
+      } catch (e) {
+        this._link.throwIfReset(link, gone);
+        this._setBoard(null, null);
+        this._emitStatus(
+          `Daughter-card id not read (${e instanceof Error ? e.message : String(e)}); ` +
+            'IMU generation unknown.',
+        );
+        this._link.throwIfReset(link, gone);
+      }
+    }
 
     // Derive timestamp width from firmware unless the caller forced one.
     if (this._forceTimestampFmt === undefined) {
@@ -1606,14 +1631,21 @@ export class Shimmer3Client extends BaseShimmerClient {
    * Returns null when the page is blank (all 0x00 or all 0xFF), and the IMU
    * generation is then old, as Java's is for a board it cannot identify.
    *
+   * The connect handshake already calls this on firmware code 5 and up, so a
+   * host needs it only to re-read the board, or on older firmware.
+   *
    * HARDWARE-VERIFY: exercised against a scripted device and a recorded
    * host-core session (board SR48-4-2, new IMU). Not yet run on an old-IMU
-   * board, and not part of the connect handshake: that would add a command to
-   * every connect, which has not been run on the bench.
+   * board.
    */
   async readExpansionBoard(): Promise<ShimmerSrBoard | null> {
     const link = this._link.current;
     if (!this._linkLive) throw new Error('Not connected');
+    return this._readExpansionBoardOn(link);
+  }
+
+  /** {@link readExpansionBoard} on `link`: also run by the connect handshake. */
+  private async _readExpansionBoardOn(link: number): Promise<ShimmerSrBoard | null> {
     this._emitStatus('GET_DAUGHTER_CARD_ID → waiting for RSP…');
     await this._write(new Uint8Array([OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, 3, 0]), link);
     const rsp = await this._waitForResponse(
@@ -1632,7 +1664,11 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._link.throwIfReset(link, () => linkResetError('the daughter-card id to be applied'));
     const newImu =
       board !== null &&
-      isNewImuSensors(3, { id: board.boardId, rev: board.boardRev, revSpecial: board.specialRev });
+      isNewImuSensors(this.deviceVersion?.hardwareVersion ?? 3, {
+        id: board.boardId,
+        rev: board.boardRev,
+        revSpecial: board.specialRev,
+      });
     this._setBoard(board, newImu ? 'new' : 'old');
     this._emitStatus(
       `Daughter card ${board ? `SR${board.boardId}-${board.boardRev}-${board.specialRev}` : 'id page is blank'}` +
