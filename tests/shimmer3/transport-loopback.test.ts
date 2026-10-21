@@ -199,17 +199,20 @@ describe('Shimmer3Client error paths', () => {
 });
 
 describe('Shimmer3Client streaming', () => {
-  /** Build a 10-byte gyro frame: [0x00 preamble][u24 ts][i16 x][i16 y][i16 z]. */
+  /**
+   * Build a 10-byte gyro frame: [0x00 preamble][u24 ts LE][i16 x][i16 y][i16 z],
+   * the gyro big-endian as a Shimmer3 sends it.
+   */
   function frame(ts: number, x: number, y: number, z: number): number[] {
-    const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
+    const be16 = (v: number) => [(v >> 8) & 0xff, v & 0xff];
     return [
       0x00,
       ts & 0xff,
       (ts >> 8) & 0xff,
       (ts >> 16) & 0xff,
-      ...le16(x),
-      ...le16(y),
-      ...le16(z),
+      ...be16(x),
+      ...be16(y),
+      ...be16(z),
     ];
   }
 
@@ -322,8 +325,9 @@ describe('Shimmer3Client disconnect', () => {
 
 /** 10-byte gyro frame [0x00 preamble][u24 ts][i16 x][i16 y][i16 z]. */
 function gyroFrame(ts: number, x: number, y: number, z: number): number[] {
-  const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
-  return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...le16(x), ...le16(y), ...le16(z)];
+  // A Shimmer3 sends its gyro big-endian (channelFormats.ts, DEV-1288).
+  const be16 = (v: number) => [(v >> 8) & 0xff, v & 0xff];
+  return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...be16(x), ...be16(y), ...be16(z)];
 }
 
 /** Bring a connected client to a live streaming state with the gyro/u24 schema. */

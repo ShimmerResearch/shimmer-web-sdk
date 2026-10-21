@@ -21,6 +21,7 @@ import {
   type StreamSchemaField,
 } from '../shimmer3r/streamSchema.js';
 import { u16le } from '../shimmer3r/protocol.js';
+import { SHIMMER3_OLD_IMU_MAG_FORMATS } from '../shimmer3r/channelFormats.js';
 import { EXG_BANK_LENGTH } from '../exg/registers.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
@@ -144,22 +145,31 @@ export interface Shimmer3InquiryResult {
  * pressure here and 3 little-endian bytes each on a Shimmer3R
  * (see `CHANNEL_FORMAT_OVERRIDES`).
  *
- * The only Shimmer3-relevant knob is the timestamp width (u24 for firmware code
- * ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength).
+ * Two Shimmer3-relevant knobs remain: the timestamp width (u24 for firmware
+ * code ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength), and the
+ * IMU generation, which sets the mag byte order.
  *
  * @param onProblem optional sink for the message an unrecognised channel ID
  *   produces; `Shimmer3Client` wires it to `onStatus`. The schema's `trusted`
  *   and `unknownChannelIds` say the same thing to code rather than to a log.
+ * @param imuGeneration `'old'` decodes mag `0x07`-`0x09` big-endian, as an
+ *   LSM303DLHC board sends it (`SHIMMER3_OLD_IMU_MAG_FORMATS`). `'new'` or
+ *   unknown (`null`, the default) keeps little-endian, which is right for every
+ *   new-IMU board. The Java driver falls back to old when it has no board id;
+ *   this does not, so that a failed or skipped board read never flips the byte
+ *   order of the boards made since.
  */
 export function buildShimmer3Schema(
   channelIds: number[],
   timestampFmt: TimestampFmt,
   onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3StreamSchema {
   return buildStreamSchema(channelIds, timestampFmt, {
     generation: 'shimmer3',
     dataPreambleByte: 0x00,
     onProblem,
+    formatOverrides: imuGeneration === 'old' ? SHIMMER3_OLD_IMU_MAG_FORMATS : undefined,
   });
 }
 
@@ -174,6 +184,8 @@ export function buildShimmer3Schema(
  *
  * @param onProblem optional sink for schema problems (an unrecognised channel
  *   ID); see {@link buildShimmer3Schema}.
+ * @param imuGeneration the board's IMU generation when known; see
+ *   {@link buildShimmer3Schema}.
  * @throws if the buffer is shorter than the header, or shorter than the channel
  *   count it declares. Rejecting is deliberate — see the body — and callers can
  *   let it propagate: nothing is assigned from the result until it returns.
@@ -182,6 +194,7 @@ export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
   onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3InquiryResult {
   const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
 
@@ -231,7 +244,7 @@ export function interpretShimmer3InquiryResponse(
   const chStart = headerEnd;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
-  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
+  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem, imuGeneration);
 
   /* Normalised to the opcode-inclusive form whichever way the bytes arrived.
    * `opcode` is by definition INQUIRY_RESPONSE here - `base` is 1 only when
@@ -622,10 +635,14 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     return 2 + buf[1];
   }
 
-  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
-    // Variable length: [opcode][length][data...]. Firmware caps both a
-    // daughter-card memory read and an InfoMem read at 128 bytes — treat larger
-    // "lengths" as garbage and resync.
+  if (
+    opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE ||
+    opcode === OPCODES.DAUGHTER_CARD_ID_RESPONSE ||
+    opcode === OPCODES.INFOMEM_RESPONSE
+  ) {
+    // Variable length: [opcode][length][data...]. Firmware caps a daughter-card
+    // memory read and an InfoMem read at 128 bytes, and the id page is 16 —
+    // treat larger "lengths" as garbage and resync.
     if (buf.length < 2) return NEED_MORE;
     const memLen = buf[1];
     if (memLen > 128) return RESYNC;

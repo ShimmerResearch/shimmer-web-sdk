@@ -26,6 +26,7 @@ const HW_SHIMMER3 = 3;
 const HW_SHIMMER3R = 10;
 
 const CH = {
+  LN_ACCEL_X: 0x00,
   GYRO_X: 0x0a,
   BATTERY: 0x03,
   TEMPERATURE: 0x1a,
@@ -207,7 +208,7 @@ describe('the same packet on a classic Shimmer3', () => {
     // 1 + 3 + 2 gyro + 2 temperature + 3 pressure + 2 battery.
     expect(schema.frameBytes).toBe(13);
     expect(schema.fields.map((f) => [f.name, f.fmt, f.endian, f.sizeBytes])).toEqual([
-      ['GYRO_X', 'i16', 'le', 2],
+      ['GYRO_X', 'i16', 'be', 2],
       ['TEMPERATURE', 'u16', 'be', 2],
       ['PRESSURE', 'u24', 'be', 3],
       ['BATTERY', 'u16', 'le', 2],
@@ -219,7 +220,7 @@ describe('the same packet on a classic Shimmer3', () => {
     const s = await session(HW_SHIMMER3, CHANNELS);
     await s.client.inquiry();
     const frames = await streamFrames(s, [
-      ...u16le(GYRO_X),
+      ...u16be(GYRO_X),
       ...u16be(TEMPERATURE),
       ...u24be(PRESSURE),
       ...u16le(BATTERY),
@@ -366,7 +367,7 @@ describe('a generation this client had to assume', () => {
   });
 
   it('trusts the schema when nothing in the packet depends on the generation', async () => {
-    const s = await session(null, [CH.GYRO_X, CH.BATTERY]);
+    const s = await session(null, [CH.LN_ACCEL_X, CH.BATTERY]);
     const { schema } = await s.client.inquiry();
     expect(schema.generationAssumed).toBe(true);
     expect(schema.trusted).toBe(true);
@@ -387,7 +388,7 @@ describe('a generation this client had to assume', () => {
     // what the channel is called, so assuming the wrong platform mislabels a
     // column without moving an offset. Distrusting the frame here would cry
     // wolf on the commonest expansion-board setup.
-    const s = await session(null, [CH.GYRO_X, CH.EXT_ADC_0]);
+    const s = await session(null, [CH.LN_ACCEL_X, CH.EXT_ADC_0]);
     expect(s.client.generationIsAssumed).toBe(true);
 
     const { schema } = await s.client.inquiry();
@@ -400,6 +401,18 @@ describe('a generation this client had to assume', () => {
     expect(warning, `no naming warning: ${s.status.join(' | ')}`).toBeDefined();
     expect(warning).toContain('different name');
     expect(warning).toContain('stays trusted');
+  });
+
+  it('distrusts a gyro frame, whose byte order differs by generation', async () => {
+    // Big-endian on a Shimmer3, little-endian on a Shimmer3R: guessing wrong
+    // byte-swaps every sample (DEV-1288), so the guess has to be flagged.
+    const s = await session(null, [CH.GYRO_X, CH.BATTERY]);
+    const { schema } = await s.client.inquiry();
+    expect(schema.generationAssumed).toBe(true);
+    expect(schema.trusted).toBe(false);
+    expect(s.status.some((m) => m.includes('decoded differently') && m.includes('0x0A'))).toBe(
+      true,
+    );
   });
 
   it('still distrusts a frame mixing a name-only and a layout difference', async () => {
@@ -416,8 +429,14 @@ describe('a generation this client had to assume', () => {
 
 describe('channelLayoutDiffersByGeneration', () => {
   it('is false for a channel both generations lay out identically', () => {
-    expect(channelLayoutDiffersByGeneration(CH.GYRO_X)).toBe(false);
+    expect(channelLayoutDiffersByGeneration(CH.LN_ACCEL_X)).toBe(false);
     expect(channelLayoutDiffersByGeneration(CH.BATTERY)).toBe(false);
+  });
+
+  it('is true for the gyro, big-endian on a Shimmer3 and little-endian on a Shimmer3R', () => {
+    for (const id of [0x0a, 0x0b, 0x0c]) {
+      expect(channelLayoutDiffersByGeneration(id), `0x${id.toString(16)}`).toBe(true);
+    }
   });
 
   it('is false across the ADC block, where only the name differs', () => {

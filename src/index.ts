@@ -185,6 +185,7 @@ export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
 export {
   CHANNEL_FORMATS,
   CHANNEL_FORMAT_OVERRIDES,
+  SHIMMER3_OLD_IMU_MAG_FORMATS,
   UNKNOWN_CHANNEL_ASSUMED_BYTES,
   isGenerationSensitiveChannel,
   channelLayoutDiffersByGeneration,
