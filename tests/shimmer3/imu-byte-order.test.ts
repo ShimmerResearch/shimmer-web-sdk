@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
-import { buildShimmer3Schema } from '../../src/devices/shimmer3/protocol.js';
+import {
+  buildShimmer3Schema,
+  type Shimmer3StreamSchema,
+} from '../../src/devices/shimmer3/protocol.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import type { ObjectCluster } from '../../src/core/ObjectCluster.js';
@@ -138,7 +141,9 @@ describe('Shimmer3 streaming mag byte order follows the IMU generation', () => {
     expect(client.imuGeneration).toBeNull();
     await client.inquiry();
     expect(
-      client.schema!.fields.filter((f) => f.name.startsWith('MAG')).map((f) => f.endian),
+      (client as unknown as { schema: Shimmer3StreamSchema }).schema.fields
+        .filter((f) => f.name.startsWith('MAG'))
+        .map((f) => f.endian),
     ).toEqual(['le', 'le', 'le']);
   });
 
