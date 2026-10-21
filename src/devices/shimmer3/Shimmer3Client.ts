@@ -34,6 +34,7 @@ import {
 } from '../calibration/streamChannels.js';
 import { selectDumpCalibrations, type DumpCalibrationsByGroup } from '../calibration/sensorIds.js';
 import { summariseExgBanks } from '../exg/calibration.js';
+import { GyroOnTheFlyCal, gyroOnTheFlyInfo } from '../calibration/gyroOnTheFly.js';
 import type { ExgBanks } from '../exg/knobs.js';
 import { parsePressureCalibrationResponse, type PressureCalibration } from '../pressure/index.js';
 import {
@@ -239,6 +240,28 @@ export class Shimmer3Client extends BaseShimmerClient {
   };
   /** When false, inertial channels are emitted raw-only (no `'cal'` field). Default true. */
   emitCalibratedInertial = true;
+
+  /**
+   * Whether the gyro on-the-fly offset calibration runs while streaming — the
+   * Java driver's `GyroOnTheFlyCalModule`, which Consensys runs when
+   * derived-sensor bit 29 (`GYRO_ON_THE_FLY_CAL`) is set. While the sensor lies
+   * still, the mean of the last round(fs) raw gyro samples replaces the gyro
+   * offset (`devices/calibration/gyroOnTheFly.ts`).
+   *
+   * This client does not decode the configuration, so a host that has read
+   * it sets this from its derived sensors, with `isGyroOnTheFlyEnabled`.
+   * Turning it off drops every estimate, so the stored offset is back in force
+   * from the next sample.
+   */
+  get gyroOnTheFlyCal(): boolean {
+    return this._gyroOnTheFlyEnabled;
+  }
+  set gyroOnTheFlyCal(on: boolean) {
+    if (!on) this._gyroOnTheFly.reset();
+    this._gyroOnTheFlyEnabled = on;
+  }
+  private _gyroOnTheFlyEnabled = false;
+  private readonly _gyroOnTheFly = new GyroOnTheFlyCal();
   private _imuFamily: ImuFamily;
   private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
 
@@ -1019,6 +1042,10 @@ export class Shimmer3Client extends BaseShimmerClient {
        inquiry has not run, and `null` says so rather than passing it on. */
     this._timeline.setSamplingRateHz(this.samplingRateHz > 0 ? this.samplingRateHz : null);
     this._timeline.reset();
+    /* The on-the-fly gyro window is round(fs) samples, sized when a stream
+       starts (Java's initializeAlgorithms). What it already holds is kept, as
+       DescriptiveStatistics.setWindowSize keeps it. */
+    this._gyroOnTheFly.setSamplingRate(this.samplingRateHz);
     if (!this.anchorStreamClock || this._timeline.hasAnchorRequest) return;
     /* This host's clock, the Consensys method. No round trip is spent here —
        see `Shimmer3RClient._prepareStreamTimeline` for why. A host wanting the
@@ -1936,6 +1963,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       ranges: this.imuRanges,
       device: this._deviceCalibrations,
       emitInertial: this.emitCalibratedInertial,
+      gyroOnTheFly: this._gyroOnTheFlyEnabled ? this._gyroOnTheFly : null,
       gsrRange: this.gsrRangeSetting,
       exg: this._exgBanks,
       pressure: this._pressureCalibration,
@@ -1961,6 +1989,8 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._exgBanks = null;
     this._exgBanksSource = null;
     this._pressureCalibration = null;
+    // Its estimates are of the old device's gyro, against the old calibration.
+    this._gyroOnTheFly.reset();
   }
 
   /**
@@ -2032,8 +2062,13 @@ export class Shimmer3Client extends BaseShimmerClient {
         unit: defaults.unit,
       };
     }
+    const gyroBase =
+      this._deviceCalibrations.gyro ??
+      getDefaultCalibration(this._imuFamily, 'gyro', this.imuRanges.gyro)?.calibration ??
+      null;
     return {
       inertial,
+      gyroOnTheFly: gyroOnTheFlyInfo(this._gyroOnTheFly, this._gyroOnTheFlyEnabled, gyroBase),
       gsr: { range: this.gsrRangeSetting },
       exg: { source: this._exgBanksSource ?? 'default', ...summariseExgBanks(this._exgBanks) },
       pressure: {

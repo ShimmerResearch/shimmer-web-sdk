@@ -24,9 +24,14 @@ import {
   type SdLogChannelSpec,
 } from './channels.js';
 import { parseSdLog, type ParsedSdLog } from './header.js';
-import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js';
+import {
+  SdLogFormatError,
+  type SdLogChannelCalibrationInfo,
+  type SdLogHeader,
+  type SdLogRecord,
+} from './types.js';
 import { calibrateGsrSample } from '../calibration/gsr.js';
-import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
+import { buildSdLogCalibPlan, applyCalibPlan, refreshGyroOnTheFlyInfo } from './calibrate.js';
 import { compensateBmp581 } from '../pressure/bmp581.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
@@ -169,7 +174,9 @@ function decodeRecordsFromFile(
       values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
       p += spec.sizeBytes;
     }
-    if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
+    if (calibPlan.entries.length) {
+      applyCalibPlan(values, calibPlan.entries, calibPlan.gyroOnTheFly);
+    }
     if (bmp581) applyBmp581(values, bmp581);
 
     const absoluteTicks = initialTicks + unwrapped - firstTsOffsetTicks;
@@ -195,6 +202,7 @@ function decodeRecordsFromFile(
       budget.truncated = true;
     }
   }
+  refreshGyroOnTheFlyInfo(header.calibration, calibPlan);
 }
 
 /**
@@ -298,12 +306,22 @@ export function decodeSdSession(
     remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
     truncated: false,
   };
+  let otfUpdates = 0;
+  let lastGyroInfo: SdLogChannelCalibrationInfo | undefined;
   for (const f of withData) {
     if (budget.remaining <= 0) {
       budget.truncated = true;
       break;
     }
     decodeRecordsFromFile(f.bytes, f.parsed, records, budget);
+    lastGyroInfo = f.parsed.header.calibration.find((i) => i.group === 'gyro');
+    otfUpdates += lastGyroInfo?.gyroOnTheFly?.updates ?? 0;
+  }
+  // The returned header is the first file's; its on-the-fly summary describes
+  // the session - the state the last file left, and every update.
+  const firstGyro = first.calibration.find((i) => i.group === 'gyro');
+  if (firstGyro?.gyroOnTheFly && lastGyroInfo?.gyroOnTheFly) {
+    firstGyro.gyroOnTheFly = { ...lastGyroInfo.gyroOnTheFly, updates: otfUpdates };
   }
   return { header: first, records, truncated: budget.truncated };
 }

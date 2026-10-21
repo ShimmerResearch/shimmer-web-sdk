@@ -39,6 +39,7 @@ import { calibrateGsrChannel } from './gsr.js';
 import { applyStreamingCalibration, type StreamingImuRanges } from './streaming.js';
 import type { KinematicCalibration } from './kinematic.js';
 import type { ImuFamily, InertialGroup } from './defaults.js';
+import type { GyroOnTheFlyCal, GyroOnTheFlyInfo } from './gyroOnTheFly.js';
 
 // ---------------------------------------------------------------------------
 // ADC constants
@@ -80,6 +81,8 @@ export interface StreamCalibrationState {
   device?: Partial<Record<InertialGroup, KinematicCalibration>>;
   /** Whether to calibrate the inertial groups at all. */
   emitInertial: boolean;
+  /** The gyro on-the-fly offset estimator, or `null` when bit 29 is clear. */
+  gyroOnTheFly?: GyroOnTheFlyCal | null;
   /** The configured GSR range: 0-3 fixed, 4 auto. */
   gsrRange: number;
   /** Both ExG chips' register banks, or `null` when the host has not read them. */
@@ -283,6 +286,7 @@ export function calibrateStreamFrame(oc: ObjectCluster, state: StreamCalibration
       family: state.family,
       ranges: state.ranges,
       device: state.device,
+      gyroOnTheFly: state.gyroOnTheFly,
     });
   }
 }
@@ -316,6 +320,12 @@ export interface StreamCalibrationInfo {
       }
     >
   >;
+  /**
+   * The gyro on-the-fly offset calibration (derived-sensor bit 29): whether it
+   * is enabled, and whether an estimate is replacing the offset of the gyro
+   * calibration in force.
+   */
+  gyroOnTheFly: GyroOnTheFlyInfo;
   gsr: { range: number };
   exg: {
     source: ExgCalibrationSource;

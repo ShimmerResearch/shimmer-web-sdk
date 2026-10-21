@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { decodeSdLogFile, SDLogHeaderBitmask as BM } from '../../src/devices/sdlog/index.js';
+import {
+  decodeSdLogFile,
+  decodeSdSession,
+  SDLogHeaderBitmask as BM,
+} from '../../src/devices/sdlog/index.js';
 import { generateKinematicCalibBlock } from '../../src/devices/calibration/index.js';
 import { buildFile, buildPacket, buildSdLogHeader, encodeValue } from './fixtures.js';
 
@@ -99,5 +103,75 @@ describe('SD-log inertial calibration', () => {
     expect(h.calibration.find((c) => c.group === 'lnAccel')!.usingDefaultCalibration).toBe(true);
     // Kionix default: raw = offset (2047) → 0.
     expect(records[0].values.map((v) => v + 0)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('SD-log gyro on-the-fly offset calibration (derived-sensor bit 29)', () => {
+  /*
+   * A still sensor at 51.2 Hz (divider 640): the same raw gyro in every
+   * record, so once the 51-record window has filled the offset is the sample
+   * and the gyro reads exactly 0. 0x0101 is 257 in either byte order.
+   */
+  const file = (derivedSensors: number, records = 60): Uint8Array => {
+    const header = buildSdLogHeader({
+      fwId: 3,
+      fwVersion: [1, 1, 3], // LogAndStream from v0.7.1 stores derived bytes 3-7 at 217-221
+      samplingDivider: 640,
+      enabledSensors: BM.GYRO,
+      derivedSensors,
+      calibFill: () => 0xff,
+    });
+    const gyro = [0x01, 0x01, 0x01, 0x01, 0x01, 0x01];
+    const pkts = Array.from({ length: records }, (_, i) => buildPacket(640 * (i + 1), 3, gyro));
+    return buildFile(header, ...pkts);
+  };
+
+  it('re-estimates the gyro offset once a still window has filled', () => {
+    const { header: h, records } = decodeSdLogFile(file(1 << 29));
+    const gx = h.channels.findIndex((c) => c.name === 'GYRO_X');
+    expect(gx).toBeGreaterThanOrEqual(0);
+    expect(records[50].values[gx]).not.toBe(0);
+    for (const r of records.slice(51)) {
+      for (let a = 0; a < 3; a++) expect(Object.is(r.values[gx + a], 0)).toBe(true);
+    }
+    expect(h.calibration.find((c) => c.group === 'gyro')!.gyroOnTheFly).toEqual({
+      enabled: true,
+      active: true,
+      windowSamples: 51,
+      thresholdDps: 1.2,
+      updates: 10, // records 50-59: each still window re-estimates
+      offset: [257, 257, 257],
+    });
+  });
+
+  it('leaves the gyro alone without the bit', () => {
+    const { header: h, records } = decodeSdLogFile(file(0));
+    const gx = h.channels.findIndex((c) => c.name === 'GYRO_X');
+    expect(records[59].values[gx]).toBe(records[0].values[gx]);
+    expect(records[0].values[gx]).not.toBe(0);
+    expect(h.calibration.find((c) => c.group === 'gyro')!.gyroOnTheFly).toMatchObject({
+      enabled: false,
+      active: false,
+      updates: 0,
+    });
+  });
+
+  it('starts afresh in each file of a session, and sums the updates', () => {
+    const a = file(1 << 29, 60);
+    const b = file(1 << 29, 55);
+    const { header: h, records } = decodeSdSession([
+      { name: '000', bytes: a },
+      { name: '001', bytes: b },
+    ]);
+    const gx = h.channels.findIndex((c) => c.name === 'GYRO_X');
+    // The second file's first 51 records are calibrated against the stored
+    // offset again, not the first file's estimate.
+    expect(records[60 + 50].values[gx]).not.toBe(0);
+    expect(Object.is(records[60 + 51].values[gx], 0)).toBe(true);
+    expect(h.calibration.find((c) => c.group === 'gyro')!.gyroOnTheFly).toMatchObject({
+      enabled: true,
+      active: true,
+      updates: 10 + 5,
+    });
   });
 });

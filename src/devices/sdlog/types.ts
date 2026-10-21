@@ -3,6 +3,7 @@
  */
 
 import type { PressureSensorKind } from '../pressure/types.js';
+import type { GyroOnTheFlyInfo } from '../calibration/gyroOnTheFly.js';
 
 /**
  * The pressure part an SD-log header records (byte 224, DEV-1123): a known
@@ -191,6 +192,13 @@ export interface SdLogChannelCalibrationInfo {
   source: 'sd-header' | 'default';
   /** The hardware range value used to select the calibration. */
   range: number;
+  /**
+   * Gyro only: the on-the-fly offset calibration (derived-sensor bit 29).
+   * `enabled` comes from the header; `active`, `updates` and `offset` describe
+   * the decode once it has run - for a session, the state the last file left,
+   * with `updates` summed over every file.
+   */
+  gyroOnTheFly?: GyroOnTheFlyInfo;
 }
 
 /** Machine-readable reasons for rejecting an SD-log input. */
