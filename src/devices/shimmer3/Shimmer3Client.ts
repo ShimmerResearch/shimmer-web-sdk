@@ -1634,9 +1634,15 @@ export class Shimmer3Client extends BaseShimmerClient {
    * The connect handshake already calls this on firmware code 5 and up, so a
    * host needs it only to re-read the board, or on older firmware.
    *
-   * HARDWARE-VERIFY: exercised against a scripted device and a recorded
-   * host-core session (board SR48-4-2, new IMU). Not yet run on an old-IMU
-   * board.
+   * Run on the bench (21 Oct 2026, LogAndStream v1.01.006/v1.01.007) through
+   * the connect handshake on one Shimmer3 per shipped radio: RN42 v6.15
+   * (SR48-3-0, new IMU), RN4678 V1.23 (SR49-3-1, new), RN4678 V1.00.5
+   * (SR31-9-1, new) and RN42 v4.77 (blank id page, so old IMU, whose mag then
+   * decoded correctly big-endian). 26 connects reached the read and 24
+   * answered it. The other two, on the RN4678 V1.23, timed out on a link that
+   * then failed its inquiry too, and the connect still succeeded with the
+   * generation unknown, as intended. No board with a real old-IMU id (such as
+   * SR31-4) has been read.
    */
   async readExpansionBoard(): Promise<ShimmerSrBoard | null> {
     const link = this._link.current;

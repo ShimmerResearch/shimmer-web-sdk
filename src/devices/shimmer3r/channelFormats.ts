@@ -226,8 +226,11 @@ export const CHANNEL_FORMAT_OVERRIDES: Readonly<
  * X, Z, Y; streaming needs no reorder, because each channel carries its own id
  * and the inquiry lists them in the order they are sent.)
  *
- * HARDWARE-VERIFY: no old-IMU Shimmer3 has streamed to this SDK. The byte order
- * is the Java driver's.
+ * Run on the bench (21 Oct 2026, `Shimmer3Client`, LogAndStream v1.01.007,
+ * RN42 v4.77): a Shimmer3 whose id page is blank, so old-IMU by the rule above,
+ * streamed mag at 256 Hz that read |B| ~1490 counts with a per-axis SD of
+ * 3-11 big-endian, and SD 600-2700 (noise) little-endian. The new-IMU
+ * revision thresholds themselves are still unverified; see `isNewImuSensors`.
  */
 export const SHIMMER3_OLD_IMU_MAG_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
   0x07: { name: 'MAG_X', fmt: 'i16', endian: 'be', sizeBytes: 2 },
