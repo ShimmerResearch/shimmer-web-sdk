@@ -23,6 +23,7 @@ import {
   channelLayoutDiffersByGeneration,
   isGenerationSensitiveChannel,
   resolveChannelFormat,
+  type ChannelFormat,
   type ShimmerGeneration,
 } from './channelFormats.js';
 
@@ -99,6 +100,13 @@ export interface BuildStreamSchemaOptions {
   /** Frame preamble byte (DATA_PACKET, 0x00 on both families). */
   dataPreambleByte?: number;
   /**
+   * Formats that replace the generation's own for these IDs, for a layout the
+   * generation alone does not decide — the old-IMU Shimmer3 mag
+   * (`SHIMMER3_OLD_IMU_MAG_FORMATS`). Only IDs the generation already describes
+   * are replaced, so this can correct a byte order but never invents a channel.
+   */
+  formatOverrides?: Readonly<Record<number, ChannelFormat>>;
+  /**
    * Called once per problem found, with a sentence fit for a status log. Wired
    * to the client's `onStatus` so an unrecognised channel is visible to the
    * host rather than only to the schema.
@@ -120,7 +128,13 @@ export function buildStreamSchema(
   opts: BuildStreamSchemaOptions,
 ): Required<Pick<StreamSchemaBase, 'generation' | 'unknownChannelIds' | 'trusted'>> &
   StreamSchemaBase {
-  const { generation, generationAssumed = false, dataPreambleByte = 0x00, onProblem } = opts;
+  const {
+    generation,
+    generationAssumed = false,
+    dataPreambleByte = 0x00,
+    onProblem,
+    formatOverrides,
+  } = opts;
 
   const fields: StreamSchemaField[] = [];
   const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
@@ -133,7 +147,8 @@ export function buildStreamSchema(
 
   for (let i = 0; i < channelIds.length; i++) {
     const id = channelIds[i];
-    const fmt = resolveChannelFormat(id, generation);
+    const base = resolveChannelFormat(id, generation);
+    const fmt = base && (formatOverrides?.[id] ?? base);
 
     if (!fmt) {
       unknownChannelIds.push(id);
@@ -166,7 +181,7 @@ export function buildStreamSchema(
   }
 
   // An assumed generation only matters if something in the list actually
-  // depends on it — a gyro-only packet decodes identically either way. Of the
+  // depends on it — an LN-accel-only packet decodes identically either way. Of the
   // channels that do differ, only those whose *layout* differs can misread the
   // frame: across the ADC block the two generations disagree about the channel's
   // name while `u16`/little-endian/2 bytes holds on both, so guessing wrong

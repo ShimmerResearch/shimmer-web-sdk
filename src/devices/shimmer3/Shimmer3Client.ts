@@ -22,7 +22,14 @@ import {
 import { CHANNEL_UNITS } from '../../core/units.js';
 import { StreamTimeline, TICKS_PER_MS, type TimelineState } from '../../core/StreamTimeline.js';
 import { UNIX_TIMESTAMP_NAME } from '../calibration/streamChannels.js';
-import { msToRtcBytesLE, parseBatteryStatus, type WiredBatteryStatus } from '../dock/protocol.js';
+import {
+  msToRtcBytesLE,
+  parseBatteryStatus,
+  parseExpansionBoard,
+  type WiredBatteryStatus,
+} from '../dock/protocol.js';
+import type { ShimmerSrBoard } from '../identity.js';
+import { isNewImuSensors } from '../sdlog/header.js';
 import { parseShimmer3StatusBytes, type Shimmer3DeviceStatus } from '../shimmer3r/protocol.js';
 import {
   ADC_BITS,
@@ -106,13 +113,15 @@ export interface Shimmer3ClientOptions extends ShimmerClientOptions {
    */
   stopStreamingOnConnect?: boolean;
   /**
-   * IMU generation for default inertial calibration selection. `'old'` =
-   * LSM303DLHC accel/mag + MPU9x50 gyro (Shimmer3 SR<6); `'new'` = LSM303AHTR
-   * accel/mag (new-IMU boards). Default `'old'`.
+   * IMU generation of the board. `'old'` = LSM303DLHC accel/mag + MPU9x50 gyro
+   * (Shimmer3 SR<6); `'new'` = LSM303AHTR accel/mag (new-IMU boards). It
+   * selects the default inertial calibration and, on an old-IMU board, decodes
+   * the streamed mag big-endian (`SHIMMER3_OLD_IMU_MAG_FORMATS`).
    *
-   * HARDWARE-VERIFY: the streaming protocol does not expose the daughter-card
-   * revision, so the generation cannot be auto-detected here; set this to match
-   * the device when using the new-IMU boards.
+   * When omitted, {@link Shimmer3Client.readExpansionBoard} decides it from the
+   * daughter-card id, as the Java driver does. Until then the default
+   * calibration is the old-IMU one, as before, while the mag stays
+   * little-endian: a byte order is only flipped on a known old-IMU board.
    */
   imuGeneration?: 'old' | 'new';
   /**
@@ -240,6 +249,15 @@ export class Shimmer3Client extends BaseShimmerClient {
   /** When false, inertial channels are emitted raw-only (no `'cal'` field). Default true. */
   emitCalibratedInertial = true;
   private _imuFamily: ImuFamily;
+  /** `imuGeneration` as the caller gave it; it wins over a board read. */
+  private readonly _imuGenerationOption: 'old' | 'new' | undefined;
+  /** What {@link readExpansionBoard} found on this link, or null before it. */
+  private _imuGenerationFromBoard: 'old' | 'new' | null = null;
+  /**
+   * The daughter-card id {@link readExpansionBoard} last read on this link, or
+   * null when it has not been read or the id page is blank.
+   */
+  expansionBoard: ShimmerSrBoard | null = null;
   private _deviceCalibrations: Partial<Record<InertialGroup, KinematicCalibration>> = {};
 
   /**
@@ -318,6 +336,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._forceTimestampFmt = opts.timestampFmt;
     this._timestampFmt = opts.timestampFmt ?? SHIMMER3_DEFAULTS.TIMESTAMP_FMT;
     this._stopStreamingOnConnect = opts.stopStreamingOnConnect ?? true;
+    this._imuGenerationOption = opts.imuGeneration;
     this._imuFamily = opts.imuGeneration === 'new' ? 'shimmer3-new' : 'shimmer3-old';
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
   }
@@ -403,6 +422,8 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._resetInquiredConfig();
     this.deviceVersion = null;
     this.firmwareVersion = null;
+    // Nor the old board's IMU generation.
+    this._setBoard(null, null);
     /* And the previous transport's subscriptions go. After a drop nothing else
      * removes them, and a late notification or disconnect event from that
      * transport would be taken as this link's. */
@@ -1273,8 +1294,11 @@ export class Shimmer3Client extends BaseShimmerClient {
     // A channel ID this SDK cannot describe has to reach the host, not just the
     // schema: its width was guessed, so every later channel in the frame may be
     // decoding from the wrong offset (see `buildShimmer3Schema`).
-    const info = interpretShimmer3InquiryResponse(rsp, this._timestampFmt, (m) =>
-      this._emitStatus(`⚠️ ${m}`),
+    const info = interpretShimmer3InquiryResponse(
+      rsp,
+      this._timestampFmt,
+      (m) => this._emitStatus(`⚠️ ${m}`),
+      this.imuGeneration,
     );
     /* Each status line runs an application callback, which can end the link.
        The old device's inquiry must not then overwrite the next device's
@@ -1547,8 +1571,78 @@ export class Shimmer3Client extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Daughter-card (expansion board) EEPROM memory
+  // Daughter-card (expansion board) id and EEPROM memory
   // ---------------------------------------------------------------------------
+
+  /**
+   * The board's IMU generation as this client will decode it: the
+   * `imuGeneration` option when given, else what {@link readExpansionBoard}
+   * found, else null (unknown).
+   */
+  get imuGeneration(): 'old' | 'new' | null {
+    return this._imuGenerationOption ?? this._imuGenerationFromBoard;
+  }
+
+  private _setBoard(board: ShimmerSrBoard | null, fromBoard: 'old' | 'new' | null): void {
+    this.expansionBoard = board;
+    this._imuGenerationFromBoard = fromBoard;
+    this._imuFamily = (this.imuGeneration ?? 'old') === 'new' ? 'shimmer3-new' : 'shimmer3-old';
+  }
+
+  /**
+   * Read the daughter-card id — `{boardId, boardRev, specialRev}`, the first
+   * three bytes of the id page (GET_DAUGHTER_CARD_ID_COMMAND 0x66 →
+   * `[0x65][length][bytes…]`) — and, unless the `imuGeneration` option was
+   * given, take the board's IMU generation from it.
+   *
+   * The Java driver reads this while connecting, on firmware code 5 and up
+   * (`ShimmerBluetooth.java:1606-1610`), and decides old- or new-IMU from it
+   * (`isSupportedNewImuSensors`; here `sdlog/header.ts` `isNewImuSensors`, the
+   * rule the SD-log decoder uses). On an old-IMU board that sets the mag
+   * channels big-endian and selects the old-IMU default calibration. Call it
+   * before {@link inquiry}: the schema is built from the generation known when
+   * the inquiry is answered.
+   *
+   * Returns null when the page is blank (all 0x00 or all 0xFF), and the IMU
+   * generation is then old, as Java's is for a board it cannot identify.
+   *
+   * HARDWARE-VERIFY: exercised against a scripted device and a recorded
+   * host-core session (board SR48-4-2, new IMU). Not yet run on an old-IMU
+   * board, and not part of the connect handshake: that would add a command to
+   * every connect, which has not been run on the bench.
+   */
+  async readExpansionBoard(): Promise<ShimmerSrBoard | null> {
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
+    this._emitStatus('GET_DAUGHTER_CARD_ID → waiting for RSP…');
+    await this._write(new Uint8Array([OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, 3, 0]), link);
+    const rsp = await this._waitForResponse(
+      OPCODES.DAUGHTER_CARD_ID_RESPONSE,
+      SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS,
+      link,
+    );
+    // [0x65][length][id bytes…]
+    const off = rsp[0] === OPCODES.DAUGHTER_CARD_ID_RESPONSE ? 2 : 1;
+    if (rsp.length < off + 3) {
+      throw new Error(
+        `Daughter-card id read returned ${Math.max(0, rsp.length - off)} of 3 bytes.`,
+      );
+    }
+    const board = parseExpansionBoard(rsp.subarray(off, off + 3));
+    this._link.throwIfReset(link, () => linkResetError('the daughter-card id to be applied'));
+    const newImu =
+      board !== null &&
+      isNewImuSensors(3, { id: board.boardId, rev: board.boardRev, revSpecial: board.specialRev });
+    this._setBoard(board, newImu ? 'new' : 'old');
+    this._emitStatus(
+      `Daughter card ${board ? `SR${board.boardId}-${board.boardRev}-${board.specialRev}` : 'id page is blank'}` +
+        ` → ${newImu ? 'new' : 'old'} IMU` +
+        (this._imuGenerationOption !== undefined
+          ? ` (imuGeneration option '${this._imuGenerationOption}' kept)`
+          : ''),
+    );
+    return board;
+  }
 
   /**
    * Read from the daughter-card EEPROM memory. `offset` is a HOST offset —

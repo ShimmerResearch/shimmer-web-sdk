@@ -130,8 +130,8 @@ const FWVER = OPCODES.FW_VERSION_RESPONSE;
 // Classic inquiry: 51.2 Hz, gyro X/Y/Z, config bytes all 0 → all ranges 0.
 const INQUIRY_MSG_S3 = [INQ_RSP, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x0a, 0x0b, 0x0c];
 // Raw gyro [0,131,262] → default MPU (sens 131, align [[0,-1,0],[-1,0,0],[0,0,-1]])
-// gives [-1, 0, -2] deg/s.
-const GYRO_S3 = [0x00, 0x00, 0x83, 0x00, 0x06, 0x01];
+// gives [-1, 0, -2] deg/s. Big-endian, as a Shimmer3 sends its gyro.
+const GYRO_S3 = [0x00, 0x00, 0x00, 0x83, 0x01, 0x06];
 const frameS3 = (ts: number): number[] => [
   0x00,
   ts & 0xff,
