@@ -6,8 +6,11 @@
  *     accounting (the 9-byte timestamp-offset field before the first packet
  *     of each 512-byte block is consumed and DISCARDED; porting the sync
  *     algorithm itself is out of scope)
- *   ShimmerObject#unwrapTimeStamp / #parseTimestampShimmer3 — rollover
- *     unwrapping and tick→ms conversion
+ *   TimestampUnwrap (ShimmerObject#unwrapTimeStamp / #isLastTimestampRejected)
+ *     — rollover unwrapping with the DEV-1023 reorder window and invalid-zero
+ *     rejection, through the SDK's shared StreamTimeline; a record the firmware
+ *     never stamped is dropped, as the Java file reader drops it
+ *   ShimmerObject#parseTimestampShimmer3 — tick→ms conversion
  *   ParserLoggedDataToDatabase#createMapOfFiles / #parseDataToDB /
  *   #compareSDHeader — numeric file ordering + cross-file consistency
  *     (modern files are self-contained: each restarts its own unwrap state
@@ -28,6 +31,7 @@ import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js
 import { calibrateGsrSample } from '../calibration/gsr.js';
 import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
 import { compensateBmp581 } from '../pressure/bmp581.js';
+import { StreamTimeline } from '../../core/StreamTimeline.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
 export interface SdLogDecodeOptions {
@@ -41,6 +45,14 @@ export interface SdLogDecodeResult {
   records: SdLogRecord[];
   /** True when decoding stopped early because `maxRecords` was reached. */
   truncated: boolean;
+  /**
+   * Records dropped because their timestamp field was an invalid `0x000000` —
+   * a record the firmware never stamped (LogAndStream v1.00.x–v1.01.003 could
+   * write one under SD back-pressure). Read as a counter wrap it would put
+   * every later record 512 s late, so it is left out of {@link records}, as the
+   * Java driver's file reader leaves it out. See `INVALID_ZERO_WINDOW_TICKS`.
+   */
+  droppedUnstampedRecords: number;
 }
 
 /**
@@ -93,6 +105,7 @@ function applyBmp581(values: number[], idx: Bmp581Indices): void {
 interface DecodeBudget {
   remaining: number;
   truncated: boolean;
+  droppedUnstamped: number;
 }
 
 function decodeRecordsFromFile(
@@ -116,10 +129,15 @@ function decodeRecordsFromFile(
   const rtcTicks = Number(header.rtcDifferenceTicks);
   const hasRtc = header.rtcDifferenceTicks !== 0n;
 
-  // Per-file rollover state (ShimmerObject#unwrapTimeStamp): modern files
-  // restart from cycle 0 with their own header initial timestamp.
-  let cycle = 0;
-  let lastUnwrapped = 0;
+  // Per-file rollover state (Java TimestampUnwrap): modern files restart from
+  // cycle 0 with their own header initial timestamp. The same unwrap the
+  // streaming clients use, with the reorder window sized from the file's own
+  // sampling rate. No host clock is passed, so its missed-wrap recovery — a
+  // live-link feature — never runs.
+  const timeline = new StreamTimeline({
+    timestampBits: tsBytes === 3 ? 24 : 16,
+    samplingRateHz: header.samplingRateHz,
+  });
   // Subtracted, with the header's initial timestamp added, from each unwrapped
   // timestamp (mFirstTsOffsetFromInitialTsTicks in the Java driver). The header
   // holds the RTC when the file was created, not the first packet's time, so
@@ -148,12 +166,16 @@ function decodeRecordsFromFile(
     let rawTs = bytes[p] | (bytes[p + 1] << 8);
     if (tsBytes === 3) rawTs |= bytes[p + 2] << 16;
     p += tsBytes;
-    let unwrapped = rawTs + maxTicks * cycle;
-    if (unwrapped < lastUnwrapped) {
-      cycle += 1;
-      unwrapped = rawTs + maxTicks * cycle;
+    const stamp = timeline.stamp(rawTs);
+    if (stamp.invalid) {
+      // A record the firmware never stamped: skip it whole, leaving the unwrap
+      // and the file's anchor where they were (Java's file reader drops it).
+      budget.droppedUnstamped += 1;
+      samplesInBlock += 1;
+      pos += need;
+      continue;
     }
-    lastUnwrapped = unwrapped;
+    const unwrapped = stamp.unwrappedTicks;
     if (firstTsOffsetTicks === null) {
       firstTsOffsetTicks = firstTsOffsetFromInitialTsTicks(initialTicks, rawTs, maxTicks);
     }
@@ -214,9 +236,15 @@ export function decodeSdLogFile(bytes: Uint8Array, opts?: SdLogDecodeOptions): S
   const budget: DecodeBudget = {
     remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
     truncated: false,
+    droppedUnstamped: 0,
   };
   decodeRecordsFromFile(bytes, parsed, records, budget);
-  return { header: parsed.header, records, truncated: budget.truncated };
+  return {
+    header: parsed.header,
+    records,
+    truncated: budget.truncated,
+    droppedUnstampedRecords: budget.droppedUnstamped,
+  };
 }
 
 const isDataFileName = (name: string): boolean => !name.includes('.');
@@ -297,6 +325,7 @@ export function decodeSdSession(
   const budget: DecodeBudget = {
     remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
     truncated: false,
+    droppedUnstamped: 0,
   };
   for (const f of withData) {
     if (budget.remaining <= 0) {
@@ -305,5 +334,10 @@ export function decodeSdSession(
     }
     decodeRecordsFromFile(f.bytes, f.parsed, records, budget);
   }
-  return { header: first, records, truncated: budget.truncated };
+  return {
+    header: first,
+    records,
+    truncated: budget.truncated,
+    droppedUnstampedRecords: budget.droppedUnstamped,
+  };
 }
