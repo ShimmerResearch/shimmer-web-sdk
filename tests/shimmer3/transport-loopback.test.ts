@@ -15,6 +15,8 @@ const NACK = OPCODES.NACK_COMMAND_PROCESSED; // 0xFE
 const INQ_RSP = OPCODES.INQUIRY_RESPONSE; // 0x02
 const DEVVER = OPCODES.DEVICE_VERSION_RESPONSE; // 0x25
 const FWVER = OPCODES.FW_VERSION_RESPONSE; // 0x2F
+/** DAUGHTER_CARD_ID_RESPONSE for SR48-4-2, a new-IMU board. */
+const BOARD_ID = [ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2];
 
 // Classic-Shimmer3 inquiry response (opcode-inclusive), 51.2 Hz, gyro X/Y/Z,
 // gsrRange=2, expPower=1 — see protocol.test.ts for the byte-by-byte breakdown.
@@ -26,6 +28,7 @@ function replyHandshake(bytes: Uint8Array, tr: LoopbackTransport): void {
   if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
   else if (op === OPCODES.GET_FW_VERSION_COMMAND)
     setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+  else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) setTimeout(() => tr.notify(BOARD_ID), 0);
 }
 
 /**
@@ -71,7 +74,9 @@ describe('Shimmer3Client connect handshake', () => {
       OPCODES.GET_SAMPLING_RATE_COMMAND, // 0x03 dummy read / buffer flush
       OPCODES.GET_DEVICE_VERSION_COMMAND, // 0x3F
       OPCODES.GET_FW_VERSION_COMMAND, // 0x2E
+      OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, // 0x66, on firmware code 5 and up
     ]);
+    expect(client.expansionBoard).toEqual({ boardId: 48, boardRev: 4, specialRev: 2 });
     expect(client.deviceVersion?.hardwareVersion).toBe(3);
     expect(client.firmwareVersion?.minor).toBe(15);
     expect(client.timestampFmt).toBe('u24'); // derived from firmware
@@ -696,6 +701,8 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
       else if (op === OPCODES.GET_FW_VERSION_COMMAND)
         setTimeout(() => tr.notify([FWVER, fwId, 0, 0, 0, fwMinor, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify(BOARD_ID), 0);
       else if (op === OPCODES.GET_INFOMEM_COMMAND) {
         const len = bytes[1];
         const addr = bytes[2] | (bytes[3] << 8);
@@ -734,6 +741,8 @@ describe('Shimmer3Client InfoMem + getMacAddress', () => {
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
       else if (op === OPCODES.GET_FW_VERSION_COMMAND)
         setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 16, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify(BOARD_ID), 0);
       else if (op === OPCODES.GET_INFOMEM_COMMAND)
         dribble(tr, [OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]);
     });

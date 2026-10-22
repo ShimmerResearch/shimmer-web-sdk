@@ -148,6 +148,8 @@ describe('Shimmer3Client streaming inertial calibration', () => {
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
       else if (op === OPCODES.GET_FW_VERSION_COMMAND)
         setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
       else if (op === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify(INQUIRY_MSG_S3), 0);
       else if (op === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
     });

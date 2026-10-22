@@ -80,6 +80,8 @@ async function connected(
       setTimeout(() => tr.notify([ACK, DEVVER, 3]), 0);
     } else if (op === OPCODES.GET_FW_VERSION_COMMAND) {
       setTimeout(() => tr.notify([ACK, FWVER, ...(opts.fw ?? LOGANDSTREAM_0_16_0)]), 0);
+    } else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+      setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
     } else {
       reply(new Uint8Array(bytes), tr);
     }
@@ -149,6 +151,8 @@ describe('Shimmer3Client with a status push on the link', () => {
         setTimeout(() => tr.notify([...PUSH_DOCKED, ACK, DEVVER, 3]), 0);
       } else if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
         setTimeout(() => tr.notify([ACK, FWVER, ...LOGANDSTREAM_0_16_0]), 0);
+      } else if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+        setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
       }
     });
     const client = new Shimmer3Client({ debug: false, transport: t });

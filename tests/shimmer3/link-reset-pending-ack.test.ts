@@ -47,6 +47,8 @@ function shimmer3(answer: Answer = () => [ACK], minor = 15) {
         return [DEVVER, 3];
       case OPCODES.GET_FW_VERSION_COMMAND:
         return fw(minor);
+      case OPCODES.GET_DAUGHTER_CARD_ID_COMMAND:
+        return [ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]; // SR48-4-2
       default:
         return answer(cmd);
     }
@@ -202,8 +204,25 @@ describe('an operation the drop strands part-way', () => {
       OPCODES.GET_SAMPLING_RATE_COMMAND,
       OPCODES.GET_DEVICE_VERSION_COMMAND,
       OPCODES.GET_FW_VERSION_COMMAND,
+      OPCODES.GET_DAUGHTER_CARD_ID_COMMAND,
     ]);
     expect(client.firmwareVersion?.minor).toBe(16);
+  });
+
+  it('a drop during the best-effort board read still fails the connect', async () => {
+    // The board read swallows its own failure, but not the link's end.
+    const answer = shimmer3();
+    const first = new LoopbackTransport({ capabilities: { framed: false } });
+    first.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+        setTimeout(() => tr.emitDisconnect(new Error('dropped')), 0);
+      } else {
+        answer(bytes, tr);
+      }
+    });
+    const client = new Shimmer3Client({ debug: false });
+    await expect(client.connect(first)).rejects.toThrow(/link was reset/);
+    expect(client.imuGeneration).toBeNull();
   });
 
   it("a stop's drain does not hold back the next link's replies", async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
 import {
   buildShimmer3Schema,
@@ -19,6 +19,7 @@ import type { ObjectCluster } from '../../src/core/ObjectCluster.js';
  */
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
+const NACK = OPCODES.NACK_COMMAND_PROCESSED;
 const hex = (s: string): number[] => s.match(/../g)!.map((b) => parseInt(b, 16));
 
 /** The trace's replies, CRC removed. */
@@ -53,13 +54,22 @@ const SAMPLES = [
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
 
-function device(daughterCardId: number[] = DAUGHTER_CARD_ID): LoopbackTransport {
+/**
+ * @param daughterCardId the 0x66 reply after its ACK, or `'nack'` for a board
+ *   that refuses the read
+ * @param fwVersion the FW_VERSION_RESPONSE
+ */
+function device(
+  daughterCardId: number[] | 'nack' = DAUGHTER_CARD_ID,
+  fwVersion: number[] = FW_VERSION,
+): LoopbackTransport {
   const t = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'S3' });
   t.setOnWrite((bytes, tr) => {
     const reply: Record<number, number[]> = {
       [OPCODES.GET_DEVICE_VERSION_COMMAND]: DEVICE_VERSION,
-      [OPCODES.GET_FW_VERSION_COMMAND]: [ACK, ...FW_VERSION],
-      [OPCODES.GET_DAUGHTER_CARD_ID_COMMAND]: [ACK, ...daughterCardId],
+      [OPCODES.GET_FW_VERSION_COMMAND]: [ACK, ...fwVersion],
+      [OPCODES.GET_DAUGHTER_CARD_ID_COMMAND]:
+        daughterCardId === 'nack' ? [NACK] : [ACK, ...daughterCardId],
       [OPCODES.INQUIRY_COMMAND]: [ACK, ...INQUIRY],
       [OPCODES.START_STREAMING_COMMAND]: [ACK],
     };
@@ -134,11 +144,13 @@ describe('Shimmer3 streaming mag byte order follows the IMU generation', () => {
     return p;
   };
 
-  it('stays little-endian while the board is unknown', async () => {
-    const t = device();
+  it('stays little-endian when the board does not answer, and still connects', async () => {
+    const t = device('nack');
     const client = new Shimmer3Client({ transport: t });
     await client.connect();
+    expect(t.writes.map((w) => w.bytes[0])).toContain(OPCODES.GET_DAUGHTER_CARD_ID_COMMAND);
     expect(client.imuGeneration).toBeNull();
+    expect(client.expansionBoard).toBeNull();
     await client.inquiry();
     expect(
       (client as unknown as { schema: Shimmer3StreamSchema }).schema.fields
@@ -147,24 +159,55 @@ describe('Shimmer3 streaming mag byte order follows the IMU generation', () => {
     ).toEqual(['le', 'le', 'le']);
   });
 
-  it('reads a new-IMU board from the daughter-card id and keeps little-endian', async () => {
+  it('stays unknown when the board read times out, and still connects', async () => {
+    vi.useFakeTimers();
+    try {
+      const t = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'S3' });
+      t.setOnWrite((bytes, tr) => {
+        const r: number[] | undefined = {
+          [OPCODES.GET_DEVICE_VERSION_COMMAND]: DEVICE_VERSION,
+          [OPCODES.GET_FW_VERSION_COMMAND]: [ACK, ...FW_VERSION],
+        }[bytes[0]];
+        if (r) setTimeout(() => tr.notify(r), 0);
+      });
+      const client = new Shimmer3Client({ transport: t });
+      const connecting = client.connect();
+      await vi.runAllTimersAsync();
+      await connecting;
+      expect(client.imuGeneration).toBeNull();
+      expect(client.expansionBoard).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not read the board on firmware below code 5', async () => {
+    // LogAndStream v0.2.0: firmware code 4, which Java does not ask either.
+    const t = device(DAUGHTER_CARD_ID, hex('2f030000000200'));
+    const client = new Shimmer3Client({ transport: t });
+    await client.connect();
+    expect(t.writes.map((w) => w.bytes[0])).not.toContain(OPCODES.GET_DAUGHTER_CARD_ID_COMMAND);
+    expect(client.imuGeneration).toBeNull();
+  });
+
+  it('reads a new-IMU board from the daughter-card id at connect and keeps little-endian', async () => {
     const t = device();
     const client = new Shimmer3Client({ transport: t });
     await client.connect();
-    const board = await client.readExpansionBoard();
-    expect(board).toEqual({ boardId: 48, boardRev: 4, specialRev: 2 });
+    expect(client.expansionBoard).toEqual({ boardId: 48, boardRev: 4, specialRev: 2 });
     expect(client.imuGeneration).toBe('new');
+    // And again on request.
+    expect(await client.readExpansionBoard()).toEqual({ boardId: 48, boardRev: 4, specialRev: 2 });
     await client.inquiry();
     const [oc] = await stream(client, t, [SAMPLES[0].packet]);
     expect(axes(oc, 'MAG')).toEqual(SAMPLES[0].mag);
   });
 
-  it('decodes an old-IMU board mag big-endian', async () => {
+  it('decodes an old-IMU board mag big-endian from the connect alone', async () => {
     // SR31-4-0: a Shimmer3 main board before the new-IMU revision 6.
     const t = device(hex('65031f0400'));
     const client = new Shimmer3Client({ transport: t });
     await client.connect();
-    await client.readExpansionBoard();
     expect(client.imuGeneration).toBe('old');
     await client.inquiry();
     const [oc] = await stream(client, t, [oldImuPacket()]);
@@ -176,8 +219,9 @@ describe('Shimmer3 streaming mag byte order follows the IMU generation', () => {
     const t = device(hex('6503ffffff'));
     const client = new Shimmer3Client({ transport: t });
     await client.connect();
-    expect(await client.readExpansionBoard()).toBeNull();
+    expect(client.expansionBoard).toBeNull();
     expect(client.imuGeneration).toBe('old');
+    expect(await client.readExpansionBoard()).toBeNull();
   });
 
   it('lets the imuGeneration option win over the board', async () => {
@@ -202,9 +246,8 @@ describe('Shimmer3 streaming mag byte order follows the IMU generation', () => {
     const t = device(hex('65031f0400'));
     const client = new Shimmer3Client({ transport: t });
     await client.connect();
-    await client.readExpansionBoard();
     expect(client.imuGeneration).toBe('old');
-    await client.connect(device());
+    await client.connect(device('nack'));
     expect(client.imuGeneration).toBeNull();
     expect(client.expansionBoard).toBeNull();
   });
