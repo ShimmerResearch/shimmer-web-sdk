@@ -12,6 +12,8 @@ import {
   nudgeGsrResistance,
 } from '../../src/devices/shimmer3r/calibration.js';
 import { buildFile, buildPacket, buildSdLogHeader, encodeValue } from './fixtures.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const ticksToMs = (ticks: number): number => (ticks / SDLOG_CLOCK_FREQ) * 1000;
 
@@ -251,7 +253,7 @@ describe('decodeSdLogFile — timestamp rollover unwrapping', () => {
       initialTimestampTicks: 0,
     });
     const pkt = (ts: number): number[] => buildPacket(ts, 2, encodeValue('u16', 0));
-    const file = buildFile(header, pkt(65530), pkt(65535), pkt(4), pkt(9), pkt(2));
+    const file = buildFile(header, pkt(65530), pkt(65535), pkt(4), pkt(40000), pkt(2));
     const { header: h, records } = decodeSdLogFile(file);
     expect(h.timestampBytes).toBe(2);
     // Elapsed ticks relative to the first packet (raw 65530).
@@ -259,8 +261,60 @@ describe('decodeSdLogFile — timestamp rollover unwrapping', () => {
     expect(ticks[0]).toBeCloseTo(0, 6);
     expect(ticks[1]).toBeCloseTo(5, 6);
     expect(ticks[2]).toBeCloseTo(65536 + 4 - 65530, 6); // first rollover
-    expect(ticks[3]).toBeCloseTo(65536 + 9 - 65530, 6);
+    expect(ticks[3]).toBeCloseTo(65536 + 40000 - 65530, 6);
     expect(ticks[4]).toBeCloseTo(2 * 65536 + 2 - 65530, 6); // second rollover
+  });
+
+  it('places a record a few ticks behind its predecessor as reordered, not as a rollover', () => {
+    // DEV-1023 reorder window (Java TimestampUnwrap): a backward step of a few
+    // sample periods is a reordered record. The naive "smaller means rollover"
+    // rule added a whole modulo to it and to every record after it.
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 9, 0],
+      enabledSensors: BM.GSR,
+      initialTimestampTicks: 0,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 2, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(1000), pkt(1009), pkt(1002), pkt(1020));
+    const ticks = decodeSdLogFile(file).records.map(
+      (r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ,
+    );
+    expect(ticks).toHaveLength(4);
+    expect(ticks[2]).toBeCloseTo(2, 6);
+    expect(ticks[3]).toBeCloseTo(20, 6);
+  });
+
+  it('drops a mid-range zero (a record never stamped) and keeps later records on time', () => {
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 11, 5],
+      enabledSensors: BM.GSR,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 3, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(500000), pkt(500640), pkt(0), pkt(501920));
+    const { records, droppedUnstampedRecords } = decodeSdLogFile(file);
+    expect(droppedUnstampedRecords).toBe(1);
+    const ticks = records.map((r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ);
+    expect(ticks).toHaveLength(3);
+    expect(ticks[0]).toBeCloseTo(0, 6);
+    expect(ticks[1]).toBeCloseTo(640, 6);
+    expect(ticks[2]).toBeCloseTo(1920, 6); // not 1920 + 2^24
+  });
+
+  it('still reads a zero just after the top of the 24-bit range as a rollover', () => {
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 11, 5],
+      enabledSensors: BM.GSR,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 3, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(16777216 - 640), pkt(0), pkt(640));
+    const { records, droppedUnstampedRecords } = decodeSdLogFile(file);
+    expect(droppedUnstampedRecords).toBe(0);
+    const ticks = records.map((r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ);
+    expect(ticks[1]).toBeCloseTo(640, 6);
+    expect(ticks[2]).toBeCloseTo(1280, 6);
   });
 
   it('unwraps across a 24-bit rollover (u24 timestamps)', () => {
@@ -834,5 +888,40 @@ describe('decodeSdSession — multi-file continuation', () => {
       { name: '001', bytes: f1 },
     ]);
     expect(records).toHaveLength(2);
+  });
+});
+
+describe('decodeSdLogFile — a recorded file with a record the firmware never stamped', () => {
+  // A Shimmer3 LogAndStream v1.01.004 recording at 51.2 Hz whose 11th record
+  // carries timestamp 0x000000 and which ends with 5 bytes that are not a
+  // whole record. Expected values are the Java driver's SD file reader's, as
+  // float64 bits, so the comparison is exact.
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('../fixtures/sd_record_never_stamped.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as {
+    fileHex: string;
+    unstampedRecordIndex: number;
+    expected: { recordHex: string; timestampMsBits: string; realTimeMsBits: string }[];
+  };
+  const hex = (h: string): Uint8Array =>
+    Uint8Array.from(h.match(/../g)!.map((b) => parseInt(b, 16)));
+  const f64 = (bits: string): number => new DataView(hex(bits).buffer).getFloat64(0, false);
+
+  const { header, records, droppedUnstampedRecords } = decodeSdLogFile(hex(fixture.fileHex));
+
+  it('keeps 39 records and drops the unstamped one', () => {
+    expect(fixture.unstampedRecordIndex).toBe(10);
+    expect(records).toHaveLength(39);
+    expect(droppedUnstampedRecords).toBe(1);
+    expect(header.packetSizeBytes).toBe(13);
+  });
+
+  it("matches the Java driver's Timestamp and RealTime bit for bit", () => {
+    const expected = fixture.expected;
+    expect(records.map((r) => r.timestampMs)).toEqual(expected.map((e) => f64(e.timestampMsBits)));
+    expect(records.map((r) => r.wallClockMs)).toEqual(expected.map((e) => f64(e.realTimeMsBits)));
   });
 });

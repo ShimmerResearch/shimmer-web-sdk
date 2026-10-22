@@ -1,0 +1,202 @@
+{
+  "description": "Shimmer3 GSR+ SD data file, LogAndStream v1.01.004 at 51.2 Hz, 13-byte records. The record after the 11th carries timestamp 0x000000 (never stamped) and the file ends with 5 bytes that are not a whole record. 'expected' lists the 39 records the Java driver's SD file reader keeps, with their Timestamp and RealTime in ms as IEEE-754 float64 bits (big-endian hex).",
+  "fileHex": "800201041100000041ff0109000000ff3100000900010000e8eb1b713e3600030101000300010104040000ff000035567de8b8616aacfc190080100000000000020100801000000000000201000000000000068706870687009c0064000000009c000000000000199619961996009c009c000000009c000000000000029b029b029b009c0064000000009c08cd08cd08cd005c005c005c009c009c000000009c7a6a0d6632007f9016d7d00bbc1b2afff9ff8c3cf8c6000000000000000000000000000000000000000000000000000000000000000030040200000000007017ffffffffffffffffffffffffffffffffffffffffffffffffffffff00b1b0370088af3702000000b804fff978a608b23701000000240733fc5cb488b43702000000e8090704d8c108b73702000000c008130d30bc88b9370200ba021c06e30a4cb708bc370200ba024403430654bc88be370200ba022802c30608bc08c1370200ba02f803b3068cb988c3370200ba0278052b0684ba08c63702002943f406cb07d8bb00000002002943f4020b08f0ba08cb3702002943a0063b09dcba88cd37020029431404630944ba08d0370200294334053709e8ba88d23702006984e8040709e4bb08d537020069841005af0918bb88d73702006984640513091cbb08da3701006984b005e30844bb88dc3701006984d005230998ba08df37010072c814051307fcb988e137020071c8c404c30668ba08e43702006fc8e8043309f8ba88e63701006ec878047b0aa4ba08e93702006cc894046f0968bb88eb3702006bc808061709f4ba08ee37010068c8840723097cba88f037000067c8f4077b09b0ba08f337010065c86007db08fcba88f537010063c85c06af084cbb08f837020061c80c07d7094cbb88fa3702005ec81407db0a50bb08fd3702005cc85007df0918bb88ff3701005ac874079b0994ba080238020057c8bc061b0934bb880438020055c8ec06db0938bc080738020052c88006e30a48bb880938010051c82c05770d30ba080c3801004ec8b004e705a0bb880e3801004cc87803030790bb081138020049c81c04f308bcba0102030405",
+  "unstampedRecordIndex": 10,
+  "expected": [
+    {
+      "recordHex": "88af3702000000b804fff978a6",
+      "timestampMsBits": "40fb30b568000000",
+      "realTimeMsBits": "427a0b3b95d2bcc5"
+    },
+    {
+      "recordHex": "08b23701000000240733fc5cb4",
+      "timestampMsBits": "40fb31ede8000000",
+      "realTimeMsBits": "427a0b3b95d3f545"
+    },
+    {
+      "recordHex": "88b43702000000e8090704d8c1",
+      "timestampMsBits": "40fb332668000000",
+      "realTimeMsBits": "427a0b3b95d52dc5"
+    },
+    {
+      "recordHex": "08b73702000000c008130d30bc",
+      "timestampMsBits": "40fb345ee8000000",
+      "realTimeMsBits": "427a0b3b95d66645"
+    },
+    {
+      "recordHex": "88b9370200ba021c06e30a4cb7",
+      "timestampMsBits": "40fb359768000000",
+      "realTimeMsBits": "427a0b3b95d79ec5"
+    },
+    {
+      "recordHex": "08bc370200ba024403430654bc",
+      "timestampMsBits": "40fb36cfe8000000",
+      "realTimeMsBits": "427a0b3b95d8d745"
+    },
+    {
+      "recordHex": "88be370200ba022802c30608bc",
+      "timestampMsBits": "40fb380868000000",
+      "realTimeMsBits": "427a0b3b95da0fc5"
+    },
+    {
+      "recordHex": "08c1370200ba02f803b3068cb9",
+      "timestampMsBits": "40fb3940e8000000",
+      "realTimeMsBits": "427a0b3b95db4845"
+    },
+    {
+      "recordHex": "88c3370200ba0278052b0684ba",
+      "timestampMsBits": "40fb3a7968000000",
+      "realTimeMsBits": "427a0b3b95dc80c5"
+    },
+    {
+      "recordHex": "08c63702002943f406cb07d8bb",
+      "timestampMsBits": "40fb3bb1e8000000",
+      "realTimeMsBits": "427a0b3b95ddb945"
+    },
+    {
+      "recordHex": "08cb3702002943a0063b09dcba",
+      "timestampMsBits": "40fb3e22e8000000",
+      "realTimeMsBits": "427a0b3b95e02a45"
+    },
+    {
+      "recordHex": "88cd37020029431404630944ba",
+      "timestampMsBits": "40fb3f5b68000000",
+      "realTimeMsBits": "427a0b3b95e162c5"
+    },
+    {
+      "recordHex": "08d0370200294334053709e8ba",
+      "timestampMsBits": "40fb4093e8000000",
+      "realTimeMsBits": "427a0b3b95e29b45"
+    },
+    {
+      "recordHex": "88d23702006984e8040709e4bb",
+      "timestampMsBits": "40fb41cc68000000",
+      "realTimeMsBits": "427a0b3b95e3d3c5"
+    },
+    {
+      "recordHex": "08d537020069841005af0918bb",
+      "timestampMsBits": "40fb4304e8000000",
+      "realTimeMsBits": "427a0b3b95e50c45"
+    },
+    {
+      "recordHex": "88d73702006984640513091cbb",
+      "timestampMsBits": "40fb443d68000000",
+      "realTimeMsBits": "427a0b3b95e644c5"
+    },
+    {
+      "recordHex": "08da3701006984b005e30844bb",
+      "timestampMsBits": "40fb4575e8000000",
+      "realTimeMsBits": "427a0b3b95e77d45"
+    },
+    {
+      "recordHex": "88dc3701006984d005230998ba",
+      "timestampMsBits": "40fb46ae68000000",
+      "realTimeMsBits": "427a0b3b95e8b5c5"
+    },
+    {
+      "recordHex": "08df37010072c814051307fcb9",
+      "timestampMsBits": "40fb47e6e8000000",
+      "realTimeMsBits": "427a0b3b95e9ee45"
+    },
+    {
+      "recordHex": "88e137020071c8c404c30668ba",
+      "timestampMsBits": "40fb491f68000000",
+      "realTimeMsBits": "427a0b3b95eb26c5"
+    },
+    {
+      "recordHex": "08e43702006fc8e8043309f8ba",
+      "timestampMsBits": "40fb4a57e8000000",
+      "realTimeMsBits": "427a0b3b95ec5f45"
+    },
+    {
+      "recordHex": "88e63701006ec878047b0aa4ba",
+      "timestampMsBits": "40fb4b9068000000",
+      "realTimeMsBits": "427a0b3b95ed97c5"
+    },
+    {
+      "recordHex": "08e93702006cc894046f0968bb",
+      "timestampMsBits": "40fb4cc8e8000000",
+      "realTimeMsBits": "427a0b3b95eed045"
+    },
+    {
+      "recordHex": "88eb3702006bc808061709f4ba",
+      "timestampMsBits": "40fb4e0168000000",
+      "realTimeMsBits": "427a0b3b95f008c5"
+    },
+    {
+      "recordHex": "08ee37010068c8840723097cba",
+      "timestampMsBits": "40fb4f39e8000000",
+      "realTimeMsBits": "427a0b3b95f14145"
+    },
+    {
+      "recordHex": "88f037000067c8f4077b09b0ba",
+      "timestampMsBits": "40fb507268000000",
+      "realTimeMsBits": "427a0b3b95f279c5"
+    },
+    {
+      "recordHex": "08f337010065c86007db08fcba",
+      "timestampMsBits": "40fb51aae8000000",
+      "realTimeMsBits": "427a0b3b95f3b245"
+    },
+    {
+      "recordHex": "88f537010063c85c06af084cbb",
+      "timestampMsBits": "40fb52e368000000",
+      "realTimeMsBits": "427a0b3b95f4eac5"
+    },
+    {
+      "recordHex": "08f837020061c80c07d7094cbb",
+      "timestampMsBits": "40fb541be8000000",
+      "realTimeMsBits": "427a0b3b95f62345"
+    },
+    {
+      "recordHex": "88fa3702005ec81407db0a50bb",
+      "timestampMsBits": "40fb555468000000",
+      "realTimeMsBits": "427a0b3b95f75bc5"
+    },
+    {
+      "recordHex": "08fd3702005cc85007df0918bb",
+      "timestampMsBits": "40fb568ce8000000",
+      "realTimeMsBits": "427a0b3b95f89445"
+    },
+    {
+      "recordHex": "88ff3701005ac874079b0994ba",
+      "timestampMsBits": "40fb57c568000000",
+      "realTimeMsBits": "427a0b3b95f9ccc5"
+    },
+    {
+      "recordHex": "080238020057c8bc061b0934bb",
+      "timestampMsBits": "40fb58fde8000000",
+      "realTimeMsBits": "427a0b3b95fb0545"
+    },
+    {
+      "recordHex": "880438020055c8ec06db0938bc",
+      "timestampMsBits": "40fb5a3668000000",
+      "realTimeMsBits": "427a0b3b95fc3dc5"
+    },
+    {
+      "recordHex": "080738020052c88006e30a48bb",
+      "timestampMsBits": "40fb5b6ee8000000",
+      "realTimeMsBits": "427a0b3b95fd7645"
+    },
+    {
+      "recordHex": "880938010051c82c05770d30ba",
+      "timestampMsBits": "40fb5ca768000000",
+      "realTimeMsBits": "427a0b3b95feaec5"
+    },
+    {
+      "recordHex": "080c3801004ec8b004e705a0bb",
+      "timestampMsBits": "40fb5ddfe8000000",
+      "realTimeMsBits": "427a0b3b95ffe745"
+    },
+    {
+      "recordHex": "880e3801004cc87803030790bb",
+      "timestampMsBits": "40fb5f1868000000",
+      "realTimeMsBits": "427a0b3b96011fc5"
+    },
+    {
+      "recordHex": "081138020049c81c04f308bcba",
+      "timestampMsBits": "40fb6050e8000000",
+      "realTimeMsBits": "427a0b3b96025845"
+    }
+  ]
+}
