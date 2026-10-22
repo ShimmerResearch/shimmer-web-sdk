@@ -205,6 +205,16 @@ Three rules worth knowing before reading the numbers:
   hands back a dump for inspection; `applyCalibDump(dump)` is what makes the
   stream use it. Which numbers are in force, per group and per range, is what
   `calibrationInfo` reports.
+- **The gyro offset can move while you stream.** With derived-sensor bit 29
+  (`GYRO_ON_THE_FLY_CAL`) set, the SDK runs the Java driver's on-the-fly
+  offset calibration, as Consensys does. Whenever the last round(fs) samples
+  are still (every calibrated axis has a standard deviation under 1.2 deg/s),
+  their raw mean becomes the gyro offset from the next sample on.
+  `Shimmer3RClient` takes the bit from the configuration it reads or writes. On
+  `Shimmer3Client` a host sets `gyroOnTheFlyCal` itself.
+  `calibrationInfo.gyroOnTheFly` says whether it is enabled and whether an
+  estimate is in force. The SD decoder does the same per file, from the header,
+  and reports it on the gyro entry of `header.calibration`.
 
 `client.timelineState` says how absolute time was fixed: `rwc-aligned` (exact,
 Shimmer3R — its packet timestamp is the low 24 bits of the same counter
@@ -712,6 +722,7 @@ src/
   devices/
     calibration/
       streamChannels.ts         ← the one per-channel conversion table
+      gyroOnTheFly.ts           ← gyro on-the-fly offset re-estimation (bit 29)
       gsr.ts                    ← GSR µS / kΩ / range, shared by both clients
       sensorIds.ts              ← SC_SENSOR ids, dump → per-group calibration
     pressure/                   ← Bosch BMP180 / 280 / 390 / 581 compensation

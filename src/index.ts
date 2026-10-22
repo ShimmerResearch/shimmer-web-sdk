@@ -767,8 +767,14 @@ export {
   MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
+  DERIVED_GYRO_ON_THE_FLY_CAL,
+  GYRO_ON_THE_FLY_THRESHOLD_DPS,
+  GyroOnTheFlyCal,
+  gyroOnTheFlyWindow,
+  isGyroOnTheFlyEnabled,
 } from './devices/calibration/index.js';
 export type {
+  GyroOnTheFlyInfo,
   KinematicCalibration,
   ParseKinematicOptions,
   ImuFamily,

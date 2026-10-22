@@ -120,10 +120,14 @@ export function calibrateVector3(
   const d1 = raw[1] - cal.offset[1];
   const d2 = raw[2] - cal.offset[2];
   const m = cal.m;
+  /* Each row is summed from 0, as UtilCalibration.matrixMultiplication's
+     `resultant[i][j] += ...` sums it. Bit-exact with Java only that way: when
+     the first product is -0 (an axis exactly at its offset, which the gyro
+     on-the-fly offset makes common), 0 + -0 is +0 where -0 + -0 stays -0. */
   return [
-    m[0] * d0 + m[1] * d1 + m[2] * d2,
-    m[3] * d0 + m[4] * d1 + m[5] * d2,
-    m[6] * d0 + m[7] * d1 + m[8] * d2,
+    0 + m[0] * d0 + m[1] * d1 + m[2] * d2,
+    0 + m[3] * d0 + m[4] * d1 + m[5] * d2,
+    0 + m[6] * d0 + m[7] * d1 + m[8] * d2,
   ];
 }
 

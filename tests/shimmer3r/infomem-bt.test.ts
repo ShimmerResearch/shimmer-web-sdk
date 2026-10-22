@@ -122,6 +122,22 @@ describe.each(SHAPES)('Shimmer3RClient.readInfoMemBytes — %s', (_name, framed)
     await expect(client.readInfoMemBytes()).rejects.toThrow(/Not connected/);
     await expect(client.readInfoMemConfig()).rejects.toThrow(/Not connected/);
   });
+
+  it('turns the gyro on-the-fly calibration on and off from derived-sensor bit 29', async () => {
+    const withBit = generateInfoMem({ ...seedConfig(), derivedSensors: 1n << 29n }, CTX.shimmer3R, {
+      forDeviceWrite: false,
+    });
+    const fw = await scriptedFirmware(opts({ store: withBit }));
+    expect(fw.client.gyroOnTheFlyCal).toBe(false);
+    const cfg = await fw.client.readInfoMemConfig();
+    expect(cfg.derivedSensors & (1n << 29n)).toBe(1n << 29n);
+    expect(fw.client.gyroOnTheFlyCal).toBe(true);
+    expect(fw.client.calibrationInfo.gyroOnTheFly.enabled).toBe(true);
+
+    // Writing a configuration without it turns it off: the device now runs so.
+    await fw.client.writeInfoMemConfig({ ...cfg, derivedSensors: 0n }, { verify: false });
+    expect(fw.client.gyroOnTheFlyCal).toBe(false);
+  });
 });
 
 describe('Shimmer3RClient.readInfoMemBytes — BLE notification reassembly', () => {

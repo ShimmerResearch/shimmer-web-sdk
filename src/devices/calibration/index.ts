@@ -31,3 +31,15 @@ export type { CalibDump, CalibDumpRecord, CalibDumpVersion, CalibReadSource } fr
 
 export { applyStreamingCalibration } from './streaming.js';
 export type { StreamingCalibrationState, StreamingImuRanges } from './streaming.js';
+
+export {
+  DERIVED_GYRO_ON_THE_FLY_CAL,
+  GYRO_ON_THE_FLY_THRESHOLD_DPS,
+  GyroOnTheFlyCal,
+  commonsMean,
+  commonsStandardDeviation,
+  gyroOnTheFlyInfo,
+  gyroOnTheFlyWindow,
+  isGyroOnTheFlyEnabled,
+} from './gyroOnTheFly.js';
+export type { GyroOnTheFlyInfo } from './gyroOnTheFly.js';
