@@ -1,9 +1,9 @@
 {
-  "description": "Gyro on-the-fly offset calibration (derived-sensor bit 29) reference: raw gyro and shimmer-host-core's calibrated gyro (IEEE-754 bits), which is held bit-exact with the Java driver. Extracted from shimmer-host-core conformance traces.",
+  "description": "Gyro on-the-fly offset calibration (derived-sensor bit 29) reference: raw gyro and calibrated gyro (IEEE-754 bits). The two Bluetooth sessions are as the Java driver decodes them; the SD case is the first 200 records of a Shimmer3R SD file as Consensys stored them.",
   "cases": [
     {
       "name": "shimmer3r_stream",
-      "source": "shimmer3r_session",
+      "source": "Shimmer3R Bluetooth session, Java driver decode",
       "samplingRateHz": 51.2,
       "calibration": {
         "offset": [0, 0, 0],
@@ -1003,7 +1003,7 @@
     },
     {
       "name": "shimmer3_stream",
-      "source": "shimmer3_session",
+      "source": "Shimmer3 Bluetooth session, Java driver decode",
       "samplingRateHz": 51.2,
       "calibration": {
         "offset": [0, 0, 0],
@@ -1845,7 +1845,7 @@
     },
     {
       "name": "shimmer3r_sd",
-      "source": "sd_shimmer3r_imu_gsr_bmp390",
+      "source": "Shimmer3R SD file, Consensys import",
       "samplingRateHz": 51.2,
       "calibration": {
         "offset": [0, 0, 0],

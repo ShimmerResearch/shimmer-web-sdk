@@ -15,9 +15,9 @@
  *
  * The arithmetic is Apache Commons Math 2.2's — `Mean.evaluate` with its
  * correction pass, and the bias-corrected `Variance` — because that is what
- * makes the result bit-exact with Java. shimmer-host-core carries the same
- * port (`src/calibration.rs`, `GyroOnTheFly`), held to Java's output to the
- * last bit, and this one is checked against host-core's traces.
+ * makes the result bit-exact with Java. It is checked against the Java driver's
+ * own output on two Bluetooth recordings, and against what Consensys stored for
+ * an SD file (`tests/calibration/gyro-on-the-fly.test.ts`).
  */
 
 import type { KinematicCalibration } from './kinematic.js';

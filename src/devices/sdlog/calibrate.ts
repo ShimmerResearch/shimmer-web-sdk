@@ -44,7 +44,7 @@ export interface SdLogCalibPlan {
   /**
    * The gyro on-the-fly offset estimator for this file, when the header sets
    * derived-sensor bit 29 and the file carries gyro; otherwise `null`. Fresh
-   * per file, as host-core starts it afresh for each header.
+   * per file.
    */
   gyroOnTheFly: GyroOnTheFlyCal | null;
 }

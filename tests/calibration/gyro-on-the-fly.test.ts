@@ -1,14 +1,14 @@
 /**
  * Gyro on-the-fly offset calibration (derived-sensor bit 29).
  *
- * The reference is `tests/fixtures/gyro_on_the_fly_hostcore.json`: raw gyro
- * and shimmer-host-core's calibrated gyro, as IEEE-754 bits, from three of its
- * conformance traces (a Shimmer3R and a Shimmer3 Bluetooth session, and a
- * Shimmer3R SD file). host-core is held bit-exact with the Java driver, so
- * matching it bit for bit is matching Consensys. Each case is long enough for
- * the window to fill and the offset to be re-estimated many times; the
- * Shimmer3 one starts from a stored offset of zero against a real offset of
- * hundreds of counts, which is where the correction is largest.
+ * The reference is `tests/fixtures/gyro_on_the_fly_java.json`: raw gyro and
+ * calibrated gyro, as IEEE-754 bits, for three recordings. Two are Bluetooth
+ * sessions, a Shimmer3R and a Shimmer3, as the Java driver decodes them. The
+ * third is the first 200 records of a Shimmer3R SD file, as Consensys stored
+ * them. Matching them bit for bit is matching Consensys. Each case is long
+ * enough for the window to fill and the offset to be re-estimated many times;
+ * the Shimmer3 one starts from a stored offset of zero against a real offset
+ * of hundreds of counts, which is where the correction is largest.
  */
 
 import { readFileSync } from 'node:fs';
@@ -40,7 +40,7 @@ interface FixtureCase {
 
 const fixture: { cases: FixtureCase[] } = JSON.parse(
   readFileSync(
-    fileURLToPath(new URL('../fixtures/gyro_on_the_fly_hostcore.json', import.meta.url)),
+    fileURLToPath(new URL('../fixtures/gyro_on_the_fly_java.json', import.meta.url)),
     'utf8',
   ),
 );
@@ -58,12 +58,12 @@ const baseOf = (c: FixtureCase): KinematicCalibration =>
     c.calibration.alignment,
   );
 
-/** Index of the first sample whose bits differ from host-core's, or -1. */
+/** Index of the first sample whose bits differ from the reference's, or -1. */
 function firstMismatch(c: FixtureCase, out: [number, number, number][]): number {
   return out.findIndex((v, i) => v.some((x, a) => bitsOf(x) !== c.expectedCalBits[i][a]));
 }
 
-describe('gyro on-the-fly: bit-exact with shimmer-host-core (and so Java)', () => {
+describe('gyro on-the-fly: bit-exact with the Java driver and Consensys', () => {
   it.each(fixture.cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
     const base = baseOf(c);
     const otf = new GyroOnTheFlyCal();
@@ -79,7 +79,7 @@ describe('gyro on-the-fly: bit-exact with shimmer-host-core (and so Java)', () =
   });
 
   it.each(fixture.cases.map((c) => [c.name, c] as const))(
-    '%s: without it, the output parts from host-core, and never inside the first window',
+    '%s: without it, the output parts from the reference, and never inside the first window',
     (_name, c) => {
       const base = baseOf(c);
       const out = c.raw.map((raw) => calibrateVector3(raw, base));
