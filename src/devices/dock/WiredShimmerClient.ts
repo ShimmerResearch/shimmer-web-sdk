@@ -297,10 +297,15 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * - The whole run holds this client's command queue. Nothing else reaches the
    *   sensor until the report ends — which is the truth about the firmware, not
    *   a limitation here: its main loop is blocked for the duration.
-   * - **The ExG chip test cannot pass from the dock.** Shimmer3 firmware prints
-   *   `- FAIL: ADS1292R test will not work from dock` because the dock UART and
-   *   that chip share pins. A FAIL on that line from this transport says nothing
-   *   about the board; run the test over Bluetooth to judge it.
+   * - **On a Shimmer3, the ExG chip test cannot pass from the dock.** Shimmer3
+   *   (MSP430) firmware does not run it there: it prints
+   *   `- FAIL: ADS1292R test will not work from dock` instead, because on that
+   *   board the dock UART and the chip share pins (`hal_FactoryTest.c`,
+   *   `SPI_test()`). A FAIL on that line from this transport says nothing about
+   *   the board; run the test over Bluetooth to judge it. **This is Shimmer3
+   *   only.** A Shimmer3R runs its ExG test (S3R_TEST_0021) normally over USB-C
+   *   and over the dock alike — its ExG SPI3 (PB4/PB5/PG9) and dock USART1
+   *   (PB6/PB7) share no pins — so an ExG FAIL from a Shimmer3R is a real result.
    *
    * @param type 0 MAIN, 1 LEDS, 2 ICS, 3 LED_STATES (`Test/shimmer_test.h:21-27`).
    * @param opts see {@link FactoryTestRunOptions}; `timeoutMs` defaults to the
