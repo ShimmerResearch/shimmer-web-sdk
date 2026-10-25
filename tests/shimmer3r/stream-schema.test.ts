@@ -3,6 +3,7 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 import { buildStreamSchema } from '../../src/devices/shimmer3r/streamSchema.js';
+import { buildShimmer3Schema } from '../../src/devices/shimmer3/protocol.js';
 import {
   channelLayoutDiffersByGeneration,
   isGenerationSensitiveChannel,
@@ -241,6 +242,54 @@ describe('the same packet on a classic Shimmer3', () => {
     expect(s3.schema.frameBytes).toBe(1 + 3 + 3 + 2 + 2); // temperature 2 bytes
     expect(s3r.schema.frameBytes).toBe(1 + 3 + 3 + 3 + 2); // temperature 3 bytes
     expect(s3.schema.frameBytes).not.toBe(s3r.schema.frameBytes);
+  });
+});
+
+describe('the alt accel 0x14-0x16 per generation (DEV-1338)', () => {
+  // Big-endian on both generations, in different encodings: on a Shimmer3R, the
+  // ADXL371's 12-bit value, left-justified, read from XDATA_H; on a Shimmer3,
+  // the 9-axis chip's own accelerometer as a plain i16, read from ACCEL_XOUT_H
+  // (SHIMMER3_STREAMING_DATA_FORMAT.md §5).
+  const ALT = [0x14, 0x15, 0x16];
+  const NAMES = ['HG_ACCEL_X', 'HG_ACCEL_Y', 'HG_ACCEL_Z'];
+
+  it('decodes a resting Shimmer3R ADXL371 to signed 12-bit counts', async () => {
+    // Counts as the HIL bench read them from a resting unit (100 mg/LSB).
+    const counts = [1, -5, -10];
+    const s = await session(HW_SHIMMER3R, [...ALT, CH.BATTERY]);
+    await s.client.inquiry();
+    const frames = await streamFrames(s, [
+      ...counts.flatMap((c) => u16be((c & 0xfff) << 4)),
+      ...u16le(3054),
+    ]);
+    expect(NAMES.map((n) => frames[0].get(n, 'raw')!.value)).toEqual(counts);
+    expect(frames[0].get('BATTERY', 'raw')!.value).toBe(3054);
+  });
+
+  it('decodes a Shimmer3 alt accel as a big-endian i16, not as 12 bits', async () => {
+    const values = [-300, 1234, -16384];
+    const s = await session(HW_SHIMMER3, ALT);
+    const { schema } = await s.client.inquiry();
+    expect(schema.fields.map((f) => [f.name, f.fmt, f.endian])).toEqual(
+      NAMES.map((n) => [n, 'i16', 'be']),
+    );
+    const frames = await streamFrames(
+      s,
+      values.flatMap((v) => u16be(v & 0xffff)),
+    );
+    // The 12-bit decode it used to get would read -19, 77, -1024.
+    expect(NAMES.map((n) => frames[0].get(n, 'raw')!.value)).toEqual(values);
+  });
+
+  it('gives Shimmer3Client the same i16 big-endian layout', () => {
+    const schema = buildShimmer3Schema(ALT, 'u24');
+    expect(schema.fields.map((f) => [f.name, f.fmt, f.endian])).toEqual(
+      NAMES.map((n) => [n, 'i16', 'be']),
+    );
+  });
+
+  it('counts the alt accel as laid out differently per generation', () => {
+    for (const id of ALT) expect(channelLayoutDiffersByGeneration(id)).toBe(true);
   });
 });
 
