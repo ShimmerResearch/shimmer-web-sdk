@@ -58,6 +58,16 @@ export function generationFromHardwareVersion(
  *   this SDK has always emitted for it. Width and encoding are the same on
  *   both, so nothing decodes wrongly — only the label is platform-neutral.
  * - `0x14`-`0x16` → `HG_ACCEL_*`. The firmware calls these `X/Y/Z_ALT_ACCEL`.
+ *   Both generations send them **big-endian**, but in different encodings. This
+ *   map keeps the Shimmer3R entry, a 12-bit value left-justified from the
+ *   ADXL371's `XDATA_H` (the Java driver's `i12*>`), because that is what it has
+ *   always exported. The Shimmer3 layer overrides it with a plain `i16`: there,
+ *   these channels are the MPU9x50/ICM-20948's own accelerometer, read from
+ *   `ACCEL_XOUT_H` (log-and-stream-common
+ *   `docs/SHIMMER3_STREAMING_DATA_FORMAT.md` §5). Until DEV-1338 these entries
+ *   said `le`. The `i12*` decoders never read that field, so Shimmer3R values
+ *   were right, but a Shimmer3 got the 12-bit decode, which is a sixteenth of
+ *   the value.
  */
 export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
   0x00: { name: 'LN_ACCEL_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
@@ -73,9 +83,9 @@ export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.f
   0x04: { name: 'WR_ACCEL_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x05: { name: 'WR_ACCEL_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x06: { name: 'WR_ACCEL_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
-  0x14: { name: 'HG_ACCEL_X', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
-  0x15: { name: 'HG_ACCEL_Y', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
-  0x16: { name: 'HG_ACCEL_Z', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
+  0x14: { name: 'HG_ACCEL_X', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
+  0x15: { name: 'HG_ACCEL_Y', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
+  0x16: { name: 'HG_ACCEL_Z', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
   0x17: { name: 'ALT_MAG_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x18: { name: 'ALT_MAG_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x19: { name: 'ALT_MAG_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
@@ -113,6 +123,9 @@ const SHIMMER3_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object
   0x13: { name: 'INT_EXP_ADC_A14', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x1a: { name: 'TEMPERATURE', fmt: 'u16', endian: 'be', sizeBytes: 2 },
   0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'be', sizeBytes: 3 },
+  0x14: { name: 'HG_ACCEL_X', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x15: { name: 'HG_ACCEL_Y', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x16: { name: 'HG_ACCEL_Z', fmt: 'i16', endian: 'be', sizeBytes: 2 },
   0x27: { name: 'BRIDGE_AMP_HIGH', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x28: { name: 'BRIDGE_AMP_LOW', fmt: 'u16', endian: 'le', sizeBytes: 2 },
 });
@@ -135,7 +148,7 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
 /**
  * Per-generation channel table, layered over {@link CHANNEL_FORMATS}.
  *
- * Four kinds of entry live here, and only the first is cosmetic:
+ * Five kinds of entry live here, and only the first is cosmetic:
  *
  * 1. **The ADC block, `0x0D`-`0x13`.** The IDs are reused with different
  *    meanings on the two platforms — `shimmer_sensing.h:107-122` defines
@@ -177,6 +190,10 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
  *    amplifier is an expansion board with no Shimmer3R equivalent, so these
  *    are deliberately absent from the `shimmer3r` table and a Shimmer3R
  *    reporting them is reported as an unknown channel rather than guessed at.
+ * 5. **`0x14`-`0x16` HG_ACCEL_X/Y/Z, Shimmer3 only.** The shared entry is the
+ *    Shimmer3R's 12-bit ADXL371 value. A Shimmer3 sends its 9-axis chip's own
+ *    accelerometer there as a plain big-endian `i16`, so this layer overrides
+ *    the shared entry (DEV-1338).
  *
  * Names follow the SD-log channel tables in `devices/sdlog/channels.ts` so the
  * streamed and logged copies of the same signal carry the same label. The one
@@ -300,6 +317,8 @@ export function isGenerationSensitiveChannel(id: number): boolean {
  *   little-endian bytes each on a Shimmer3R, emitted in the opposite order.
  * - The gyro `0x0A`-`0x0C` qualify — big-endian on a Shimmer3, little-endian on
  *   a Shimmer3R.
+ * - The alt accel `0x14`-`0x16` qualify — a big-endian `i16` on a Shimmer3, a
+ *   left-justified 12-bit value on a Shimmer3R.
  * - The Shimmer3-only `0x27`/`0x28` qualify, because they resolve to nothing at
  *   all on a Shimmer3R, so assuming the wrong way either invents a width or
  *   loses one.

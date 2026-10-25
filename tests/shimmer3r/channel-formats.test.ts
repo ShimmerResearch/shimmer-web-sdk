@@ -178,10 +178,12 @@ describe('CHANNEL_FORMATS (public base table)', () => {
     });
     expect(CHANNEL_FORMATS[0x12]).toEqual({ name: 'PPG', fmt: 'i16', endian: 'le', sizeBytes: 2 });
     expect(CHANNEL_FORMATS[0x1c]).toEqual({ name: 'GSR', fmt: 'u16', endian: 'le', sizeBytes: 2 });
+    // Byte order corrected in DEV-1338. The i12* decoders never read it, so the
+    // value a Shimmer3R decodes is unchanged.
     expect(CHANNEL_FORMATS[0x14]).toEqual({
       name: 'HG_ACCEL_X',
       fmt: 'i12*',
-      endian: 'le',
+      endian: 'be',
       sizeBytes: 2,
     });
     expect(CHANNEL_FORMATS[0x1e]).toEqual({
@@ -200,6 +202,12 @@ describe('CHANNEL_FORMATS (public base table)', () => {
       // each platform but the width and encoding are identical, and `PPG` is
       // the name this SDK has always emitted.
       if (id === 0x12) continue;
+      // 0x14-0x16 are the other: the shared entry is the Shimmer3R's, kept for
+      // consumers that read this map directly, and the Shimmer3 overrides it.
+      if (id >= 0x14 && id <= 0x16) {
+        expect(CHANNEL_FORMAT_OVERRIDES.shimmer3r[id]).toBeUndefined();
+        continue;
+      }
       expect(overridden, `0x${id.toString(16)} is in both layers`).toBeUndefined();
     }
   });
