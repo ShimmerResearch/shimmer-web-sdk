@@ -45,6 +45,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`WiredShimmerClient.runFactoryTest()`'s doc comment no longer says the ExG test always fails from the dock** (DEV-1340). That is Shimmer3 only: its firmware prints `- FAIL: ADS1292R test will not work from dock` without running the test, because its dock UART and the ExG chip share pins. A Shimmer3R runs the ExG test (S3R_TEST_0021) normally over USB-C and over the dock, since its ExG SPI3 and dock USART1 share no pins, so an ExG FAIL from a Shimmer3R is a real result. Documentation only; no code changed.
+
 - **A Shimmer3's streamed alt accel is decoded as a big-endian `i16`, not as a 12-bit value** (DEV-1338). Channels 0x14-0x16 (`HG_ACCEL_*`) shared one entry for both generations: the Shimmer3R's ADXL371 encoding, a 12-bit value left-justified in a big-endian word. On a Shimmer3 the same IDs carry the MPU9x50/ICM-20948's own accelerometer as a plain big-endian `i16` (log-and-stream-common `SHIMMER3_STREAMING_DATA_FORMAT.md` §5), so both clients read a Shimmer3's alt accel at a sixteenth of its value. The Shimmer3 layer of `CHANNEL_FORMAT_OVERRIDES` now overrides it, and `channelLayoutDiffersByGeneration` reports these IDs.
   - **Shimmer3R:** values are unchanged. The shared `CHANNEL_FORMATS` entry now says `endian: 'be'` instead of `'le'`. The `i12*` decoders never read that field, so they were already right.
 
