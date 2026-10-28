@@ -1432,8 +1432,18 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }, effectiveIdleMs);
       };
 
+      // An inactivity timeout, not a cap on the whole report: re-armed by every
+      // chunk, so a report that keeps streaming is never cut off part-way.
+      const armTimeout = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        timeoutTimer = setTimeout(() => {
+          finish(new Error(`runHardwareTestReport timeout: no report data for ${timeoutMs} ms`));
+        }, timeoutMs);
+      };
+
       off = this.on<Uint8Array>('testReportChunk', (rawChunk) => {
         if (done || !rawChunk?.length) return;
+        armTimeout();
 
         const chunk = sanitizeChunk(decoder.decode(rawChunk, { stream: true }));
         if (!chunk.length) return;
@@ -1464,13 +1474,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }
       });
 
-      timeoutTimer = setTimeout(() => {
-        finish(
-          new Error(
-            `runHardwareTestReport timeout after ${timeoutMs} ms while waiting for report data`,
-          ),
-        );
-      }, timeoutMs);
+      armTimeout();
 
       if (abortSignal) {
         if (abortSignal.aborted) {

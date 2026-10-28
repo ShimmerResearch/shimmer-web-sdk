@@ -45,6 +45,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`runHardwareTestReport`'s `timeoutMs` is now an inactivity timeout** (Verisense).
+  - **What was wrong:** it capped the whole report, counted from the start. A long report was given up part-way while the device was still sending, and the SDK then told the device to stop.
+  - **Where it bit:** a NAND diagnostic build prints progress dots through three stress passes. It was cut off at 120 s, in the middle of its last pass.
+  - **Now:** the clock restarts with every chunk received. The report is given up only when nothing has arrived for `timeoutMs`. The default stays 120 s.
+  - **Error text:** the error now reads `runHardwareTestReport timeout: no report data for <n> ms`.
+
 - **A Shimmer3's streamed alt accel is decoded as a big-endian `i16`, not as a 12-bit value** (DEV-1338). Channels 0x14-0x16 (`HG_ACCEL_*`) shared one entry for both generations: the Shimmer3R's ADXL371 encoding, a 12-bit value left-justified in a big-endian word. On a Shimmer3 the same IDs carry the MPU9x50/ICM-20948's own accelerometer as a plain big-endian `i16` (log-and-stream-common `SHIMMER3_STREAMING_DATA_FORMAT.md` §5), so both clients read a Shimmer3's alt accel at a sixteenth of its value. The Shimmer3 layer of `CHANNEL_FORMAT_OVERRIDES` now overrides it, and `channelLayoutDiffersByGeneration` reports these IDs.
   - **Shimmer3R:** values are unchanged. The shared `CHANNEL_FORMATS` entry now says `endian: 'be'` instead of `'le'`. The `i12*` decoders never read that field, so they were already right.
 
