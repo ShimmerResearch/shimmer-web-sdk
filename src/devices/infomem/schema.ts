@@ -27,6 +27,11 @@
 import type { InfoMemContext } from './types.js';
 import { HW_ID, type InfoMemLayout } from './layout.js';
 import {
+  BUTTON_LOG_MODE,
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+} from '../events/buttonLogMode.js';
+import {
   SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
   SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
   SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS,
@@ -100,6 +105,14 @@ export interface InfoMemFieldDefinition {
   readonly shift?: number;
   /** Bit width within the byte (`bit` kind only). */
   readonly width?: number;
+  /**
+   * `bit` kind only: bits that, when any is set, make the firmware ignore the
+   * whole byte and act as though it were 0 - bit 7 of configuration byte 232,
+   * which older firmware and erased memory leave set. A read of such a byte
+   * gives 0, and a write starts from 0, so setting one field of a 0xFF byte
+   * does not leave the other bits saying 7.
+   */
+  readonly zeroWhenAnySet?: number;
   /**
    * COMPOSITE fields only: the layout key of the byte holding the field's high
    * bit(s). `layoutKey`/`shift`/`width` describe the LOW part, this pair the
@@ -213,6 +226,10 @@ export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Objec
       { id: 'sdLogging.startup', title: 'Start-up' },
       { id: 'sdLogging.duration', title: 'Duration' },
     ],
+  },
+  {
+    id: 'eventChannel',
+    title: 'Button and Event Channel',
   },
   { id: 'trial', title: 'Trial / Experiment' },
   {
@@ -684,6 +701,60 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     configKey: 'sd.maxExpLengthMin',
   },
 
+  // ---- Button and event channel: configuration byte 232 (DEV-971). Present
+  // only where the firmware has the byte, which the layout decides
+  // (`idxButtonLogMode`). Bit 7 set - erased memory, or older firmware - makes
+  // the whole byte read as 0, "as before".
+  {
+    key: 'buttonMode',
+    label: 'Button Mode',
+    desc:
+      'Byte 232 bits 0-2 (NV_BUTTON_LOG_MODE). 0 leaves the button to Start Logging On ' +
+      'Button Press, as before. Modes 4 and 5 record every press and release in the event ' +
+      'channel. Not 0, it also sets Start Logging On Button Press to its nearest equivalent.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 0,
+    width: 3,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: BUTTON_MODE_OPTIONS,
+    group: 'eventChannel',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+  {
+    key: 'logTriggers',
+    label: 'What Else Starts Logging',
+    desc:
+      'Byte 232 bits 3-4. Read only when Button Mode is not 0. "Undock" includes unplugging ' +
+      'USB-C on a Shimmer3R; "Nothing" turns SD logging off.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 3,
+    width: 2,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: LOG_TRIGGER_OPTIONS,
+    group: 'eventChannel',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+  {
+    key: 'ttlInput',
+    label: 'Record TTL Input',
+    desc:
+      'Byte 232 bit 5, whatever the button mode: edges on P1.5 (Shimmer3) or PE9 ' +
+      '(Shimmer3R), at board logic level. Not on SR48-6-0.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 5,
+    width: 1,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: ON_OFF,
+    group: 'eventChannel',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+
   // ---- Trial / experiment identity
   {
     key: 'deviceName',
@@ -905,7 +976,9 @@ export function readInfoMemFieldValue(
       const shift = field.shift ?? 0;
       const width = field.width ?? 1;
       const mask = (1 << width) - 1;
-      const lsb = ((bytes[idx] ?? 0) >> shift) & mask;
+      const byte = bytes[idx] ?? 0;
+      if (field.zeroWhenAnySet !== undefined && (byte & field.zeroWhenAnySet) !== 0) return 0;
+      const lsb = (byte >> shift) & mask;
       const msbIdx = resolveMsbIndex(field, layout);
       if (msbIdx === undefined) return lsb;
       const msbMask = (1 << (field.msbWidth ?? 1)) - 1;
@@ -981,6 +1054,9 @@ export function writeInfoMemFieldValue(
       const width = field.width ?? 1;
       const mask = (1 << width) - 1;
       const raw = Number(value);
+      if (field.zeroWhenAnySet !== undefined && (bytes[idx] & field.zeroWhenAnySet) !== 0) {
+        bytes[idx] = 0;
+      }
       bytes[idx] = ((bytes[idx] & ~(mask << shift)) | ((raw & mask) << shift)) & 0xff;
       const msbIdx = resolveMsbIndex(field, layout);
       if (msbIdx === undefined) return;
@@ -1058,9 +1134,34 @@ export function writeInfoMemFieldValue(
   }
 }
 
-/** The schema fields that apply to a given part generation, in schema order. */
-export function infoMemFieldsFor(generation: Shimmer3Generation): InfoMemFieldDefinition[] {
-  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter((f) => f.appliesTo.includes(generation));
+/**
+ * Layout keys a layout may leave undefined, because the byte exists only on
+ * firmware the device has said it runs: configuration byte 232, which
+ * `InfoMemContext.eventChannel` brings in.
+ */
+const CONDITIONAL_LAYOUT_KEYS: ReadonlySet<keyof InfoMemLayout> = new Set<keyof InfoMemLayout>([
+  'idxButtonLogMode',
+]);
+
+/**
+ * The schema fields that apply to a given part generation, in schema order.
+ *
+ * Pass the device's resolved layout to get exactly the fields it has bytes
+ * for, byte 232's three included when its firmware has them. Without one,
+ * fields on a byte only some firmware has are left out, so a caller that reads
+ * every field it is given never meets an offset the layout does not define.
+ */
+export function infoMemFieldsFor(
+  generation: Shimmer3Generation,
+  layout?: InfoMemLayout,
+): InfoMemFieldDefinition[] {
+  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter(
+    (f) =>
+      f.appliesTo.includes(generation) &&
+      (layout
+        ? typeof layout[f.layoutKey] === 'number'
+        : !CONDITIONAL_LAYOUT_KEYS.has(f.layoutKey)),
+  );
 }
 
 /**

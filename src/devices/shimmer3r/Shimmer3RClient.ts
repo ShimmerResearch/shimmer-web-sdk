@@ -107,6 +107,14 @@ import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.j
 import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
 import {
+  EVENT_CHANNEL_STATUS_LENGTH,
+  eventFrameLength,
+  parseEventChannelStatus,
+  parseEventFrame,
+  type EventChannelStatus,
+  type EventRecord,
+} from '../events/record.js';
+import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
   DECLARED_LENGTH_RESPONSE_CAPS,
@@ -749,6 +757,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
   onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
 
   /**
+   * Invoked for each event channel record the device streams: a button press
+   * or release, a TTL edge, lost edges, and first the inputs' state at the
+   * opt-in (DEV-971; log-and-stream-common
+   * `docs/SHIMMER3_BT_COMMUNICATION_PROTOCOL.md` §7.15).
+   *
+   * Nothing arrives until {@link setEventStream} opts this connection in. Each
+   * frame carries its own CRC and is delivered only once it checks out, whether
+   * it arrives idle or between stream data packets. Frames can arrive after
+   * packets sampled later than their edge, so order by `ticks`, whose low 24
+   * bits line up with a packet's timestamp.
+   *
+   * HARDWARE-VERIFY: built from the firmware source and its doc's example
+   * frame; no device has streamed a record to this client yet.
+   */
+  onEventRecord: ((record: EventRecord) => void) | null = null;
+
+  /**
    * Invoked whenever {@link factoryTestState} changes, synchronously. A host uses
    * it to hold its own "the link is busy" gate through the whole run — including
    * the `draining` phase after a cancel, when the sensor is still printing and no
@@ -1226,7 +1251,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
 
-      const remainder = chunk.slice(1);
+      let remainder = chunk.slice(1);
+      /* An event record frame is never a command's reply, but on a byte stream
+         it can be framed onto the ACK a command is waiting for - the opt-in's
+         own ACK and the first record, say. Deliver it, rather than let the
+         command take it as its response and drop it. */
+      if (
+        remainder.length >= 2 &&
+        remainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        remainder[1] === OPCODES.EVENT_RECORD_RESPONSE
+      ) {
+        this._maybeEmitEventRecords(remainder);
+        remainder = new Uint8Array(0);
+      }
       this._lastAckRemainder = remainder.length ? remainder : null;
 
       this._emitTemp(new Uint8Array([OPCODES.ACK_COMMAND_PROCESSED]));
@@ -1257,6 +1294,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } else {
       this._emitTemp(chunk);
       this._maybeEmitDeviceStatus(chunk);
+      this._maybeEmitEventRecords(chunk);
       if (chunk.length && chunk[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, chunk);
       }
@@ -1346,6 +1384,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
+    }
+  }
+
+  /**
+   * Deliver the event record frames a control-plane chunk carries on
+   * {@link onEventRecord}. A notification can hold several back to back - the
+   * firmware sends up to eight a pass - and a stray ACK may sit in front.
+   */
+  private _maybeEmitEventRecords(chunk: Uint8Array): void {
+    let msg = withoutLeadingAck(chunk);
+    if (msg.length < 2 || msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
+    if (msg[1] !== OPCODES.EVENT_RECORD_RESPONSE) return;
+    while (msg.length > 0) {
+      const n = eventFrameLength(msg, 0);
+      if (n <= 0) {
+        this._log('Event frame failed its CRC or was cut short; dropped', msg.length, 'byte(s)');
+        return;
+      }
+      this._emitEventRecord(msg.subarray(0, n));
+      msg = msg.subarray(n);
+    }
+  }
+
+  /** Decode one whole, CRC-checked event frame and hand it to {@link onEventRecord}. */
+  private _emitEventRecord(frame: Uint8Array): void {
+    const rec = parseEventFrame(frame);
+    if (!rec || !this.onEventRecord) return;
+    try {
+      this.onEventRecord(rec);
+    } catch (e) {
+      this._log('onEventRecord handler error', e);
     }
   }
 
@@ -2195,6 +2264,85 @@ export class Shimmer3RClient extends BaseShimmerClient {
       1500,
     );
     this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
+  }
+
+  /**
+   * Opt this connection in to (or out of) the event channel's records
+   * (SET_FEATURE / FEATURE_EVENT_STREAM, DEV-971). Once in, every button and
+   * TTL record arrives on {@link onEventRecord}, starting with the inputs'
+   * state at the opt-in, whether or not the device is streaming or logging.
+   *
+   * It lasts for this connection only: the firmware clears it on connect and
+   * on disconnect, so call it again after every reconnection. It enables no
+   * input - configuration byte 232 decides which are recorded - but it does
+   * arm an enabled TTL input outside a logging session.
+   *
+   * @returns false when the firmware NACKs feature 3, which is how firmware
+   *   without the event channel answers; true once it is ACKed
+   */
+  async setEventStream(enabled: boolean): Promise<boolean> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus(`SET_FEATURE event-stream=${enabled ? 1 : 0} → waiting for ACK…`);
+    try {
+      await this._writeExpectingAck(
+        new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.EVENT_STREAM, enabled ? 1 : 0]),
+        1500,
+      );
+    } catch (e) {
+      if (e instanceof Error && e.message === 'NACK received') {
+        this._emitStatus('Event stream not supported by this firmware (feature 3 NACKed)');
+        return false;
+      }
+      throw e;
+    }
+    this._emitStatus(`Event stream ${enabled ? 'on' : 'off'}`);
+    return true;
+  }
+
+  /**
+   * Ask the device whether its firmware has the event channel, and with it
+   * configuration byte 232 (DEV-971): {@link setEventStream} with `false`,
+   * which every Shimmer3R firmware answers - ACK with the event channel, NACK
+   * without - and which changes nothing, since a connection starts opted out.
+   *
+   * Pass the answer to the InfoMem context as `eventChannel`, which is what
+   * brings byte 232 into the layout and the field schema. There is no firmware
+   * version to go by: the builds that have it report the release before them.
+   */
+  async supportsEventChannel(): Promise<boolean> {
+    return this.setEventStream(false);
+  }
+
+  /**
+   * Read the event channel's status (GET_EVENT_CHANNEL_STATUS_COMMAND 0xB9 →
+   * `[ACK][0xBA][9 bytes]`): which inputs the configuration enables, whether
+   * this connection is opted in, whether an event file is open or has failed,
+   * whether the TTL input is armed or throttled, each input's state, and the
+   * link's counters.
+   *
+   * Firmware without the event channel does not answer, so this times out
+   * there.
+   *
+   * HARDWARE-VERIFY: from the firmware source (`ShimEvt_buildStatus`) only.
+   */
+  async getEventChannelStatus(): Promise<EventChannelStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_EVENT_CHANNEL_STATUS_COMMAND]),
+      1500,
+    );
+    const rsp =
+      remainder && remainder[0] === OPCODES.EVENT_CHANNEL_STATUS_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.EVENT_CHANNEL_STATUS_RESPONSE, 1500, link);
+    if (
+      rsp[0] !== OPCODES.EVENT_CHANNEL_STATUS_RESPONSE ||
+      rsp.length < 1 + EVENT_CHANNEL_STATUS_LENGTH
+    ) {
+      throw new Error(`Malformed event channel status (${rsp.length} bytes).`);
+    }
+    return parseEventChannelStatus(rsp.subarray(1, 1 + EVENT_CHANNEL_STATUS_LENGTH));
   }
 
   /**
@@ -4399,6 +4547,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _streamReplyLength(buf: Uint8Array, at: number): number {
     const op = buf[at];
+    /* An event record frame, which the firmware queues into the same ring. It
+       carries its own CRC whatever the link's mode, so it vouches for itself as
+       a CRC'd reply does. */
+    if (op === OPCODES.INSTREAM_CMD_RESPONSE) return eventFrameLength(buf, at);
     if (!isAckOrNack(op)) return RESYNC;
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer > 0) {
@@ -4428,7 +4580,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * An ACK that no command is counting on is dropped, such as the one for
    * {@link toggleLed}, which does not wait for it while streaming.
    */
-  private _takeStreamReply(op: number): void {
+  private _takeStreamReply(op: number, frame?: Uint8Array): void {
+    if (op === OPCODES.INSTREAM_CMD_RESPONSE) {
+      if (frame) this._emitEventRecord(frame);
+      return;
+    }
     if (op === OPCODES.NACK_COMMAND_PROCESSED) {
       // _waitForAck rejects on it, and its caller gives the count back
       this._log('NACK between stream packets');
@@ -4472,11 +4628,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * here only where a boundary is known, after a packet or another reply,
        * and never from bytes the parser has yet to place, which could be
        * anything. A packet with replies behind it, below, leaves them here. */
-      if (this._streaming && this._streamAligned && isAckOrNack(buf[0])) {
+      if (
+        this._streaming &&
+        this._streamAligned &&
+        (isAckOrNack(buf[0]) || buf[0] === OPCODES.INSTREAM_CMD_RESPONSE)
+      ) {
         const n = this._streamReplyLength(buf, 0);
         if (n === NEED_MORE) break;
         if (n !== RESYNC) {
-          this._takeStreamReply(buf[0]);
+          this._takeStreamReply(buf[0], buf.subarray(0, n));
           buf = buf.subarray(n);
           continue;
         }
@@ -4500,7 +4660,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
         buf.length > wireBytes &&
         buf[wireBytes] !== preamble
       ) {
-        const vouchable = crcBytes > 0 && this._streamAligned;
+        /* An event frame's own CRC vouches for it on any link, as a reply's
+           does on a CRC'd one. */
+        const eventFrame = buf[wireBytes] === OPCODES.INSTREAM_CMD_RESPONSE;
+        const vouchable = (crcBytes > 0 || eventFrame) && this._streamAligned;
         const replies = vouchable
           ? this._streamReplyLength(buf, wireBytes)
           : this._streamRepliesLength(buf, wireBytes);

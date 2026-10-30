@@ -221,6 +221,18 @@ export interface InfoMemLayout {
   idxMaxExpLengthLsb: number;
   idxMacAddress: number;
   idxSDConfigDelayFlag: number;
+  /**
+   * Configuration byte 232 (`NV_BUTTON_LOG_MODE`): button mode, log triggers
+   * and the TTL input, on LogAndStream firmware with the event channel
+   * (DEV-971). See `devices/events/buttonLogMode.ts`.
+   *
+   * Undefined unless {@link InfoMemContext.eventChannel} says the firmware has
+   * it. No release has it yet, and the builds that do report the same version
+   * as the release before them, so there is no version to gate on; a host asks
+   * the device instead (`Shimmer3RClient.supportsEventChannel`). Older firmware
+   * never writes the byte and leaves it at 0xFF, which reads as "as before".
+   */
+  idxButtonLogMode?: number;
   idxBtFactoryReset: number;
 
   // InfoMem B
@@ -487,6 +499,7 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     idxMaxExpLengthLsb: 128 + 95, // 223
     idxMacAddress: 128 + 96, // 224
     idxSDConfigDelayFlag: 128 + 102, // 230
+    idxButtonLogMode: ctx.eventChannel === true && isSdLoggingFirmware(ctx) ? 128 + 104 : undefined, // 232
     idxBtFactoryReset: 0,
 
     // B page. Java `idxNode0` = 128+128 = 256 with `maxNumOfExperimentNodes`
