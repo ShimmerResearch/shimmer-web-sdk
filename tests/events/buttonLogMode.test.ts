@@ -27,6 +27,7 @@ import {
 } from '../../src/devices/events/buttonLogMode.js';
 import {
   SHIMMER3_INFOMEM_FIELD_SCHEMA,
+  infoMemFieldsFor,
   readInfoMemFieldValue,
   writeInfoMemFieldValue,
 } from '../../src/devices/infomem/schema.js';
@@ -187,6 +188,24 @@ describe('the byte 232 schema fields', () => {
       resolveInfoMemLayout({ ...CTX.shimmer3R, firmwareId: 1, eventChannel: true })
         .idxButtonLogMode,
     ).toBeUndefined();
+  });
+
+  it('come from infoMemFieldsFor only with a layout that has the byte', () => {
+    const keys = (layout?: Parameters<typeof infoMemFieldsFor>[1]): string[] =>
+      infoMemFieldsFor('shimmer3r', layout)
+        .filter((f) => f.configKey === 'buttonLogMode')
+        .map((f) => f.key);
+    expect(keys()).toEqual([]);
+    expect(keys(resolveInfoMemLayout(CTX.shimmer3R))).toEqual([]);
+    expect(keys(resolveInfoMemLayout({ ...CTX.shimmer3R, eventChannel: true }))).toEqual([
+      'buttonMode',
+      'logTriggers',
+      'ttlInput',
+    ]);
+    // Every other field is offered with or without a layout, as before.
+    expect(infoMemFieldsFor('shimmer3r', resolveInfoMemLayout(CTX.shimmer3R))).toEqual(
+      infoMemFieldsFor('shimmer3r'),
+    );
   });
 
   it('read a 0xFF byte as 0, and write it from 0', () => {

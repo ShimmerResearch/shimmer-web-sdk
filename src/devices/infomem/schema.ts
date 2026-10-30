@@ -1134,9 +1134,34 @@ export function writeInfoMemFieldValue(
   }
 }
 
-/** The schema fields that apply to a given part generation, in schema order. */
-export function infoMemFieldsFor(generation: Shimmer3Generation): InfoMemFieldDefinition[] {
-  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter((f) => f.appliesTo.includes(generation));
+/**
+ * Layout keys a layout may leave undefined, because the byte exists only on
+ * firmware the device has said it runs: configuration byte 232, which
+ * `InfoMemContext.eventChannel` brings in.
+ */
+const CONDITIONAL_LAYOUT_KEYS: ReadonlySet<keyof InfoMemLayout> = new Set<keyof InfoMemLayout>([
+  'idxButtonLogMode',
+]);
+
+/**
+ * The schema fields that apply to a given part generation, in schema order.
+ *
+ * Pass the device's resolved layout to get exactly the fields it has bytes
+ * for, byte 232's three included when its firmware has them. Without one,
+ * fields on a byte only some firmware has are left out, so a caller that reads
+ * every field it is given never meets an offset the layout does not define.
+ */
+export function infoMemFieldsFor(
+  generation: Shimmer3Generation,
+  layout?: InfoMemLayout,
+): InfoMemFieldDefinition[] {
+  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter(
+    (f) =>
+      f.appliesTo.includes(generation) &&
+      (layout
+        ? typeof layout[f.layoutKey] === 'number'
+        : !CONDITIONAL_LAYOUT_KEYS.has(f.layoutKey)),
+  );
 }
 
 /**
