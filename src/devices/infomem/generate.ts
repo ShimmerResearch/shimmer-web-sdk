@@ -223,6 +223,12 @@ function writeModelledFields(
     out[layout.idxSDMyTrialID] = t.id & 0xff;
     out[layout.idxSDNumOfShimmers] = t.numShimmers & 0xff;
   }
+  // Byte 232, as given: a config parsed from a device carries the byte it had,
+  // so an unedited write leaves it alone. Skipped for a hand-built config that
+  // predates the field, rather than writing 0 over whatever the base holds.
+  if (layout.idxButtonLogMode !== undefined && typeof config.buttonLogMode === 'number') {
+    out[layout.idxButtonLogMode] = config.buttonLogMode & 0xff;
+  }
 
   writeImu(out, config, layout);
   writeSd(out, config, layout);
