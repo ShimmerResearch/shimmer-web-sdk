@@ -2278,10 +2278,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * arm an enabled TTL input outside a logging session.
    *
    * @returns false when the firmware NACKs feature 3, which is how firmware
-   *   without the event channel answers; true once it is ACKed
+   *   without the event channel answers, or is older than SET_FEATURE itself
+   *   and so is not asked (`_hasSetFeature`); true once it is ACKed
    */
   async setEventStream(enabled: boolean): Promise<boolean> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!(await this._hasSetFeature())) {
+      this._emitStatus('Event stream not supported by this firmware (older than SET_FEATURE)');
+      return false;
+    }
     this._emitStatus(`SET_FEATURE event-stream=${enabled ? 1 : 0} → waiting for ACK…`);
     try {
       await this._writeExpectingAck(
@@ -2302,15 +2307,33 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Ask the device whether its firmware has the event channel, and with it
    * configuration byte 232 (DEV-971): {@link setEventStream} with `false`,
-   * which every Shimmer3R firmware answers - ACK with the event channel, NACK
+   * which firmware with SET_FEATURE answers - ACK with the event channel, NACK
    * without - and which changes nothing, since a connection starts opted out.
+   * Firmware older than SET_FEATURE is not asked, and has no event channel.
    *
    * Pass the answer to the InfoMem context as `eventChannel`, which is what
-   * brings byte 232 into the layout and the field schema. There is no firmware
-   * version to go by: the builds that have it report the release before them.
+   * brings byte 232 into the layout and the field schema. The version alone
+   * cannot say: the builds that have it report the release before them.
    */
   async supportsEventChannel(): Promise<boolean> {
     return this.setEventStream(false);
+  }
+
+  /**
+   * Whether the firmware has SET_FEATURE (0xB7) and NACKs a feature it does
+   * not know: LogAndStream_Shimmer3R v1.00.052 on, where it came with
+   * log-and-stream-common. Older firmware drops the 0xB7 byte unanswered and
+   * runs the two bytes after it as commands, and feature 3 is then
+   * GET_SAMPLING_RATE_COMMAND, which it ACKs: an event-stream request there
+   * would read as accepted.
+   */
+  private async _hasSetFeature(): Promise<boolean> {
+    try {
+      const v = await this.readFwVersion();
+      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_000_052;
+    } catch {
+      return false;
+    }
   }
 
   /**

@@ -14,7 +14,7 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { BT_FEATURE, OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { appendCrc, CRC_MODE, type CrcMode } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
-import { versionReply } from './configFirmware.js';
+import { versionReply, type FwTuple } from './configFirmware.js';
 import type { EventRecord } from '../../src/devices/events/record.js';
 
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
@@ -66,29 +66,47 @@ const CASES = LINKS.flatMap((link) => MODES.map((mode) => [link, mode] as const)
 const label = (link: (typeof LINKS)[number], mode: CrcMode): string =>
   `${link.name}, ${['no CRC', '1-byte CRC', '2-byte CRC'][mode]}`;
 
-/** A Shimmer3R with the event channel, or without it (`hasEventChannel: false`). */
+/** A build with the event channel reports the release before it. */
+const FW_EVENT_CHANNEL: FwTuple = [3, 1, 1, 25];
+/** The last release before SET_FEATURE. */
+const FW_BEFORE_SET_FEATURE: FwTuple = [3, 1, 0, 51];
+
+/**
+ * A Shimmer3R with the event channel, or without it (`hasEventChannel: false`).
+ * With `fw` older than SET_FEATURE it drops the 0xB7 byte and runs the two
+ * after it as commands, as that firmware does.
+ */
 async function device(
   link: (typeof LINKS)[number],
   mode: CrcMode,
-  opts: { hasEventChannel?: boolean; streaming?: boolean } = {},
+  opts: { hasEventChannel?: boolean; streaming?: boolean; fw?: FwTuple } = {},
 ) {
   const t = new LoopbackTransport({ capabilities: { framed: link.framed } });
+  const fw = opts.fw ?? FW_EVENT_CHANNEL;
+  const hasSetFeature = fw[1] * 1_000_000 + fw[2] * 1_000 + fw[3] >= 1_000_052;
   const dev = {
     crc: CRC_MODE.OFF as CrcMode,
     streaming: false,
     optedIn: false,
     queued: [] as Uint8Array[],
+    written: [] as number[],
   };
   t.setOnWrite((bytes, tr) => {
     const op = bytes[0];
+    dev.written.push(op);
     const reply = (msg: number[]): void => {
       const packet = appendCrc(new Uint8Array(msg), dev.crc);
       if (dev.streaming) dev.queued.push(packet);
       else setTimeout(() => tr.notify(packet), 0);
     };
-    const version = versionReply(op);
+    const version = versionReply(op, undefined, fw);
     if (version) reply(version);
-    else if (op === OPCODES.INQUIRY_COMMAND) reply([ACK, ...INQUIRY_BODY]);
+    else if (op === OPCODES.SET_FEATURE && !hasSetFeature) {
+      // 0xB7 unknown and dropped; feature 3 is GET_SAMPLING_RATE_COMMAND.
+      if (bytes[1] === OPCODES.GET_SAMPLING_RATE_COMMAND) {
+        reply([ACK, OPCODES.SAMPLING_RATE_RESPONSE, 0x80, 0x02]);
+      }
+    } else if (op === OPCODES.INQUIRY_COMMAND) reply([ACK, ...INQUIRY_BODY]);
     else if (op === OPCODES.SET_CRC_COMMAND) {
       dev.crc = bytes[1] as CrcMode;
       reply([ACK]);
@@ -173,6 +191,13 @@ describe('setEventStream / supportsEventChannel', () => {
       const s = await device(link, CRC_MODE.OFF, { hasEventChannel: false });
       await expect(s.client.supportsEventChannel()).resolves.toBe(false);
     });
+
+    it(`never asks firmware older than SET_FEATURE, which would ACK it (${link.name})`, async () => {
+      const s = await device(link, CRC_MODE.OFF, { fw: FW_BEFORE_SET_FEATURE });
+      await expect(s.client.supportsEventChannel()).resolves.toBe(false);
+      await expect(s.client.setEventStream(true)).resolves.toBe(false);
+      expect(s.dev.written).not.toContain(OPCODES.SET_FEATURE);
+    });
   }
 });
 
@@ -219,6 +244,7 @@ describe('event frames while idle', () => {
 
   it('is not taken for the opt-in reply when it follows the ACK in one read (classic SPP)', async () => {
     const s = await device(LINKS[1], CRC_MODE.OFF);
+    await s.client.readFwVersion(); // the opt-in checks it, and the script below cannot answer
     // The firmware answers the opt-in, then sends the initial state at once.
     s.t.setOnWrite((bytes, tr) => {
       if (bytes[0] === OPCODES.SET_FEATURE) {
