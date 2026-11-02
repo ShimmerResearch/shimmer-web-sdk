@@ -10,10 +10,14 @@
  * - LED-state walk: `log-and-stream-common/Test/shimmer_test_leds_states.c:28-206`
  *
  * HARDWARE-VERIFY: the field *values* are plausible rather than observed — in
- * particular the Bluetooth module version banner, the SD card CID line and the
- * MCU id numbers are reconstructed from their `sprintf` formats. Replace them
- * with a real capture once one exists; the line *shapes* are what these tests
- * pin.
+ * particular the Bluetooth module version banner and the MCU id numbers are
+ * reconstructed from their `sprintf` formats. Replace them with a real capture
+ * once one exists; the line *shapes* are what these tests pin.
+ *
+ * The SD card's `CID:` line in S3R_MAIN_REPORT is real: an Integral 8 GB card
+ * read on a Shimmer3R on 2 Nov 2026 (DEV-1398). HARDWARE-VERIFY: its
+ * `Manufacturer:` and `Model:` lines are what that firmware's card table prints
+ * for that card, worked out from the code, and not yet captured.
  */
 
 /** Join fixture lines with CRLF, as the firmware emits them. */
@@ -95,7 +99,9 @@ export const S3R_MAIN_REPORT = crlf([
   ' - Determined charging status = Charging',
   '',
   'SD Card:',
-  ' - Manufacturer: SanDisk, Manufacture Date=2023-05',
+  ' - Manufacturer: Integral, Manufacture Date=2026-04',
+  ' - Model: matches Integral UltimaPro 8GB INMSDH8G10-90U1',
+  ' - CID: MID=0x27, OID=PH, PNM=SD08G, PRV=6.0, PSN=0x7208D4BB, Size=7.28GB',
   ' - S3R_TEST_0013 - PASS: MCU read/write test',
   '',
   'BT Module:',
