@@ -941,6 +941,11 @@ export {
   decodeSdSession,
   parseSdSessionName,
   parseSdTrialFolderName,
+  SD_DATA_ROOT,
+  SD_COMPANION_KINDS,
+  sdCompanionKindOf,
+  sdCompanionPathFor,
+  sdDataPathForCompanion,
   isNewImuSensors,
 } from './devices/sdlog/index.js';
 export type {
@@ -957,6 +962,7 @@ export type {
   SdLogChannelSpec,
   SdLogDecodeOptions,
   SdLogDecodeResult,
+  SdCompanionKind,
 } from './devices/sdlog/index.js';
 
 // Event channel (DEV-971): configuration byte 232, and the button/TTL records
