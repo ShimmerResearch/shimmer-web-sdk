@@ -14,10 +14,9 @@
  * reconstructed from their `sprintf` formats. Replace them with a real capture
  * once one exists; the line *shapes* are what these tests pin.
  *
- * The SD card's `CID:` line in S3R_MAIN_REPORT is real: an Integral 8 GB card
- * read on a Shimmer3R on 2 Nov 2026 (DEV-1398). HARDWARE-VERIFY: its
- * `Manufacturer:` and `Model:` lines are what that firmware's card table prints
- * for that card, worked out from the code, and not yet captured.
+ * The SD card block of S3R_MAIN_REPORT (Manufacturer, Model and CID) is a real
+ * capture: an Integral 16 GB card read on a Shimmer3R running
+ * shimmer3r-firmware #320 on 2 Nov 2026 (DEV-1398).
  */
 
 /** Join fixture lines with CRLF, as the firmware emits them. */
@@ -99,9 +98,9 @@ export const S3R_MAIN_REPORT = crlf([
   ' - Determined charging status = Charging',
   '',
   'SD Card:',
-  ' - Manufacturer: Integral, Manufacture Date=2026-04',
-  ' - Model: matches Integral UltimaPro 8GB INMSDH8G10-90U1',
-  ' - CID: MID=0x27, OID=PH, PNM=SD08G, PRV=6.0, PSN=0x7208D4BB, Size=7.28GB',
+  ' - Manufacturer: Integral, Manufacture Date=2025-09',
+  ' - Model: matches Integral UltimaPro 16GB INMSDH16G10-90U1',
+  ' - CID: MID=0x6F, OID=0x0303, PNM=SDABC, PRV=1.0, PSN=0xAA001102, Size=14.56GB',
   ' - S3R_TEST_0013 - PASS: MCU read/write test',
   '',
   'BT Module:',

@@ -14,7 +14,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   - **`sd_mid`, `sd_oid`, `sd_pnm`, `sd_prv`, `sd_psn` and `sd_size_gb`,** from `- CID: ...`. `sd_oid` and `sd_pnm` are kept as printed: text, or `0x` and hex when a byte is unprintable.
   - **`sd_cid_available`,** false when the card failed to initialise.
   - **Older reports:** v1.01.025 and earlier ran the size into the name (`SanDisk7.45GB`). These now give `sd_manufacturer` `SanDisk` and `sd_size_gb` 7.45.
-  - **Fixture:** its CID line is a real capture. Its Manufacturer and Model lines aren't yet, so they carry a `HARDWARE-VERIFY:` marker.
+  - **Fixture:** the MAIN report's SD block is a real capture from a Shimmer3R running #320, with an Integral 16 GB card. That card's CID has a hex OID.
 
 - **Gyro on-the-fly offset calibration** (DEV-1287). When derived-sensor bit 29 (`GYRO_ON_THE_FLY_CAL`) is set, the Java driver re-estimates the gyro offset while the sensor lies still (`GyroOnTheFlyCalModule`), and so does Consensys. The SDK had no such step, so its calibrated gyro agreed with Consensys only for the first second of a recording and then drifted from it: by up to 0.25 deg/s on a Shimmer3R, and by up to 17.6 deg/s on a Shimmer3 whose stored offset is far from its real one.
   - **How it works:** a window of round(fs) samples, sized with Java's `Math.round`. When every calibrated axis in a full window has a standard deviation under 1.2 deg/s, the mean of the raw window becomes the gyro offset, from the next sample on. The arithmetic is Commons Math 2.2's mean and bias-corrected standard deviation, so the result is bit-exact with Java. It is checked against the Java driver's own output on two Bluetooth recordings, and against what Consensys stored for an SD file.

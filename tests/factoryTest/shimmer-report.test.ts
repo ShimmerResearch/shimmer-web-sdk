@@ -101,7 +101,7 @@ describe('parseShimmerFactoryTestReport - Shimmer3R MAIN report', () => {
     );
     expect(parsed.metrics.charging_status).toBe('Charging');
     expect(parsed.metrics.sd_manufacturer).toBe('Integral');
-    expect(parsed.metrics.sd_manufacture_date).toBe('2026-04');
+    expect(parsed.metrics.sd_manufacture_date).toBe('2025-09');
     expect(parsed.metrics.bt_module_version).toContain('RN4678');
     expect(parsed.metrics.bmp390_fail_reason).toBe('Chip not detected');
   });
@@ -166,17 +166,17 @@ describe('parseShimmerFactoryTestReport - SD card identity (DEV-1398)', () => {
       ),
     );
 
-  it('reads the model and every CID field', () => {
+  it('reads the model and every CID field, a hex OID included', () => {
     const { metrics, unparsedLines } = parseShimmerFactoryTestReport(S3R_MAIN_REPORT);
     expect(metrics.sd_model_recognised).toBe(true);
-    expect(metrics.sd_model).toBe('Integral UltimaPro 8GB INMSDH8G10-90U1');
+    expect(metrics.sd_model).toBe('Integral UltimaPro 16GB INMSDH16G10-90U1');
     expect(metrics.sd_cid_available).toBe(true);
-    expect(metrics.sd_mid).toBe(0x27);
-    expect(metrics.sd_oid).toBe('PH');
-    expect(metrics.sd_pnm).toBe('SD08G');
-    expect(metrics.sd_prv).toBe('6.0');
-    expect(metrics.sd_psn).toBe(0x7208d4bb);
-    expect(metrics.sd_size_gb).toBe(7.28);
+    expect(metrics.sd_mid).toBe(0x6f);
+    expect(metrics.sd_oid).toBe('0x0303');
+    expect(metrics.sd_pnm).toBe('SDABC');
+    expect(metrics.sd_prv).toBe('1.0');
+    expect(metrics.sd_psn).toBe(0xaa001102);
+    expect(metrics.sd_size_gb).toBe(14.56);
     expect(unparsedLines).toEqual([]);
   });
 
