@@ -54,6 +54,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`setRebootOnDisconnect` no longer reports a reboot armed on firmware that cannot arm one** (Shimmer3 and Shimmer3R).
+  - **What was wrong:** it sent SET_FEATURE to any firmware. Firmware older than SET_FEATURE (LogAndStream v1.00.017 on a Shimmer3, v1.00.052 on a Shimmer3R) drops the 0xB7 byte and runs each byte after it as a command. The value byte 1 is INQUIRY_COMMAND, which it ACKs, so the call resolved as if the reboot were armed.
+  - **Now:** both clients check the firmware version first, with the new `shimmer3SupportsSetFeature`, and throw without sending anything below it. The event-channel calls use the same check.
 - **`runHardwareTestReport`'s `timeoutMs` is now an inactivity timeout** (Verisense).
   - **What was wrong:** it capped the whole report, counted from the start. A long report was given up part-way while the device was still sending, and the SDK then told the device to stop.
   - **Where it bit:** a NAND diagnostic build prints progress dots through three stress passes. It was cut off at 120 s, in the middle of its last pass.

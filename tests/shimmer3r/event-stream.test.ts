@@ -196,9 +196,16 @@ describe('setEventStream / supportsEventChannel', () => {
       const s = await device(link, CRC_MODE.OFF, { fw: FW_BEFORE_SET_FEATURE });
       await expect(s.client.supportsEventChannel()).resolves.toBe(false);
       await expect(s.client.setEventStream(true)).resolves.toBe(false);
+      await expect(s.client.setRebootOnDisconnect(true)).rejects.toThrow(/SET_FEATURE/);
       expect(s.dev.written).not.toContain(OPCODES.SET_FEATURE);
     });
   }
+
+  it('arms reboot-on-disconnect on firmware with SET_FEATURE', async () => {
+    const s = await device(LINKS[0], CRC_MODE.OFF);
+    await expect(s.client.setRebootOnDisconnect(true)).resolves.toBeUndefined();
+    expect(s.dev.written).toContain(OPCODES.SET_FEATURE);
+  });
 });
 
 describe('getEventChannelStatus', () => {

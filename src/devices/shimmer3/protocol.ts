@@ -496,6 +496,27 @@ export function shimmer3SupportsBatteryRequest(
   );
 }
 
+/**
+ * Whether this firmware has SET_FEATURE (0xB7) and NACKs a feature it does not
+ * know: LogAndStream 1.0.52 on a Shimmer3R and 1.0.17 on a Shimmer3, where it
+ * came with log-and-stream-common (the Java driver's
+ * `ShimmerVerObject.isSupportedSetFeature`).
+ *
+ * Older firmware must not be sent it. It drops the 0xB7 byte unanswered and
+ * runs each byte after it as a command - feature 3 is GET_SAMPLING_RATE_COMMAND,
+ * and a value of 1 is INQUIRY_COMMAND - which it ACKs, so the request would
+ * read as accepted.
+ */
+export function shimmer3SupportsSetFeature(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 0, 52) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 1, 0, 17)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------

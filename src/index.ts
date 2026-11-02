@@ -404,6 +404,9 @@ export {
   // Shimmer3Client.getStatus and getBattery apply.
   shimmer3SupportsStatusRequest,
   shimmer3SupportsBatteryRequest,
+  // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
+  // commands. Both clients apply it.
+  shimmer3SupportsSetFeature,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,

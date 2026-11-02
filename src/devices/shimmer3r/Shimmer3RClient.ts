@@ -89,6 +89,7 @@ import {
 } from './factoryTest.js';
 import {
   parseShimmer3DeviceVersionResponse,
+  shimmer3SupportsSetFeature,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
@@ -2253,11 +2254,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * active SD recording, and clears the request either way - it is strictly
    * one-shot and never carries into a later disconnect.
    *
-   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
-   * firmware NACKs the unknown feature id.
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; firmware
+   * with SET_FEATURE but not this feature NACKs it. Firmware older than
+   * SET_FEATURE itself (`shimmer3SupportsSetFeature`) is not sent it, and
+   * this throws: there the bytes would run as commands and be ACKed.
    */
   async setRebootOnDisconnect(enabled: boolean): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!(await this._hasSetFeature())) {
+      throw new Error(
+        'Reboot-on-disconnect needs SET_FEATURE (LogAndStream_Shimmer3R v1.00.052 or later)',
+      );
+    }
     this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
     await this._writeExpectingAck(
       new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
@@ -2322,15 +2330,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Whether the firmware has SET_FEATURE (0xB7) and NACKs a feature it does
    * not know: LogAndStream_Shimmer3R v1.00.052 on, where it came with
-   * log-and-stream-common. Older firmware drops the 0xB7 byte unanswered and
-   * runs the two bytes after it as commands, and feature 3 is then
-   * GET_SAMPLING_RATE_COMMAND, which it ACKs: an event-stream request there
-   * would read as accepted.
+   * log-and-stream-common (`shimmer3SupportsSetFeature`). Older firmware drops
+   * the 0xB7 byte unanswered and runs the two bytes after it as commands, and
+   * ACKs them, so a SET_FEATURE there would read as accepted.
    */
   private async _hasSetFeature(): Promise<boolean> {
     try {
       const v = await this.readFwVersion();
-      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_000_052;
+      return shimmer3SupportsSetFeature(
+        { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch },
+        HW_ID.SHIMMER_3R,
+      );
     } catch {
       return false;
     }
