@@ -67,19 +67,23 @@ export const SD_DATA_ROOT = 'data';
  * `docs/SHIMMER3_EVENT_CHANNEL.md` §4.1):
  *
  *   data/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<NNN>
- *   <root>/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<NNN><extension>
+ *   <root>/<TrialName>_<ConfigTime>/<ShimmerName>-<NNN>/<NNN>[<extension>]
  *
- * A companion file splits when its data file does, and names the data file it
- * belongs with in its own header, not in its name. The event file is the
- * first kind.
+ * One kind can keep more than one file per data file under its root, told
+ * apart by extension. A companion file splits when its data file does, and
+ * names the data file it belongs with in its own header, not in its name. The
+ * event file is the first kind.
  */
 export interface SdCompanionKind {
   /** The root directory on the card, in lower case. */
   readonly root: string;
   /** What one file of this kind is called, for display: `event file`. */
   readonly label: string;
-  /** Appended to the data file's name, with its dot; `''` for none. */
-  readonly extension: string;
+  /**
+   * The extensions its files add to the data file's name, each with its dot.
+   * Empty for a kind whose one file has the data file's bare name.
+   */
+  readonly extensions: readonly string[];
 }
 
 /**
@@ -89,7 +93,7 @@ export interface SdCompanionKind {
  * (`sdFtDeletableRoots`).
  */
 export const SD_COMPANION_KINDS: readonly SdCompanionKind[] = Object.freeze([
-  Object.freeze({ root: 'events', label: 'event file', extension: '' }),
+  Object.freeze({ root: 'events', label: 'event file', extensions: Object.freeze([]) }),
 ]);
 
 /**
@@ -104,44 +108,62 @@ function restUnderRoot(path: string, root: string): string | null {
   return rest === '' || rest.startsWith('/') ? rest : null;
 }
 
+/** `kind`'s extension that `path` ends with, in any case, or null. */
+function extensionOf(path: string, kind: SdCompanionKind): string | null {
+  const lower = path.toLowerCase();
+  return kind.extensions.find((e) => lower.endsWith(e.toLowerCase())) ?? null;
+}
+
 /** The kind of companion file whose tree `path` is in, or null. */
-export function sdCompanionKindOf(path: string): SdCompanionKind | null {
-  return SD_COMPANION_KINDS.find((k) => restUnderRoot(path, k.root) !== null) ?? null;
+export function sdCompanionKindOf(
+  path: string,
+  kinds: readonly SdCompanionKind[] = SD_COMPANION_KINDS,
+): SdCompanionKind | null {
+  return kinds.find((k) => restUnderRoot(path, k.root) !== null) ?? null;
 }
 
 /**
  * The path of `kind`'s companion to a data path: a folder's companion folder
- * (`data/T_1/S-000` → `events/T_1/S-000`, `data` → `events`), or with
- * `{ file: true }` a data file's companion file, the kind's extension added.
+ * (`data/T_1/S-000` → `events/T_1/S-000`, `data` → `events`), or a data file's
+ * companion file (`data/T_1/S-000/001` → `events/T_1/S-000/001`). For a kind
+ * with extensions, pass the one wanted for a file.
  *
- * @returns null when `dataPath` is not under `data/`
+ * @returns null when `dataPath` is not under `data/`, or `extension` is not
+ *   one of the kind's
  */
 export function sdCompanionPathFor(
   dataPath: string,
   kind: SdCompanionKind,
-  opts: { file?: boolean } = {},
+  extension = '',
 ): string | null {
   const rest = restUnderRoot(dataPath, SD_DATA_ROOT);
   if (rest === null) return null;
-  return kind.root + rest + (opts.file ? kind.extension : '');
+  if (!extension) return kind.root + rest;
+  // In any case, but written as the kind spells it.
+  const known = kind.extensions.find((e) => e.toLowerCase() === extension.toLowerCase());
+  return known ? kind.root + rest + known : null;
 }
 
 /**
  * The data path a companion path belongs with, the inverse of
  * {@link sdCompanionPathFor}: `events/T_1/S-000/001` → `data/T_1/S-000/001`,
- * the kind's extension dropped from a file name.
+ * any of the kind's extensions dropped from a file name.
  *
  * Pairing by path is only a first guess. A copied or renamed file is paired
  * by its header, whose data-file initial timestamp (`fileOpenTicks` in an
  * event file) matches the data file's own.
  *
+ * @param kinds the kinds to look among; the firmware's by default
  * @returns null when `path` is not under a companion root
  */
-export function sdDataPathForCompanion(path: string): string | null {
-  const kind = sdCompanionKindOf(path);
+export function sdDataPathForCompanion(
+  path: string,
+  kinds: readonly SdCompanionKind[] = SD_COMPANION_KINDS,
+): string | null {
+  const kind = sdCompanionKindOf(path, kinds);
   if (!kind) return null;
   let rest = restUnderRoot(path, kind.root) as string;
-  const ext = kind.extension.toLowerCase();
-  if (ext && rest.toLowerCase().endsWith(ext)) rest = rest.slice(0, -ext.length);
+  const ext = extensionOf(rest, kind);
+  if (ext) rest = rest.slice(0, -ext.length);
   return SD_DATA_ROOT + rest;
 }

@@ -68,29 +68,34 @@ describe('parseSdTrialFolderName', () => {
 
 describe('companion files', () => {
   const events = SD_COMPANION_KINDS.find((k) => k.root === 'events') as SdCompanionKind;
-  const withExt: SdCompanionKind = { root: 'other', label: 'other file', extension: '.EXT' };
+  // A kind with two files per data file under one root, told apart by extension.
+  const pair: SdCompanionKind = {
+    root: 'other',
+    label: 'other file',
+    extensions: ['.ONE', '.TWO'],
+  };
 
   it('lists the event file as the first kind, with no extension', () => {
-    expect(SD_COMPANION_KINDS[0]).toEqual({ root: 'events', label: 'event file', extension: '' });
+    expect(SD_COMPANION_KINDS[0]).toEqual({ root: 'events', label: 'event file', extensions: [] });
     expect(Object.isFrozen(SD_COMPANION_KINDS)).toBe(true);
+    expect(Object.isFrozen(SD_COMPANION_KINDS[0].extensions)).toBe(true);
   });
 
   it('maps a data folder or file to its companion, and the data root to the companion root', () => {
     expect(sdCompanionPathFor('data/Trial_5f2c1a90/Shimmer_8091-000', events)).toBe(
       'events/Trial_5f2c1a90/Shimmer_8091-000',
     );
-    expect(sdCompanionPathFor('data/T_1/S-000/001', events, { file: true })).toBe(
-      'events/T_1/S-000/001',
-    );
+    expect(sdCompanionPathFor('data/T_1/S-000/001', events)).toBe('events/T_1/S-000/001');
     expect(sdCompanionPathFor('data', events)).toBe('events');
     expect(sdCompanionPathFor('/DATA/T_1/S-000', events)).toBe('events/T_1/S-000');
   });
 
-  it('adds an extension only to a file', () => {
-    expect(sdCompanionPathFor('data/T_1/S-000/001', withExt, { file: true })).toBe(
-      'other/T_1/S-000/001.EXT',
-    );
-    expect(sdCompanionPathFor('data/T_1/S-000', withExt)).toBe('other/T_1/S-000');
+  it('adds an extension the kind has, spelt as the kind spells it, and refuses one it has not', () => {
+    expect(sdCompanionPathFor('data/T_1/S-000/001', pair, '.TWO')).toBe('other/T_1/S-000/001.TWO');
+    expect(sdCompanionPathFor('data/T_1/S-000/001', pair, '.one')).toBe('other/T_1/S-000/001.ONE');
+    expect(sdCompanionPathFor('data/T_1/S-000', pair)).toBe('other/T_1/S-000');
+    expect(sdCompanionPathFor('data/T_1/S-000/001', pair, '.CSV')).toBeNull();
+    expect(sdCompanionPathFor('data/T_1/S-000/001', events, '.ONE')).toBeNull();
   });
 
   it('refuses anything not under data/', () => {
@@ -107,5 +112,15 @@ describe('companion files', () => {
     expect(sdCompanionKindOf('data/T_1/S-000/001')).toBeNull();
     expect(sdCompanionKindOf('eventsx/T_1')).toBeNull();
     expect(sdDataPathForCompanion('data/T_1/S-000/001')).toBeNull();
+  });
+
+  it("drops any of a kind's extensions on the way back, and only those", () => {
+    const kinds = [events, pair];
+    expect(sdDataPathForCompanion('other/T_1/S-000/001.TWO', kinds)).toBe('data/T_1/S-000/001');
+    expect(sdDataPathForCompanion('other/T_1/S-000/001.one', kinds)).toBe('data/T_1/S-000/001');
+    expect(sdDataPathForCompanion('other/T_1/S-000', kinds)).toBe('data/T_1/S-000');
+    expect(sdDataPathForCompanion('other/T_1/S-000/001.CSV', kinds)).toBe('data/T_1/S-000/001.CSV');
+    expect(sdCompanionKindOf('other/T_1', kinds)).toBe(pair);
+    expect(sdCompanionKindOf('other/T_1')).toBeNull();
   });
 });
