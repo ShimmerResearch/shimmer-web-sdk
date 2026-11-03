@@ -548,7 +548,14 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _desiredCrcMode: CrcMode = CRC_MODE.OFF;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
-  /** Re-framing accumulator, used only when {@link _unframed}. */
+  /**
+   * True once this link has asked for event record frames
+   * ({@link setEventStream}), and from then on until the link ends: a frame
+   * queued before an opt-out still arrives after it. While set, inbound bytes
+   * are re-framed even over BLE with no CRC ({@link _reframing}).
+   */
+  private _eventFramesPossible = false;
+  /** Re-framing accumulator, used only while {@link _reframing}. */
   private _ctrlBuf: Uint8Array = new Uint8Array(0);
   /**
    * How many bytes a STATUS_RESPONSE payload carries: 2 on a Shimmer3R running
@@ -1046,6 +1053,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _resetLinkProtocolState(): void {
     this._rxBuf = new Uint8Array(0);
     this._ctrlBuf = new Uint8Array(0);
+    // The firmware clears the opt-in on every connect and disconnect
+    this._eventFramesPossible = false;
     this._streaming = false;
     this._streamAligned = false;
     this._streamAlignRejects = 0;
@@ -1162,9 +1171,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * would fail every long response. The framer already sizes each message from
    * its opcode and length, and already accumulates across reads, so a CRC just
    * turns on a path that splits correctly.
+   *
+   * **And true once the link has opted in to event records.** A record frame is
+   * 21 bytes sent whenever an input changes, with no regard for the replies
+   * around it, so a notification can cut one in two or carry it behind a reply
+   * or in front of an ACK. Read a notification at a time, the first loses the
+   * record and the others the reply or the ACK a command is waiting for.
    */
   private get _reframing(): boolean {
-    return this._unframed || this._crcMode !== CRC_MODE.OFF;
+    return this._unframed || this._crcMode !== CRC_MODE.OFF || this._eventFramesPossible;
   }
 
   private _handleNotify = (chunk: Uint8Array): void => {
@@ -2296,6 +2311,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return false;
     }
     this._emitStatus(`SET_FEATURE event-stream=${enabled ? 1 : 0} → waiting for ACK…`);
+    /* Before the write, not after the ACK: the firmware sends the inputs' state
+     * straight after its ACK, often in the same notification. */
+    if (enabled) this._eventFramesPossible = true;
     try {
       await this._writeExpectingAck(
         new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.EVENT_STREAM, enabled ? 1 : 0]),

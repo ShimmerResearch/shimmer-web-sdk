@@ -249,18 +249,104 @@ describe('event frames while idle', () => {
     expect(s.records).toHaveLength(0);
   });
 
-  it('is not taken for the opt-in reply when it follows the ACK in one read (classic SPP)', async () => {
-    const s = await device(LINKS[1], CRC_MODE.OFF);
-    await s.client.readFwVersion(); // the opt-in checks it, and the script below cannot answer
-    // The firmware answers the opt-in, then sends the initial state at once.
-    s.t.setOnWrite((bytes, tr) => {
-      if (bytes[0] === OPCODES.SET_FEATURE) {
-        setTimeout(() => tr.notify(concat([new Uint8Array([ACK]), eventFrame(0, 9000, false)])), 0);
-      }
+  for (const link of LINKS) {
+    it(`is not taken for the opt-in reply when it follows the ACK in one read (${link.name})`, async () => {
+      const s = await device(link, CRC_MODE.OFF);
+      await s.client.readFwVersion(); // the opt-in checks it, and the script below cannot answer
+      // The firmware answers the opt-in, then sends the initial state at once.
+      s.t.setOnWrite((bytes, tr) => {
+        if (bytes[0] === OPCODES.SET_FEATURE) {
+          setTimeout(
+            () => tr.notify(concat([new Uint8Array([ACK]), eventFrame(0, 9000, false)])),
+            0,
+          );
+        }
+      });
+      await expect(s.client.setEventStream(true)).resolves.toBe(true);
+      await tick();
+      expect(s.records.map((r) => r.ticks)).toEqual([9000n]);
     });
-    await expect(s.client.setEventStream(true)).resolves.toBe(true);
+  }
+});
+
+/**
+ * Over BLE with no link CRC a notification was read as one message. The module
+ * packs bytes into notifications as they come, so a frame can be cut in two, or
+ * share a notification with the reply in front of it or the ACK behind it.
+ */
+describe('event frames over BLE with no CRC, once opted in', () => {
+  const STATUS_REPLY = [
+    ACK,
+    OPCODES.EVENT_CHANNEL_STATUS_RESPONSE,
+    0x03,
+    0x09,
+    0x01,
+    4,
+    0,
+    0,
+    0,
+    2,
+    0,
+  ];
+
+  /** Opted in, with the status command answered by `answer` instead. */
+  async function optedIn(answer?: (notify: (b: Uint8Array) => void) => void) {
+    const s = await device(LINKS[0], CRC_MODE.OFF);
+    await s.client.setEventStream(true);
+    if (answer) {
+      s.t.setOnWrite((bytes, tr) => {
+        if (bytes[0] === OPCODES.GET_EVENT_CHANNEL_STATUS_COMMAND) {
+          setTimeout(() => answer((b) => tr.notify(b)), 0);
+        }
+      });
+    }
+    return s;
+  }
+
+  it('puts back together a frame cut in two, wherever the cut', async () => {
+    const s = await optedIn();
+    const frame = eventFrame(3, 4000, true);
+    for (let cut = 1; cut < frame.length; cut++) {
+      s.t.notify(frame.slice(0, cut));
+      s.t.notify(frame.slice(cut));
+    }
     await tick();
-    expect(s.records.map((r) => r.ticks)).toEqual([9000n]);
+    expect(s.records).toHaveLength(frame.length - 1);
+    expect(s.records.every((r) => r.seq === 3 && r.ticks === 4000n)).toBe(true);
+  });
+
+  it('leaves the reply behind a frame to the command waiting for it', async () => {
+    const s = await optedIn((notify) =>
+      notify(concat([eventFrame(5, 5000, true), new Uint8Array(STATUS_REPLY)])),
+    );
+    await expect(s.client.getEventChannelStatus()).resolves.toMatchObject({ nextSeq: 4 });
+    expect(s.records.map((r) => r.seq)).toEqual([5]);
+  });
+
+  it('delivers a frame behind a reply, and one split across the two', async () => {
+    const frame = eventFrame(6, 6000, false);
+    const s = await optedIn((notify) => {
+      notify(concat([new Uint8Array(STATUS_REPLY), frame.slice(0, 8)]));
+      notify(frame.slice(8));
+    });
+    await expect(s.client.getEventChannelStatus()).resolves.toMatchObject({ nextSeq: 4 });
+    await tick();
+    expect(s.records.map((r) => r.seq)).toEqual([6]);
+  });
+
+  it('keeps every packet of a stream that was running before the opt-in', async () => {
+    const s = await device(LINKS[0], CRC_MODE.OFF);
+    await s.client.readFwVersion(); // the opt-in checks it, and mid-stream would wait for it
+    await s.client.startStreaming();
+    s.pump(3);
+    const optIn = s.client.setEventStream(true);
+    await tick(); // the command goes out
+    s.pump(1); // and its ACK in front of the next packet
+    await expect(optIn).resolves.toBe(true);
+    s.pump(3, [eventFrame(1, 100, true), eventFrame(2, 200, false)], 5);
+    s.pump(2);
+    expect(s.records.map((r) => r.seq)).toEqual([1, 2, 1, 2]);
+    expect(s.frames).toEqual(s.sent.slice(0, s.sent.length - 1));
   });
 });
 
