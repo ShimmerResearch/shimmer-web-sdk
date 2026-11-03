@@ -197,7 +197,9 @@ export function nearestUserButtonEnable(raw: number, userButtonEnable: boolean):
 
 /**
  * Whether single touch can work: it needs a press that can start logging.
- * The firmware clears `singleTouchStart` when this is false.
+ * Firmware built with single touch clears `singleTouchStart` when this is
+ * false. No LogAndStream release is built with it, and those clear it
+ * whatever the byte ({@link EventChannelBoardSupport.singleTouchSupported}).
  */
 export function allowsSingleTouch(raw: number): boolean {
   const mode = buttonModeOf(raw);
@@ -284,15 +286,22 @@ export interface ButtonLogModeBehaviour extends ButtonLogModeSettings {
  * Everything a byte means for a device, given its `userButtonEnable` (byte 217
  * bit 5) and `singleTouchStart` (byte 218 bit 7), which decide the legacy
  * behaviour and gate the undock start.
+ *
+ * `singleTouchStart` counts only where `singleTouchSupported` says the firmware
+ * is built with single touch, which no LogAndStream release is
+ * ({@link EventChannelBoardSupport.singleTouchSupported}); everywhere else the
+ * firmware clears it.
  */
 export function describeButtonLogMode(
   raw: number,
   userButtonEnable: boolean,
   singleTouchStart = false,
+  singleTouchSupported = false,
 ): ButtonLogModeBehaviour {
-  const ube = nearestUserButtonEnable(raw, userButtonEnable);
-  // The firmware clears single touch where no press can start logging.
-  const singleTouch = singleTouchStart && allowsSingleTouch(raw);
+  // The firmware keeps single touch only where a press can start logging, and
+  // turns the button on for it.
+  const singleTouch = singleTouchSupported && singleTouchStart && allowsSingleTouch(raw);
+  const ube = nearestUserButtonEnable(raw, userButtonEnable || singleTouch);
   return {
     ...decodeButtonLogMode(raw),
     raw: raw & 0xff,
@@ -311,12 +320,19 @@ export function describeButtonLogMode(
 // The firmware's checks, on a whole InfoMem image
 // ---------------------------------------------------------------------------
 
-/** What a board can record, which the firmware's checks take into account. */
+/** What a board and its firmware support, which the firmware's checks take into account. */
 export interface EventChannelBoardSupport {
   /** Whether the button's edges reach the firmware. Not on SR48-6-0, whose button is used for dock detection. */
   recordsButtonEdges: boolean;
   /** Whether the board has the TTL input. Not on SR48-6-0. */
   ttlInputSupported: boolean;
+  /**
+   * Whether the firmware is built with single touch (`IS_SUPPORTED_SINGLE_TOUCH`,
+   * log-and-stream-common `log_and_stream_definitions.h`). No LogAndStream
+   * release is, so left out it is false, and the firmware clears single touch
+   * (byte 218 bit 7) on every configuration it takes.
+   */
+  singleTouchSupported?: boolean;
 }
 
 /** `EXP_BRD_GSR_UNIFIED`, the SR48 board. */
@@ -350,7 +366,11 @@ export function eventChannelBoardSupport(
  *
  * - byte 232 corrected, with press recording and the TTL input taken out where
  *   the board has neither;
- * - single touch (byte 218 bit 7) cleared when no press can start logging;
+ * - single touch (byte 218 bit 7) cleared, as every LogAndStream release does.
+ *   Where `board.singleTouchSupported` says the firmware is built with it, it
+ *   is cleared only when no press can start logging, and kept it turns on
+ *   Start Logging On Button Press and Sync When Logging (byte 217 bits 5 and
+ *   2), which it needs;
  * - Start Logging On Button Press (`userButtonEnable`, byte 217 bit 5) held at
  *   the button mode's nearest equivalent.
  *
@@ -370,7 +390,7 @@ export function applyButtonLogModeRules(
   const set = (idx: number, value: number): void => {
     if (image[idx] !== value) {
       image[idx] = value;
-      changed.push(idx);
+      if (!changed.includes(idx)) changed.push(idx);
     }
   };
 
@@ -379,14 +399,18 @@ export function applyButtonLogModeRules(
   if (!board.ttlInputSupported) byte &= ~BUTTON_LOG_MODE.TTL_INPUT & 0xff;
   set(at, byte);
 
+  const cfg0 = layout.idxSDExperimentConfig0;
   const cfg1 = layout.idxSDExperimentConfig1;
+  const ubeBit = 1 << BIT_SHIFT.BUTTON_START;
   const singleTouchBit = 1 << BIT_SHIFT.SINGLE_TOUCH;
-  if (image[cfg1] & singleTouchBit && !allowsSingleTouch(byte)) {
-    set(cfg1, image[cfg1] & ~singleTouchBit & 0xff);
+  if (image[cfg1] & singleTouchBit) {
+    if (!board.singleTouchSupported || !allowsSingleTouch(byte)) {
+      set(cfg1, image[cfg1] & ~singleTouchBit & 0xff);
+    } else {
+      set(cfg0, image[cfg0] | ubeBit | (1 << BIT_SHIFT.SYNC_WHEN_LOGGING));
+    }
   }
 
-  const cfg0 = layout.idxSDExperimentConfig0;
-  const ubeBit = 1 << BIT_SHIFT.BUTTON_START;
   const ube = nearestUserButtonEnable(byte, (image[cfg0] & ubeBit) !== 0);
   set(cfg0, ube ? image[cfg0] | ubeBit : image[cfg0] & ~ubeBit & 0xff);
   return changed;

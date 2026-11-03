@@ -166,7 +166,24 @@ describe('describeButtonLogMode', () => {
 
   it('works out an undock start where single touch cannot apply', () => {
     // Single touch is cleared by the firmware for mode 1, so it no longer blocks.
-    expect(describeButtonLogMode(0x09, true, true).undockStartsLogging).toBe(true);
+    expect(describeButtonLogMode(0x09, true, true, true).undockStartsLogging).toBe(true);
+  });
+
+  it('ignores single touch, which no released firmware keeps', () => {
+    // Legacy with the button off: leaving the dock starts logging, single touch or not
+    expect(describeButtonLogMode(0, false, true)).toMatchObject({
+      pressTogglesLogging: false,
+      undockStartsLogging: true,
+      userButtonEnable: false,
+    });
+  });
+
+  it('turns the button on for single touch where the firmware is built with it', () => {
+    expect(describeButtonLogMode(0, false, true, true)).toMatchObject({
+      pressTogglesLogging: true,
+      undockStartsLogging: false,
+      userButtonEnable: true,
+    });
   });
 });
 
@@ -282,13 +299,31 @@ describe('applyButtonLogModeRules', () => {
     expect(on[217] & UBE).toBe(UBE);
   });
 
-  it('clears single touch where no press can start logging', () => {
-    const im = image(0x01, UBE, SINGLE_TOUCH | 0x01);
-    applyButtonLogModeRules(im, layout);
+  it('clears single touch, which no released firmware keeps', () => {
+    const im = image(0x03, UBE, SINGLE_TOUCH | 0x01);
+    expect(applyButtonLogModeRules(im, layout)).toEqual([218]);
     expect(im[218]).toBe(0x01);
-    const kept = image(0x03, UBE, SINGLE_TOUCH);
-    applyButtonLogModeRules(kept, layout);
-    expect(kept[218]).toBe(SINGLE_TOUCH);
+  });
+
+  describe('on firmware built with single touch', () => {
+    const SYNC = 0x04; // byte 217 bit 2
+    const board = { recordsButtonEdges: true, ttlInputSupported: true, singleTouchSupported: true };
+
+    it('clears it where no press can start logging', () => {
+      const im = image(0x01, UBE, SINGLE_TOUCH | 0x01);
+      applyButtonLogModeRules(im, layout, board);
+      expect(im[218]).toBe(0x01);
+    });
+
+    it('keeps it elsewhere, and turns on the button and sync it needs', () => {
+      const kept = image(0x03, UBE | SYNC, SINGLE_TOUCH);
+      expect(applyButtonLogModeRules(kept, layout, board)).toEqual([]);
+      expect(kept[218]).toBe(SINGLE_TOUCH);
+      const legacy = image(0, 0, SINGLE_TOUCH);
+      expect(applyButtonLogModeRules(legacy, layout, board)).toEqual([217]);
+      expect(legacy[217]).toBe(UBE | SYNC);
+      expect(legacy[218]).toBe(SINGLE_TOUCH);
+    });
   });
 
   it('takes out press recording and the TTL input on SR48-6-0', () => {
