@@ -158,6 +158,17 @@ export interface SdLogHeader {
    */
   pressureSensorInferred: boolean;
   /**
+   * Header byte 225 (`SDH_BUTTON_LOG_MODE`, DEV-971): configuration byte 232
+   * as the firmware acted on it for this file - button mode, log triggers and
+   * TTL input - raw. Firmware before the field leaves 0xFF, which
+   * `decodeButtonLogMode` reads as "as before" by the byte's own rule. Null
+   * for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  buttonLogMode: number | null;
+  /**
    * Human-readable notes on anything the decoder had to work around or could
    * not confirm in this header. Empty when there is nothing to report.
    */
