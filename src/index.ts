@@ -407,6 +407,9 @@ export {
   // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
   // commands. Both clients apply it.
   shimmer3SupportsSetFeature,
+  // Whether a Shimmer3R's firmware might record audio, so is worth asking
+  // (Shimmer3RClient.supportsAudio applies it).
+  shimmer3RMayRecordAudio,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
@@ -1024,6 +1027,53 @@ export type {
   EventFile,
   EventChannelStatus,
 } from './devices/events/index.js';
+
+// Shimmer3R audio recording (DEV-99): configuration byte 233, the recorder's
+// status, and the .WAV and .AFP files under audio/.
+export {
+  AUDIO_MODE_BYTE,
+  AUDIO_MODE,
+  AUDIO_GAIN_PRESET,
+  AUDIO_MODE_OPTIONS,
+  correctAudioMode,
+  audioModeOf,
+  audioGainPresetOf,
+  recordsAudioFingerprint,
+  recordsRawAudio,
+  audioModeRecordsSpeech,
+  encodeAudioMode,
+  describeAudioMode,
+  applyAudioModeRules,
+  AUDIO_OPCODES,
+  AUDIO_STATUS_LENGTH,
+  AUDIO_STATUS_VERSION,
+  AUDIO_STATUS_BITS,
+  AUDIO_STATE,
+  AUDIO_FAULT,
+  describeAudioState,
+  describeAudioFault,
+  isAudioFaultFatal,
+  parseAudioStatus,
+  AUDIO_FILE,
+  AUDIO_FINGERPRINT_FILE,
+  AUDIO_FILE_OPEN_REASON,
+  AudioFileFormatError,
+  parseAudioWavHeader,
+  audioSampleTicks,
+  parseAudioFingerprintHeader,
+  parseAudioFingerprintRecord,
+  parseAudioFingerprintFile,
+  audioFingerprintRecordTicks,
+} from './devices/audio/index.js';
+export type {
+  AudioStatus,
+  AudioFileIdentity,
+  AudioWavHeader,
+  AudioFingerprintHeader,
+  AudioFingerprintRecord,
+  AudioFingerprintChunk,
+  AudioFingerprintFile,
+} from './devices/audio/index.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';

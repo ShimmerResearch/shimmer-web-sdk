@@ -72,7 +72,9 @@ export const SD_DATA_ROOT = 'data';
  * One kind can keep more than one file per data file under its root, told
  * apart by extension. A companion file splits when its data file does, and
  * names the data file it belongs with in its own header, not in its name. The
- * event file is the first kind.
+ * event file is the first kind (DEV-971), and the Shimmer3R's audio files the
+ * second (DEV-99): `audio/…/<NNN>.WAV`, the raw audio, and `audio/…/<NNN>.AFP`,
+ * its fingerprint (log-and-stream-common `docs/SHIMMER3R_AUDIO.md` §2).
  */
 export interface SdCompanionKind {
   /** The root directory on the card, in lower case. */
@@ -94,6 +96,11 @@ export interface SdCompanionKind {
  */
 export const SD_COMPANION_KINDS: readonly SdCompanionKind[] = Object.freeze([
   Object.freeze({ root: 'events', label: 'event file', extensions: Object.freeze([]) }),
+  Object.freeze({
+    root: 'audio',
+    label: 'audio file',
+    extensions: Object.freeze(['.WAV', '.AFP']),
+  }),
 ]);
 
 /**

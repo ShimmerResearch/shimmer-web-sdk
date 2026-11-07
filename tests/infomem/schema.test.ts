@@ -45,6 +45,7 @@ import {
   BUTTON_MODE_OPTIONS,
   LOG_TRIGGER_OPTIONS,
 } from '../../src/devices/events/buttonLogMode.js';
+import { AUDIO_MODE_OPTIONS } from '../../src/devices/audio/mode.js';
 
 const field = (key: string): InfoMemFieldDefinition => {
   const f = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((d) => d.key === key);
@@ -66,9 +67,9 @@ describe('SHIMMER3_INFOMEM_FIELD_SCHEMA — structural invariants', () => {
   });
 
   it('every field resolves to a real byte index in both contexts', () => {
-    // With the event channel, so byte 232 is in the layout too.
+    // With the event channel and audio, so bytes 232 and 233 are in the layout too.
     for (const base of [CTX.modernShimmer3, CTX.shimmer3R]) {
-      const layout = resolveInfoMemLayout({ ...base, eventChannel: true });
+      const layout = resolveInfoMemLayout({ ...base, eventChannel: true, audio: true });
       for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
         const idx = resolveFieldIndex(f, layout);
         expect(Number.isInteger(idx), f.key).toBe(true);
@@ -175,11 +176,13 @@ describe('option tables come from devices/shimmer3/sensorOptions.ts', () => {
   }
 
   it('every option-bearing field is either a shared table or the local ON_OFF pair', () => {
-    // Byte 232's two tables are the event channel module's own, not Java's.
+    // Byte 232's two tables are the event channel module's own, not Java's,
+    // and byte 233's is the audio module's.
     const shared = new Set<unknown>([
       ...EXPECTED.map(([, table]) => table),
       BUTTON_MODE_OPTIONS,
       LOG_TRIGGER_OPTIONS,
+      AUDIO_MODE_OPTIONS,
     ]);
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       if (!f.options) continue;

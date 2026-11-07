@@ -84,6 +84,22 @@ export interface Shimmer3DeviceStatus {
    * "unplugged" stay distinguishable. See {@link statusPayloadBytesFor}.
    */
   usbPluggedIn: boolean | null;
+  /**
+   * Audio is being captured for the current log: status byte 1 bit 1, Shimmer3R
+   * firmware with DEV-99 audio recording (log-and-stream-common
+   * `docs/SHIMMER3R_AUDIO.md` §5). `null` where the second byte is absent.
+   *
+   * Firmware before DEV-99 sends 0 in this bit, so a `false` is the device's
+   * word only where `Shimmer3RClient.supportsAudio` said yes.
+   */
+  audioRecording: boolean | null;
+  /**
+   * This session's audio failed or was degraded: status byte 1 bit 2, the same
+   * firmware. It stays set after logging stops, until the next session starts;
+   * `Shimmer3RClient.getAudioStatus` says which fault. `null` where the second
+   * byte is absent, and gated as {@link audioRecording} is.
+   */
+  audioFault: boolean | null;
   /** The status bytes as received, for logging. */
   raw: Uint8Array;
 }
@@ -101,12 +117,16 @@ export interface Shimmer3DeviceStatus {
  * toggleLedRedCmd, 6 sdBadFile, 5 sdInserted, 4 btStreaming, 3 sdLogging,
  * 2 RTC set, 1 sensing, 0 docked.
  *
- * The second byte (usbPluggedIn) exists only under `#if defined(SHIMMER3R)`, so
+ * The second byte exists only under `#if defined(SHIMMER3R)`, so
  * `STATUS_BYTE_COUNT` is 2 on a Shimmer3R and 1 on a Shimmer3
  * (`Comms/shimmer_bt_uart.h:259-263`), and only from LogAndStream_Shimmer3R
- * v1.00.024 — hence the nullable field rather than a plain boolean. Which
+ * v1.00.024 — hence the nullable fields rather than plain booleans. Which
  * width a given device sends is {@link statusPayloadBytesFor}'s question; this
- * decodes whatever it is handed.
+ * decodes whatever it is handed. Its bit 0 is usbPluggedIn, and from DEV-99
+ * bits 1 and 2 are audio recording and audio fault
+ * (`shimmerStatus.usbPluggedIn | ShimAudio_statusBits()`). Bit 0 alone is
+ * USB: reading the whole byte as USB, as this did before DEV-99, reports a
+ * unit recording audio on battery as plugged in.
  */
 export function parseShimmer3StatusBytes(bytes: Uint8Array): Shimmer3DeviceStatus {
   if (bytes.length < 1) throw new Error('status payload too short (need at least 1 byte)');
@@ -120,7 +140,9 @@ export function parseShimmer3StatusBytes(bytes: Uint8Array): Shimmer3DeviceStatu
     sdPresent: (s0 & 0x20) !== 0,
     sdError: (s0 & 0x40) !== 0,
     redLedOn: (s0 & 0x80) !== 0,
-    usbPluggedIn: bytes.length >= 2 ? (bytes[1] & 0xff) !== 0 : null,
+    usbPluggedIn: bytes.length >= 2 ? (bytes[1] & 0x01) !== 0 : null,
+    audioRecording: bytes.length >= 2 ? (bytes[1] & 0x02) !== 0 : null,
+    audioFault: bytes.length >= 2 ? (bytes[1] & 0x04) !== 0 : null,
     raw: new Uint8Array(bytes),
   };
 }

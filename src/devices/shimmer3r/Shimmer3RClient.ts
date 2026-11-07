@@ -90,6 +90,7 @@ import {
 import {
   parseShimmer3DeviceVersionResponse,
   shimmer3SupportsSetFeature,
+  shimmer3RMayRecordAudio,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
@@ -115,6 +116,7 @@ import {
   type EventChannelStatus,
   type EventRecord,
 } from '../events/record.js';
+import { AUDIO_STATUS_LENGTH, parseAudioStatus, type AudioStatus } from '../audio/status.js';
 import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
@@ -340,6 +342,13 @@ function firmwareTag(major: number, minor: number, internal: number): string {
 }
 
 /** {@link Shimmer3RClient.setCrcMode}'s refusal while a stream is running. */
+/**
+ * How long {@link Shimmer3RClient.supportsAudio} waits for the audio status
+ * probe's ACK. Firmware with audio answers at once; firmware without it never
+ * does, so this is what the probe costs there, once per link.
+ */
+const AUDIO_PROBE_TIMEOUT_MS = 1000;
+
 const CRC_CHANGE_MID_STREAM =
   'Cannot change the CRC mode while streaming: it would move every frame boundary.';
 
@@ -569,6 +578,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * a status from the byte after it instead of assuming a width.
    */
   private _statusPayloadBytes: 1 | 2 | null = null;
+  /**
+   * What {@link supportsAudio} learnt on this link: `null` until it has asked.
+   * Cleared with the version caches at connect, since a reconnect may reach a
+   * different sensor.
+   */
+  private _audioSupport: boolean | null = null;
   /**
    * The version reads {@link getStatus} has in flight to learn
    * {@link _statusPayloadBytes}, shared so that status reads made together
@@ -893,6 +908,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._resetInquiredConfig();
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
+    this._audioSupport = null;
     this._statusPayloadBytes = null;
     this._statusWidthReads = null;
     /* `device` describes the far end exactly as the version caches do, so it
@@ -2394,6 +2410,99 @@ export class Shimmer3RClient extends BaseShimmerClient {
       throw new Error(`Malformed event channel status (${rsp.length} bytes).`);
     }
     return parseEventChannelStatus(rsp.subarray(1, 1 + EVENT_CHANNEL_STATUS_LENGTH));
+  }
+
+  /**
+   * Ask the device whether its firmware records audio (DEV-99): configuration
+   * byte 233, status byte 1's audio bits, and `GET_AUDIO_STATUS_COMMAND`.
+   * Pass the answer to the InfoMem context as `audio`, which is what brings
+   * byte 233 into the layout and the field schema.
+   *
+   * The version alone cannot say. No release has audio yet, and the builds
+   * that do report the release they were cut from, so:
+   *
+   * 1. Firmware older than that, or not LogAndStream, is ruled out by its
+   *    version ({@link shimmer3RMayRecordAudio}) and is sent nothing.
+   * 2. Otherwise this sends `GET_AUDIO_STATUS_COMMAND` (0xBC) and waits a
+   *    second (`AUDIO_PROBE_TIMEOUT_MS`): a status reply is yes, silence no.
+   *
+   * The probe is safe on firmware without audio, which SET_FEATURE was not:
+   * 0xBC was never a command before DEV-99, and it takes no arguments, so
+   * older firmware drops the one byte unanswered and there is nothing after
+   * it to run as a command. The cost is the timeout, once per link: the
+   * answer is cached until the next connect.
+   *
+   * Not while streaming ({@link getAudioStatus}); ask at connect.
+   *
+   * HARDWARE-VERIFY: from the firmware source. Neither answer has been seen
+   * from a unit: not the reply from a DEV-99 build, nor the silence from an
+   * older one.
+   */
+  async supportsAudio(): Promise<boolean> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._audioSupport !== null) return this._audioSupport;
+    const link = this._linkGeneration;
+    let answer = false;
+    if (await this._mayRecordAudio()) {
+      try {
+        await this.getAudioStatus(AUDIO_PROBE_TIMEOUT_MS);
+        answer = true;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '';
+        /* Silence is firmware without the command. Anything else - a link
+           reset, the link busy, a reply that would not parse - says nothing
+           about the firmware, so it is not remembered. */
+        if (msg !== 'ACK timeout' && msg !== 'NACK received') throw e;
+        this._emitStatus('Audio recording not supported by this firmware (0xBC unanswered)');
+      }
+    }
+    if (this._linkGeneration === link) this._audioSupport = answer;
+    return answer;
+  }
+
+  /** Whether the firmware's version leaves room for audio ({@link shimmer3RMayRecordAudio}). */
+  private async _mayRecordAudio(): Promise<boolean> {
+    try {
+      const v = await this.readFwVersion();
+      return shimmer3RMayRecordAudio(
+        { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch },
+        HW_ID.SHIMMER_3R,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Read the audio recorder's status (GET_AUDIO_STATUS_COMMAND 0xBC →
+   * `[ACK][0xBD][32 bytes]`, DEV-99): the mode configured, the recorder's
+   * state and first fault, and this session's counters.
+   *
+   * Firmware without audio does not answer, so this times out there; ask
+   * {@link supportsAudio} first. The firmware answers while streaming too, but
+   * this client's stream parser takes only bare ACKs between packets, so it
+   * refuses while streaming rather than lose the reply.
+   *
+   * HARDWARE-VERIFY: from the firmware source (`PlatAudio_buildStatus`) only.
+   *
+   * @param timeoutMs how long to wait for the ACK, and then the reply
+   */
+  async getAudioStatus(timeoutMs = 1500): Promise<AudioStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot read the audio status while streaming');
+    const link = this._linkGeneration;
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_AUDIO_STATUS_COMMAND]),
+      timeoutMs,
+    );
+    const rsp =
+      remainder && remainder[0] === OPCODES.AUDIO_STATUS_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.AUDIO_STATUS_RESPONSE, timeoutMs, link);
+    if (rsp[0] !== OPCODES.AUDIO_STATUS_RESPONSE || rsp.length < 1 + AUDIO_STATUS_LENGTH) {
+      throw new Error(`Malformed audio status (${rsp.length} bytes).`);
+    }
+    return parseAudioStatus(rsp.subarray(1, 1 + AUDIO_STATUS_LENGTH));
   }
 
   /**
