@@ -233,6 +233,17 @@ export interface InfoMemLayout {
    * never writes the byte and leaves it at 0xFF, which reads as "as before".
    */
   idxButtonLogMode?: number;
+  /**
+   * Configuration byte 233 (`NV_AUDIO_MODE`): what a Shimmer3R records from
+   * its microphone while it logs to SD (DEV-99). See `devices/audio/mode.ts`.
+   *
+   * Undefined unless {@link InfoMemContext.audio} says the firmware has it. No
+   * release has it yet, and the builds that do report the release before them,
+   * so there is no version to gate on; a host asks the device instead
+   * (`Shimmer3RClient.supportsAudio`). Older firmware leaves the byte at 0xFF,
+   * which reads as off.
+   */
+  idxAudioMode?: number;
   idxBtFactoryReset: number;
 
   // InfoMem B
@@ -500,6 +511,7 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     idxMacAddress: 128 + 96, // 224
     idxSDConfigDelayFlag: 128 + 102, // 230
     idxButtonLogMode: ctx.eventChannel === true && isSdLoggingFirmware(ctx) ? 128 + 104 : undefined, // 232
+    idxAudioMode: ctx.audio === true && isSdLoggingFirmware(ctx) ? 128 + 105 : undefined, // 233
     idxBtFactoryReset: 0,
 
     // B page. Java `idxNode0` = 128+128 = 256 with `maxNumOfExperimentNodes`
