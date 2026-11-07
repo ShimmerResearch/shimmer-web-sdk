@@ -2,7 +2,7 @@
  * Audio files built as the firmware builds them: a port of log-and-stream-common
  * `Audio/shimmer_audio_file.c` (DEV-99), filled with the values its host test
  * (`Test/host/test_audio_file.c`) uses, so the decoder is held to the offsets
- * that test pins.
+ * that test pins. The MAC is a placeholder of this repository's own.
  */
 
 export interface AudioFileInfo {
@@ -45,7 +45,7 @@ export function sampleInfo(): AudioFileInfo {
     fwMajor: 1,
     fwMinor: 1,
     fwInternal: 26,
-    mac: [0xcf, 0x9b, 0x9e, 0x36, 0x15, 0xbc],
+    mac: [0x00, 0x06, 0x66, 0x66, 0x80, 0x91],
     firstSampleTicks: 0x00003569d5d30000n,
     decimation: 24,
     gain: -8,

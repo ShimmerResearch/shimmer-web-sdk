@@ -37,7 +37,7 @@ describe('parseAudioWavHeader', () => {
       configTime: 0x11223344,
       firmwareId: 3,
       firmwareVersion: { major: 1, minor: 1, internal: 26 },
-      macAddress: 'CF9B9E3615BC',
+      macAddress: '000666668091',
       firstSampleTicks: 0x00003569d5d30000n,
       decimation: 24,
       gain: -8,
