@@ -45,8 +45,8 @@ const INQUIRY_BODY = [
 const TICKS_PER_FRAME = 640;
 const AZ = 16000;
 
-/** Status byte 0: sensing, SD logging, streaming, SD present. Byte 1: audio recording and available. */
-const LOGGING_WITH_AUDIO = [0x02 | 0x08 | 0x10 | 0x20, 0x02 | 0x08];
+/** Status byte 0: sensing, SD logging, streaming, SD present. Byte 1: audio recording. */
+const LOGGING_WITH_AUDIO = [0x02 | 0x08 | 0x10 | 0x20, 0x02];
 
 function wireFrame(ts: number, mode: CrcMode): Uint8Array {
   const i16 = (v: number): number[] => [v & 0xff, (v >> 8) & 0xff];
@@ -180,7 +180,6 @@ describe('a status push between two stream packets', () => {
         usbPluggedIn: false,
         audioRecording: true,
         audioFault: false,
-        audioAvailable: true,
       });
       // The parser holds the last packet until it sees where the next starts.
       expect(s.frames).toEqual(s.sent.slice(0, -1));
@@ -207,7 +206,7 @@ describe('a status push between two stream packets', () => {
     s.pump(2);
     s.push(LOGGING_WITH_AUDIO);
     s.pump(2);
-    s.push([LOGGING_WITH_AUDIO[0], 0x04 | 0x08]); // the recording stopped by a fault
+    s.push([LOGGING_WITH_AUDIO[0], 0x04]); // the recording stopped by a fault
     s.pump(2);
     expect(s.pushes.map((p) => [p.audioRecording, p.audioFault])).toEqual([
       [true, false],

@@ -1,7 +1,7 @@
 /**
  * Shimmer3R audio recording (DEV-99): configuration byte 233, which says
  * whether a unit records from its microphone while it logs to SD and what it
- * keeps; the recorder's status bits over Bluetooth; and the `.WAV` and `.AFP` files
+ * keeps; the recorder's status over Bluetooth; and the `.WAV` and `.AFP` files
  * it writes beside each data file under `audio/`.
  */
 
@@ -20,7 +20,19 @@ export {
   describeAudioMode,
   applyAudioModeRules,
 } from './mode.js';
-export { AUDIO_STATUS_BITS, AUDIO_FAULT, describeAudioFault, isAudioFaultFatal } from './status.js';
+export {
+  AUDIO_OPCODES,
+  AUDIO_STATUS_LENGTH,
+  AUDIO_STATUS_VERSION,
+  AUDIO_STATUS_BITS,
+  AUDIO_STATE,
+  AUDIO_FAULT,
+  describeAudioState,
+  describeAudioFault,
+  isAudioFaultFatal,
+  parseAudioStatus,
+} from './status.js';
+export type { AudioStatus } from './status.js';
 export {
   AUDIO_FILE,
   AUDIO_FINGERPRINT_FILE,
