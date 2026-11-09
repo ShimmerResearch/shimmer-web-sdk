@@ -91,15 +91,29 @@ export interface Shimmer3DeviceStatus {
    *
    * Firmware before DEV-99 sends 0 in this bit, so a `false` is the device's
    * word only where `Shimmer3RClient.supportsAudio` said yes.
+   *
+   * The firmware pushes a status frame whenever this bit or {@link audioFault}
+   * changes, streaming or not, so `Shimmer3RClient.onDeviceStatus` sees
+   * recording start, stop and fail without polling. These bits are all the
+   * link carries about audio.
    */
   audioRecording: boolean | null;
   /**
    * This session's audio failed or was degraded: status byte 1 bit 2, the same
-   * firmware. It stays set after logging stops, until the next session starts;
-   * `Shimmer3RClient.getAudioStatus` says which fault. `null` where the second
-   * byte is absent, and gated as {@link audioRecording} is.
+   * firmware. It stays set after logging stops, until the next session starts.
+   * Which fault it was is in the session's audio files, byte 97 of each header
+   * (`AUDIO_FAULT`). `null` where the second byte is absent, and gated as
+   * {@link audioRecording} is.
    */
   audioFault: boolean | null;
+  /**
+   * This firmware records audio and this board has a microphone: status byte 1
+   * bit 3, the same firmware. It never changes while the firmware runs, and it
+   * is what `Shimmer3RClient.supportsAudio` reads. `null` where the second byte
+   * is absent. Firmware before DEV-99 sends 0 here too, so it counts only from
+   * the version `shimmer3RMayRecordAudio` allows.
+   */
+  audioAvailable: boolean | null;
   /** The status bytes as received, for logging. */
   raw: Uint8Array;
 }
@@ -123,7 +137,7 @@ export interface Shimmer3DeviceStatus {
  * v1.00.024 — hence the nullable fields rather than plain booleans. Which
  * width a given device sends is {@link statusPayloadBytesFor}'s question; this
  * decodes whatever it is handed. Its bit 0 is usbPluggedIn, and from DEV-99
- * bits 1 and 2 are audio recording and audio fault
+ * bits 1, 2 and 3 are audio recording, audio fault and audio available
  * (`shimmerStatus.usbPluggedIn | ShimAudio_statusBits()`). Bit 0 alone is
  * USB: reading the whole byte as USB, as this did before DEV-99, reports a
  * unit recording audio on battery as plugged in.
@@ -143,6 +157,7 @@ export function parseShimmer3StatusBytes(bytes: Uint8Array): Shimmer3DeviceStatu
     usbPluggedIn: bytes.length >= 2 ? (bytes[1] & 0x01) !== 0 : null,
     audioRecording: bytes.length >= 2 ? (bytes[1] & 0x02) !== 0 : null,
     audioFault: bytes.length >= 2 ? (bytes[1] & 0x04) !== 0 : null,
+    audioAvailable: bytes.length >= 2 ? (bytes[1] & 0x08) !== 0 : null,
     raw: new Uint8Array(bytes),
   };
 }

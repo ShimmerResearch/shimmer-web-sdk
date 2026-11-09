@@ -518,14 +518,14 @@ export function shimmer3SupportsSetFeature(
 }
 
 /**
- * Whether this firmware might record audio (DEV-99), and so is worth asking:
- * Shimmer3R LogAndStream v1.01.025 or later. False rules it out without
- * sending anything; true means ask the device
- * (`Shimmer3RClient.supportsAudio`).
+ * Whether this firmware might record audio (DEV-99), and so whether status
+ * byte 1 bit 3 is to be believed: Shimmer3R LogAndStream v1.01.025 or later.
+ * False rules it out; true means the status says
+ * (`Shimmer3RClient.supportsAudio`), which also covers a board without a
+ * microphone.
  *
  * No release has audio yet, and the builds that do report the release they
  * were cut from, v1.01.025, so the version can only rule older firmware out.
- * Once a release carries it, that release's version answers yes on its own.
  * A Shimmer3 has no microphone.
  */
 export function shimmer3RMayRecordAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {

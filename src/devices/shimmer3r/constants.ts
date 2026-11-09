@@ -196,12 +196,6 @@ export const OPCODES = Object.freeze({
   EVENT_CHANNEL_STATUS_RESPONSE: 0xba,
   /** Event channel record frame, under the `0x8A` in-stream prefix. */
   EVENT_RECORD_RESPONSE: 0xbb,
-  /**
-   * Audio recording (DEV-99): `[0xBC]` → `[ACK][0xBD][status × 32]`. Firmware
-   * before DEV-99 has no command 0xBC and drops it unanswered.
-   */
-  GET_AUDIO_STATUS_COMMAND: 0xbc,
-  AUDIO_STATUS_RESPONSE: 0xbd,
   SET_SD_SYNC_COMMAND: 0xe0,
   SD_SYNC_RESPONSE: 0xe1,
   NACK_COMMAND_PROCESSED: 0xfe,

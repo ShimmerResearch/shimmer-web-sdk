@@ -116,7 +116,6 @@ import {
   type EventChannelStatus,
   type EventRecord,
 } from '../events/record.js';
-import { AUDIO_STATUS_LENGTH, parseAudioStatus, type AudioStatus } from '../audio/status.js';
 import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
@@ -340,13 +339,6 @@ function isAckOrNack(b: number | undefined): boolean {
 function firmwareTag(major: number, minor: number, internal: number): string {
   return `v${major}.${String(minor).padStart(2, '0')}.${String(internal).padStart(3, '0')}`;
 }
-
-/**
- * How long {@link Shimmer3RClient.supportsAudio} waits for the audio status
- * probe's ACK. Firmware with audio answers at once; firmware without it never
- * does, so this is what the probe costs there, once per link.
- */
-const AUDIO_PROBE_TIMEOUT_MS = 1000;
 
 /** {@link Shimmer3RClient.setCrcMode}'s refusal while a stream is running. */
 const CRC_CHANGE_MID_STREAM =
@@ -772,10 +764,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * {@link getStatus}, which reads them itself. Until both are known a
    * one-byte push is reported as it is, because it may be complete.
    *
-   * **Only fires while idle.** Once streaming, every inbound byte belongs to the
-   * data plane and goes to the schema parser, which has no way to tell a status
-   * push from sample bytes and will consume it. Do not rely on this callback to
-   * notice that a recording stopped mid-stream; poll {@link getStatus} instead.
+   * **While streaming too.** The firmware queues a push between two packets, and
+   * the stream parser takes it there once it knows the status length (the
+   * versions are read at connect): with a link CRC it is checked by the CRC,
+   * without one by the packet that follows it. So a host sees SD logging,
+   * docking and the audio bits change during a stream as it does when idle. A
+   * push that lands while the parser is still finding the packet boundary, at
+   * the start of a stream, can still be lost.
    */
   onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
 
@@ -1294,6 +1289,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
         remainder[1] === OPCODES.EVENT_RECORD_RESPONSE
       ) {
         this._maybeEmitEventRecords(remainder);
+        remainder = new Uint8Array(0);
+      }
+      /* Nor is a status push, unless a status read is waiting for one. Without
+         a CRC, BLE delivers the firmware's `[ACK][0x8A][0x71][status]` push as
+         this shape, and it cannot be told from a command's ACK with a push
+         behind it, so the ACK is taken as the command's. The status still has
+         to reach onDeviceStatus, rather than be handed to a command that does
+         not read it. */
+      if (
+        remainder.length >= 2 &&
+        remainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        remainder[1] === OPCODES.STATUS_RESPONSE &&
+        this._statusReadsInFlight === 0 &&
+        // Test traffic is never a status push, whatever its first bytes (below).
+        !this._dataRateTestActive
+      ) {
+        this._maybeEmitDeviceStatus(remainder);
         remainder = new Uint8Array(0);
       }
       this._lastAckRemainder = remainder.length ? remainder : null;
@@ -2414,47 +2426,34 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /**
    * Ask the device whether its firmware records audio (DEV-99): configuration
-   * byte 233, status byte 1's audio bits, and `GET_AUDIO_STATUS_COMMAND`.
-   * Pass the answer to the InfoMem context as `audio`, which is what brings
-   * byte 233 into the layout and the field schema.
+   * byte 233 and status byte 1's audio bits. Pass the answer to the InfoMem
+   * context as `audio`, which is what brings byte 233 into the layout and the
+   * field schema.
    *
-   * The version alone cannot say. No release has audio yet, and the builds
-   * that do report the release they were cut from, so:
+   * 1. Firmware older than the first that may have audio, or not LogAndStream,
+   *    is ruled out by its version ({@link shimmer3RMayRecordAudio}).
+   * 2. Otherwise this reads the status ({@link getStatus}): status byte 1 bit 3,
+   *    `audioAvailable`, is set by firmware that records audio on a board with
+   *    a microphone. Older firmware sends 0 there.
    *
-   * 1. Firmware older than that, or not LogAndStream, is ruled out by its
-   *    version ({@link shimmer3RMayRecordAudio}) and is sent nothing.
-   * 2. Otherwise this sends `GET_AUDIO_STATUS_COMMAND` (0xBC) and waits a
-   *    second (`AUDIO_PROBE_TIMEOUT_MS`): a status reply is yes, silence no.
+   * No command is sent that the firmware might not know: the status is a read
+   * every firmware answers. The answer is cached until the next connect.
    *
-   * The probe is safe on firmware without audio, which SET_FEATURE was not:
-   * 0xBC was never a command before DEV-99, and it takes no arguments, so
-   * older firmware drops the one byte unanswered and there is nothing after
-   * it to run as a command. The cost is the timeout, once per link: the
-   * answer is cached until the next connect.
+   * Not while streaming; ask at connect.
    *
-   * Not while streaming ({@link getAudioStatus}); ask at connect.
-   *
-   * HARDWARE-VERIFY: from the firmware source. Neither answer has been seen
-   * from a unit: not the reply from a DEV-99 build, nor the silence from an
-   * older one.
+   * HARDWARE-VERIFY: from the firmware source. No unit has been asked.
    */
   async supportsAudio(): Promise<boolean> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._audioSupport !== null) return this._audioSupport;
+    if (this._streaming)
+      throw new Error('Cannot ask whether the firmware records audio while streaming');
     const link = this._linkGeneration;
     let answer = false;
     if (await this._mayRecordAudio()) {
-      try {
-        await this.getAudioStatus(AUDIO_PROBE_TIMEOUT_MS);
-        answer = true;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : '';
-        /* Silence is firmware without the command. Anything else - a link
-           reset, the link busy, a reply that would not parse - says nothing
-           about the firmware, so it is not remembered. */
-        if (msg !== 'ACK timeout' && msg !== 'NACK received') throw e;
-        this._emitStatus('Audio recording not supported by this firmware (0xBC unanswered)');
-      }
+      const status = await this.getStatus();
+      answer = status.audioAvailable === true;
+      if (!answer) this._emitStatus('Audio recording not supported (status byte 1 bit 3 clear)');
     }
     if (this._linkGeneration === link) this._audioSupport = answer;
     return answer;
@@ -2471,38 +2470,6 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch {
       return false;
     }
-  }
-
-  /**
-   * Read the audio recorder's status (GET_AUDIO_STATUS_COMMAND 0xBC →
-   * `[ACK][0xBD][32 bytes]`, DEV-99): the mode configured, the recorder's
-   * state and first fault, and this session's counters.
-   *
-   * Firmware without audio does not answer, so this times out there; ask
-   * {@link supportsAudio} first. The firmware answers while streaming too, but
-   * this client's stream parser takes only bare ACKs between packets, so it
-   * refuses while streaming rather than lose the reply.
-   *
-   * HARDWARE-VERIFY: from the firmware source (`PlatAudio_buildStatus`) only.
-   *
-   * @param timeoutMs how long to wait for the ACK, and then the reply
-   */
-  async getAudioStatus(timeoutMs = 1500): Promise<AudioStatus> {
-    if (!this._transport) throw new Error('Not connected (RX missing)');
-    if (this._streaming) throw new Error('Cannot read the audio status while streaming');
-    const link = this._linkGeneration;
-    const remainder = await this._writeExpectingAck(
-      new Uint8Array([OPCODES.GET_AUDIO_STATUS_COMMAND]),
-      timeoutMs,
-    );
-    const rsp =
-      remainder && remainder[0] === OPCODES.AUDIO_STATUS_RESPONSE
-        ? remainder
-        : await this._waitForResponse(OPCODES.AUDIO_STATUS_RESPONSE, timeoutMs, link);
-    if (rsp[0] !== OPCODES.AUDIO_STATUS_RESPONSE || rsp.length < 1 + AUDIO_STATUS_LENGTH) {
-      throw new Error(`Malformed audio status (${rsp.length} bytes).`);
-    }
-    return parseAudioStatus(rsp.subarray(1, 1 + AUDIO_STATUS_LENGTH));
   }
 
   /**
@@ -4706,6 +4673,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * in flight, in any CRC mode or over any link.
    */
   private _streamReplyLength(buf: Uint8Array, at: number): number {
+    const push = this._streamStatusPushLength(buf, at);
+    if (push !== RESYNC) return push;
     const op = buf[at];
     /* An event record frame, which the firmware queues into the same ring. It
        carries its own CRC whatever the link's mode, so it vouches for itself as
@@ -4721,6 +4690,52 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (buf.length < at + 2) return NEED_MORE;
     const after = buf[at + 1];
     return after === OPCODES.DATA_PACKET || isAckOrNack(after) ? 1 : RESYNC;
+  }
+
+  /**
+   * The length of the status push at `buf[at]`, `[ACK][0x8A][0x71][status]` and
+   * the link CRC: `RESYNC` when `buf[at]` does not start one, `NEED_MORE` when
+   * the buffer ends before that can be told.
+   *
+   * The firmware sends it whenever docking, logging, streaming, the USB rail or
+   * the audio bits change, streaming or not, into the same transmit ring as the
+   * packets (`ShimBt_instreamStatusRespSend`, `Comms/shimmer_bt_uart.c`). The
+   * ACK is there only while the in-stream ACK prefix is on, which is the
+   * default. The CRC, when the link has one, covers every byte from the ACK.
+   *
+   * With a CRC, the CRC tells, as for a bare ACK. With none, the push says
+   * nothing for itself, so it is taken only where the byte after it starts a
+   * data packet or another reply, and it never vouches for the packet in front
+   * of it: that packet's end is still found by the timestamp test.
+   *
+   * The width is the status's, 1 or 2 bytes ({@link statusPayloadBytesFor});
+   * until the versions are read it is unknown, and nothing is taken.
+   *
+   * HARDWARE-VERIFY: from the firmware source, and run against a scripted
+   * device only.
+   */
+  private _streamStatusPushLength(buf: Uint8Array, at: number): number {
+    let i = at;
+    if (buf[i] === OPCODES.ACK_COMMAND_PROCESSED) {
+      if (buf.length < i + 2) return NEED_MORE;
+      i++;
+    }
+    if (buf[i] !== OPCODES.INSTREAM_CMD_RESPONSE) return RESYNC;
+    if (buf.length < i + 2) return NEED_MORE;
+    if (buf[i + 1] !== OPCODES.STATUS_RESPONSE) return RESYNC;
+    const width = this._statusPayloadBytes;
+    if (width === null) return RESYNC;
+    const trailer = crcTrailerBytes(this._crcMode);
+    const len = i - at + 2 + width + trailer;
+    if (buf.length < at + len) return NEED_MORE;
+    if (trailer > 0) return verifyCrc(buf.subarray(at, at + len), this._crcMode) ? len : RESYNC;
+    if (buf.length < at + len + 1) return NEED_MORE;
+    const after = buf[at + len];
+    return after === OPCODES.DATA_PACKET ||
+      isAckOrNack(after) ||
+      after === OPCODES.INSTREAM_CMD_RESPONSE
+      ? len
+      : RESYNC;
   }
 
   /** How many bytes of bare replies run from `buf[at]`, each as {@link _streamReplyLength} measures it. */
@@ -4741,6 +4756,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * {@link toggleLed}, which does not wait for it while streaming.
    */
   private _takeStreamReply(op: number, frame?: Uint8Array): void {
+    /* A status push, whose ACK prefix acknowledges no command: reported as an
+       idle one is, and never counted against a command waiting for its ACK. */
+    const msg = frame ? withoutLeadingAck(frame) : null;
+    if (
+      frame &&
+      msg &&
+      msg.length >= 2 &&
+      msg[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+      msg[1] === OPCODES.STATUS_RESPONSE
+    ) {
+      const trailer = crcTrailerBytes(this._crcMode);
+      this._maybeEmitDeviceStatus(frame.subarray(0, frame.length - trailer));
+      return;
+    }
     if (op === OPCODES.INSTREAM_CMD_RESPONSE) {
       if (frame) this._emitEventRecord(frame);
       return;
@@ -4821,8 +4850,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
         buf[wireBytes] !== preamble
       ) {
         /* An event frame's own CRC vouches for it on any link, as a reply's
-           does on a CRC'd one. */
-        const eventFrame = buf[wireBytes] === OPCODES.INSTREAM_CMD_RESPONSE;
+           does on a CRC'd one. A status push has no CRC of its own, so it
+           vouches only on a CRC'd link (_streamStatusPushLength). */
+        const eventFrame =
+          buf[wireBytes] === OPCODES.INSTREAM_CMD_RESPONSE &&
+          buf[wireBytes + 1] !== OPCODES.STATUS_RESPONSE;
         const vouchable = (crcBytes > 0 || eventFrame) && this._streamAligned;
         const replies = vouchable
           ? this._streamReplyLength(buf, wireBytes)

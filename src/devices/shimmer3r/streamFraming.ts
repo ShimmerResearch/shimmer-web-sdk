@@ -24,7 +24,6 @@ import { OPCODES } from './constants.js';
 import { EXG_BANK_LENGTH } from '../exg/registers.js';
 import { sdMessageSpan, SD_TRANSFER_OPCODES, SD_INSTREAM_BYTE } from './sdTransfer/protocol.js';
 import { EVENT_CHANNEL_STATUS_LENGTH, eventFrameLength } from '../events/record.js';
-import { AUDIO_STATUS_LENGTH } from '../audio/status.js';
 
 /**
  * Offset of the `numChannels` byte within an opcode-prefixed
@@ -81,8 +80,6 @@ export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>
   [OPCODES.ALT_MAG_CALIBRATION_RESPONSE]: 21, // 0xB0
   // 0xBA — the event channel's status, 9 bytes (`ShimEvt_buildStatus`)
   [OPCODES.EVENT_CHANNEL_STATUS_RESPONSE]: EVENT_CHANNEL_STATUS_LENGTH,
-  // 0xBD — the audio recorder's status, 32 bytes (`PlatAudio_buildStatus`)
-  [OPCODES.AUDIO_STATUS_RESPONSE]: AUDIO_STATUS_LENGTH,
 });
 
 /**

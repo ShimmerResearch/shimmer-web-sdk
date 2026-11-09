@@ -184,22 +184,25 @@ describe('parseShimmer3StatusBytes', () => {
     });
   });
 
-  it('reads status byte 1 bit by bit: USB, then audio recording and audio fault (DEV-99)', () => {
-    // A unit recording audio on battery sends 0x02 in byte 1. Reading the whole
+  it('reads status byte 1 bit by bit: USB, then audio recording, fault and available (DEV-99)', () => {
+    // A unit recording audio on battery sends 0x0A in byte 1. Reading the whole
     // byte as USB, as this parser once did, reported it plugged in.
-    expect(parseShimmer3StatusBytes(new Uint8Array([0x0a, 0x02]))).toMatchObject({
+    expect(parseShimmer3StatusBytes(new Uint8Array([0x0a, 0x0a]))).toMatchObject({
       usbPluggedIn: false,
       audioRecording: true,
       audioFault: false,
+      audioAvailable: true,
     });
     expect(parseShimmer3StatusBytes(new Uint8Array([0x00, 0x05]))).toMatchObject({
       usbPluggedIn: true,
       audioRecording: false,
       audioFault: true,
+      audioAvailable: false,
     });
     expect(parseShimmer3StatusBytes(new Uint8Array([0x21]))).toMatchObject({
       audioRecording: null,
       audioFault: null,
+      audioAvailable: null,
     });
   });
 
