@@ -59,8 +59,10 @@ describe('SHIMMER3_INFOMEM_FIELD_SCHEMA — structural invariants', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it('every field names a group that exists', () => {
-    const ids = new Set(SHIMMER3_INFOMEM_FIELD_GROUPS.map((g) => g.id));
+  it('every field names a group or subgroup that exists', () => {
+    const ids = new Set(
+      SHIMMER3_INFOMEM_FIELD_GROUPS.flatMap((g) => [g.id, ...(g.subgroups ?? []).map((s) => s.id)]),
+    );
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       expect(ids.has(f.group), `${f.key} → ${f.group}`).toBe(true);
     }

@@ -225,6 +225,116 @@ export function withoutPressRecording(raw: number): number {
   }
 }
 
+/**
+ * What a press does to logging: the other half of bits 0-2, beside whether
+ * presses are recorded. A host that offers press recording as an event-marker
+ * enable, beside the sensor enables, offers this as a setting of its own.
+ */
+export const BUTTON_LOGGING = Object.freeze({
+  /** `userButtonEnable` decides, as before the byte existed (mode 0). */
+  AS_BEFORE: 'asBefore',
+  /** A press never starts or stops logging (modes 1 and 5). */
+  NONE: 'none',
+  /** A press starts and stops logging (mode 2). */
+  SINGLE_PRESS: 'singlePress',
+  /** A double press starts and stops logging (modes 3 and 4). */
+  DOUBLE_PRESS: 'doublePress',
+} as const);
+
+export type ButtonLogging = (typeof BUTTON_LOGGING)[keyof typeof BUTTON_LOGGING];
+
+/** `[value, label]` pairs for a "button starts and stops logging" selector. */
+export const BUTTON_LOGGING_OPTIONS: readonly (readonly [ButtonLogging, string])[] = Object.freeze([
+  [BUTTON_LOGGING.AS_BEFORE, 'As before (Start Logging On Button Press decides)'],
+  [BUTTON_LOGGING.NONE, 'No'],
+  [BUTTON_LOGGING.SINGLE_PRESS, 'Single press'],
+  [BUTTON_LOGGING.DOUBLE_PRESS, 'Double press'],
+] as const);
+
+/** Bits 0-2 as the two settings a host can show apart. */
+export interface ButtonModeParts {
+  /** Every press and release goes to the event channel (modes 4 and 5). */
+  recordsPresses: boolean;
+  /** What a press does to logging. */
+  logging: ButtonLogging;
+}
+
+/** The two settings bits 0-2 hold, as the firmware reads them (corrected first). */
+export function splitButtonMode(raw: number): ButtonModeParts {
+  switch (buttonModeOf(raw)) {
+    case BUTTON_MODE.DISABLED:
+      return { recordsPresses: false, logging: BUTTON_LOGGING.NONE };
+    case BUTTON_MODE.SINGLE_PRESS:
+      return { recordsPresses: false, logging: BUTTON_LOGGING.SINGLE_PRESS };
+    case BUTTON_MODE.DOUBLE_PRESS:
+      return { recordsPresses: false, logging: BUTTON_LOGGING.DOUBLE_PRESS };
+    case BUTTON_MODE.DOUBLE_RECORDED:
+      return { recordsPresses: true, logging: BUTTON_LOGGING.DOUBLE_PRESS };
+    case BUTTON_MODE.RECORDED:
+      return { recordsPresses: true, logging: BUTTON_LOGGING.NONE };
+    default:
+      return { recordsPresses: false, logging: BUTTON_LOGGING.AS_BEFORE };
+  }
+}
+
+/**
+ * Whether presses can be recorded while the button does `logging`. Not where a
+ * single press starts and stops logging, because a marker press must never
+ * stop a recording, and not as before, where byte 217 decides what a press
+ * does and there is no mode that records.
+ */
+export function canRecordPressesWith(logging: ButtonLogging): boolean {
+  return logging === BUTTON_LOGGING.NONE || logging === BUTTON_LOGGING.DOUBLE_PRESS;
+}
+
+/** The button mode for the two settings, or null where they cannot go together. */
+export function joinButtonMode(parts: ButtonModeParts): number | null {
+  if (parts.recordsPresses) {
+    if (parts.logging === BUTTON_LOGGING.DOUBLE_PRESS) return BUTTON_MODE.DOUBLE_RECORDED;
+    if (parts.logging === BUTTON_LOGGING.NONE) return BUTTON_MODE.RECORDED;
+    return null;
+  }
+  switch (parts.logging) {
+    case BUTTON_LOGGING.NONE:
+      return BUTTON_MODE.DISABLED;
+    case BUTTON_LOGGING.SINGLE_PRESS:
+      return BUTTON_MODE.SINGLE_PRESS;
+    case BUTTON_LOGGING.DOUBLE_PRESS:
+      return BUTTON_MODE.DOUBLE_PRESS;
+    default:
+      return BUTTON_MODE.LEGACY;
+  }
+}
+
+/**
+ * The corrected byte with press recording turned on, the button's part in
+ * logging moved to the nearest that can go with it: a single press becomes a
+ * double press. As before becomes a double press, starting logging on a host
+ * command, where `userButtonEnable` let a press start logging, and otherwise no
+ * press, with leaving the dock still starting logging, as before. The TTL input,
+ * and the log triggers of a byte that was not as before, stand. The inverse of
+ * {@link withoutPressRecording}.
+ */
+export function withPressRecording(raw: number, userButtonEnable: boolean): number {
+  const fixed = correctButtonLogMode(raw);
+  const ttlInput = (fixed & BUTTON_LOG_MODE.TTL_INPUT) !== 0;
+  let logTriggers = logTriggersOf(fixed);
+  let buttonMode: number;
+  switch (splitButtonMode(fixed).logging) {
+    case BUTTON_LOGGING.NONE:
+      buttonMode = BUTTON_MODE.RECORDED;
+      break;
+    case BUTTON_LOGGING.SINGLE_PRESS:
+    case BUTTON_LOGGING.DOUBLE_PRESS:
+      buttonMode = BUTTON_MODE.DOUBLE_RECORDED;
+      break;
+    default:
+      buttonMode = userButtonEnable ? BUTTON_MODE.DOUBLE_RECORDED : BUTTON_MODE.RECORDED;
+      logTriggers = userButtonEnable ? LOG_TRIGGERS.HOST : LOG_TRIGGERS.HOST_UNDOCK;
+  }
+  return encodeButtonLogMode({ buttonMode, logTriggers, ttlInput });
+}
+
 /** The three settings byte 232 holds. */
 export interface ButtonLogModeSettings {
   /** Bits 0-2, {@link BUTTON_MODE}. */
