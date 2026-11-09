@@ -15,11 +15,13 @@ export {
   audioGainPresetOf,
   recordsAudioFingerprint,
   recordsRawAudio,
+  joinAudioMode,
   audioModeRecordsSpeech,
   encodeAudioMode,
   describeAudioMode,
   applyAudioModeRules,
 } from './mode.js';
+export type { AudioModeParts } from './mode.js';
 export {
   AUDIO_OPCODES,
   AUDIO_STATUS_LENGTH,

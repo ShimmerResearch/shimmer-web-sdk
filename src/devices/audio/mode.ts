@@ -110,6 +110,23 @@ export function recordsRawAudio(raw: number): boolean {
   return mode === AUDIO_MODE.FINGERPRINT_RAW || mode === AUDIO_MODE.RAW;
 }
 
+/** The two things byte 233 can keep, apart: {@link recordsAudioFingerprint} and {@link recordsRawAudio}. */
+export interface AudioModeParts {
+  /** The fingerprint: landmark hashes, which store no sound. */
+  fingerprint: boolean;
+  /** The raw 16 kHz audio, which records speech. */
+  raw: boolean;
+}
+
+/**
+ * The mode that keeps exactly `parts`. Every combination is a mode, so a host
+ * can offer byte 233 as two enables, as Shimmer Capture's Microphone tile does.
+ */
+export function joinAudioMode(parts: AudioModeParts): number {
+  if (parts.fingerprint) return parts.raw ? AUDIO_MODE.FINGERPRINT_RAW : AUDIO_MODE.FINGERPRINT;
+  return parts.raw ? AUDIO_MODE.RAW : AUDIO_MODE.OFF;
+}
+
 /**
  * Whether setting this mode records speech, so a host must ask the user to
  * confirm first: modes 2 and 3, which keep raw audio. Takes a mode (0-3), not

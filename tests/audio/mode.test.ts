@@ -14,6 +14,7 @@ import {
   correctAudioMode,
   describeAudioMode,
   encodeAudioMode,
+  joinAudioMode,
   recordsAudioFingerprint,
   recordsRawAudio,
 } from '../../src/devices/audio/mode.js';
@@ -145,5 +146,26 @@ describe('byte 233 in the InfoMem', () => {
     expect(applyAudioModeRules(image, layout, false)).toEqual([233]);
     expect(image[233]).toBe(0);
     expect(applyAudioModeRules(image, resolveInfoMemLayout(S3R))).toEqual([]);
+  });
+});
+
+describe('byte 233 as two enables', () => {
+  it('has a mode for every combination of the fingerprint and raw audio', () => {
+    expect(joinAudioMode({ fingerprint: false, raw: false })).toBe(AUDIO_MODE.OFF);
+    expect(joinAudioMode({ fingerprint: true, raw: false })).toBe(AUDIO_MODE.FINGERPRINT);
+    expect(joinAudioMode({ fingerprint: true, raw: true })).toBe(AUDIO_MODE.FINGERPRINT_RAW);
+    expect(joinAudioMode({ fingerprint: false, raw: true })).toBe(AUDIO_MODE.RAW);
+  });
+
+  it('splits every byte back into the same two, as the firmware reads it', () => {
+    for (let raw = 0; raw < 256; raw++) {
+      const parts = { fingerprint: recordsAudioFingerprint(raw), raw: recordsRawAudio(raw) };
+      expect(joinAudioMode(parts), `0x${raw.toString(16)}`).toBe(audioModeOf(raw));
+    }
+  });
+
+  it('is in Sensor Enables, with what is recorded', () => {
+    const field = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((f) => f.key === 'audioMode');
+    expect(field?.group).toBe('sensors');
   });
 });

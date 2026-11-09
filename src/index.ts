@@ -1049,6 +1049,7 @@ export {
   audioGainPresetOf,
   recordsAudioFingerprint,
   recordsRawAudio,
+  joinAudioMode,
   audioModeRecordsSpeech,
   encodeAudioMode,
   describeAudioMode,
@@ -1076,6 +1077,7 @@ export {
 } from './devices/audio/index.js';
 export type {
   AudioStatus,
+  AudioModeParts,
   AudioFileIdentity,
   AudioWavHeader,
   AudioFingerprintHeader,
