@@ -210,6 +210,12 @@ const ON_OFF: readonly InfoMemFieldOption[] = [
 export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Object.freeze([
   { id: 'sampling', title: 'Sampling', openByDefault: true },
   { id: 'sensors', title: 'Sensor Enables', openByDefault: true },
+  /* Beside the sensor enables, where the microphone is looked for, and open:
+     a mode that keeps raw audio records speech. A group of its own rather than
+     an enable, because it records only while logging to SD, into audio/, and
+     never into the stream or the data file. Present only on firmware that
+     records audio (`InfoMemContext.audio`). */
+  { id: 'audio', title: 'Audio Recording', openByDefault: true },
   { id: 'lnAccel', title: 'Low-Noise Accelerometer' },
   { id: 'wrAccel', title: 'Wide-Range Accelerometer' },
   { id: 'gyro', title: 'Gyroscope' },
@@ -230,10 +236,6 @@ export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Objec
       { id: 'sdLogging.startup', title: 'Start-up' },
       { id: 'sdLogging.duration', title: 'Duration' },
     ],
-  },
-  {
-    id: 'audio',
-    title: 'Audio Recording',
   },
   { id: 'trial', title: 'Trial / Experiment' },
   {
