@@ -222,14 +222,13 @@ export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Objec
   {
     id: 'sdLogging',
     title: 'SD Logging',
+    /* Start-up holds how a log starts: the button and byte 232's other
+       triggers. Duration holds how long it runs. Byte 232's TTL input is in
+       Sensor Enables, with what gets recorded. */
     subgroups: [
       { id: 'sdLogging.startup', title: 'Start-up' },
       { id: 'sdLogging.duration', title: 'Duration' },
     ],
-  },
-  {
-    id: 'eventChannel',
-    title: 'Button and Event Channel',
   },
   { id: 'trial', title: 'Trial / Experiment' },
   {
@@ -632,7 +631,9 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     configKey: 'trial.disableBluetooth',
   },
 
-  // ---- SD logging
+  // ---- SD logging. Not the TCXO (ExperimentConfig1 bit 4): no LogAndStream
+  // build supports it and the firmware clears it (`applyTcxoRule`), so it is
+  // not offered at all.
   {
     key: 'buttonStart',
     label: 'Start Logging On Button Press',
@@ -642,7 +643,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     shift: 5,
     width: 1,
     options: ON_OFF,
-    group: 'sdLogging',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     configKey: 'trial.buttonStart',
   },
@@ -655,26 +656,11 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     shift: 7,
     width: 1,
     options: ON_OFF,
-    group: 'sdLogging',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     readOnly: true,
     readOnlyReason: 'Deprecated - no longer acted on by current firmware.',
     configKey: 'trial.singleTouch',
-  },
-  {
-    key: 'tcxo',
-    label: 'TCXO',
-    desc: 'Use the temperature-compensated crystal oscillator — ExperimentConfig1 bit 4 (bitShiftTCX0=4, FW tcxo).',
-    kind: 'bit',
-    layoutKey: 'idxSDExperimentConfig1',
-    shift: 4,
-    width: 1,
-    options: ON_OFF,
-    group: 'sdLogging',
-    appliesTo: ALL,
-    readOnly: true,
-    readOnlyReason: 'Deprecated - the TCXO is not fitted on current hardware.',
-    configKey: 'trial.tcxo',
   },
   {
     key: 'estimatedExpLength',
@@ -684,7 +670,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     layoutKey: 'idxEstimatedExpLengthMsb',
     min: 0,
     max: 0xffff,
-    group: 'sdLogging',
+    group: 'sdLogging.duration',
     appliesTo: ALL,
     configKey: 'sd.estimatedExpLengthSec',
   },
@@ -696,15 +682,18 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     layoutKey: 'idxMaxExpLengthMsb',
     min: 0,
     max: 0xffff,
-    group: 'sdLogging',
+    group: 'sdLogging.duration',
     appliesTo: ALL,
     configKey: 'sd.maxExpLengthMin',
   },
 
-  // ---- Button and event channel: configuration byte 232 (DEV-971). Present
-  // only where the firmware has the byte, which the layout decides
+  // ---- Button, logging and TTL input: configuration byte 232 (DEV-971).
+  // Present only where the firmware has the byte, which the layout decides
   // (`idxButtonLogMode`). Bit 7 set - erased memory, or older firmware - makes
-  // the whole byte read as 0, "as before".
+  // the whole byte read as 0, "as before". The button mode and the log triggers
+  // say how a log starts, so they are in SD Logging's Start-up; the TTL input
+  // says what is recorded, so it is in Sensor Enables. A host that shows press
+  // recording as an enable too splits the button mode with `splitButtonMode`.
   {
     key: 'buttonMode',
     label: 'Button Mode',
@@ -718,7 +707,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     width: 3,
     zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
     options: BUTTON_MODE_OPTIONS,
-    group: 'eventChannel',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     configKey: 'buttonLogMode',
   },
@@ -734,7 +723,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     width: 2,
     zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
     options: LOG_TRIGGER_OPTIONS,
-    group: 'eventChannel',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     configKey: 'buttonLogMode',
   },
@@ -750,7 +739,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     width: 1,
     zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
     options: ON_OFF,
-    group: 'eventChannel',
+    group: 'sensors',
     appliesTo: ALL,
     configKey: 'buttonLogMode',
   },

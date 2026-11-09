@@ -6,9 +6,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   BUTTON_LOG_MODE,
+  BUTTON_LOGGING,
+  BUTTON_LOGGING_OPTIONS,
   BUTTON_MODE,
   LOG_TRIGGERS,
   allowsSingleTouch,
+  canRecordPressesWith,
+  joinButtonMode,
+  splitButtonMode,
+  withPressRecording,
   applyButtonLogModeRules,
   buttonModeOf,
   correctButtonLogMode,
@@ -347,5 +353,105 @@ describe('applyButtonLogModeRules', () => {
     const im = image(0xff);
     expect(applyButtonLogModeRules(im, resolveInfoMemLayout(CTX.shimmer3R))).toEqual([]);
     expect(im[232]).toBe(0xff);
+  });
+});
+
+describe('press recording and what a press does to logging, apart', () => {
+  const PARTS: Record<number, [boolean, string]> = {
+    [BUTTON_MODE.LEGACY]: [false, BUTTON_LOGGING.AS_BEFORE],
+    [BUTTON_MODE.DISABLED]: [false, BUTTON_LOGGING.NONE],
+    [BUTTON_MODE.SINGLE_PRESS]: [false, BUTTON_LOGGING.SINGLE_PRESS],
+    [BUTTON_MODE.DOUBLE_PRESS]: [false, BUTTON_LOGGING.DOUBLE_PRESS],
+    [BUTTON_MODE.DOUBLE_RECORDED]: [true, BUTTON_LOGGING.DOUBLE_PRESS],
+    [BUTTON_MODE.RECORDED]: [true, BUTTON_LOGGING.NONE],
+  };
+
+  it('splits every button mode and joins it back to the same mode', () => {
+    for (const [mode, [recordsPresses, logging]] of Object.entries(PARTS)) {
+      const parts = splitButtonMode(Number(mode));
+      expect(parts, `mode ${mode}`).toEqual({ recordsPresses, logging });
+      expect(joinButtonMode(parts), `mode ${mode}`).toBe(Number(mode));
+    }
+  });
+
+  it('splits all 256 bytes as the firmware reads them', () => {
+    for (const raw of ALL) {
+      const parts = splitButtonMode(raw);
+      expect(parts.recordsPresses, `0x${raw.toString(16)}`).toBe(recordsButtonPresses(raw));
+      expect(joinButtonMode(parts), `0x${raw.toString(16)}`).toBe(buttonModeOf(raw));
+    }
+  });
+
+  it('records presses only where a single press does not start or stop logging', () => {
+    expect(canRecordPressesWith(BUTTON_LOGGING.NONE)).toBe(true);
+    expect(canRecordPressesWith(BUTTON_LOGGING.DOUBLE_PRESS)).toBe(true);
+    expect(canRecordPressesWith(BUTTON_LOGGING.SINGLE_PRESS)).toBe(false);
+    expect(canRecordPressesWith(BUTTON_LOGGING.AS_BEFORE)).toBe(false);
+    expect(
+      joinButtonMode({ recordsPresses: true, logging: BUTTON_LOGGING.SINGLE_PRESS }),
+    ).toBeNull();
+    expect(joinButtonMode({ recordsPresses: true, logging: BUTTON_LOGGING.AS_BEFORE })).toBeNull();
+  });
+
+  it('offers the four logging choices, as before first', () => {
+    expect(BUTTON_LOGGING_OPTIONS.map(([v]) => v)).toEqual([
+      BUTTON_LOGGING.AS_BEFORE,
+      BUTTON_LOGGING.NONE,
+      BUTTON_LOGGING.SINGLE_PRESS,
+      BUTTON_LOGGING.DOUBLE_PRESS,
+    ]);
+  });
+});
+
+describe('withPressRecording', () => {
+  const T = LOG_TRIGGERS;
+  const byte = (mode: number, trig = 0, ttl = false): number =>
+    mode | (trig << BUTTON_LOG_MODE.TRIGGER_SHIFT) | (ttl ? BUTTON_LOG_MODE.TTL_INPUT : 0);
+
+  it('moves a single press to a double press, keeping the triggers and the TTL input', () => {
+    expect(withPressRecording(byte(BUTTON_MODE.SINGLE_PRESS, T.HOST_UNDOCK, true), true)).toBe(
+      byte(BUTTON_MODE.DOUBLE_RECORDED, T.HOST_UNDOCK, true),
+    );
+  });
+
+  it('records with a double press, and with no press, as they are', () => {
+    expect(withPressRecording(byte(BUTTON_MODE.DOUBLE_PRESS, T.NONE), true)).toBe(
+      byte(BUTTON_MODE.DOUBLE_RECORDED, T.NONE),
+    );
+    expect(withPressRecording(byte(BUTTON_MODE.DISABLED, T.HOST_UNDOCK), false)).toBe(
+      byte(BUTTON_MODE.RECORDED, T.HOST_UNDOCK),
+    );
+  });
+
+  it('turns as before into what Start Logging On Button Press did', () => {
+    // On: a press started logging and leaving the dock did not.
+    expect(withPressRecording(byte(BUTTON_MODE.LEGACY, 0, true), true)).toBe(
+      byte(BUTTON_MODE.DOUBLE_RECORDED, T.HOST, true),
+    );
+    // Off: a press did nothing and leaving the dock started logging.
+    expect(withPressRecording(0xff, false)).toBe(byte(BUTTON_MODE.RECORDED, T.HOST_UNDOCK));
+  });
+
+  it('leaves a byte that already records presses as it is, and undoes withoutPressRecording', () => {
+    for (const raw of ALL) {
+      const fixed = correctButtonLogMode(raw);
+      if (recordsButtonPresses(fixed)) {
+        expect(withPressRecording(fixed, true), `0x${raw.toString(16)}`).toBe(fixed);
+        expect(withPressRecording(withoutPressRecording(fixed), true)).toBe(fixed);
+      }
+      expect(recordsButtonPresses(withPressRecording(raw, raw % 2 === 0))).toBe(true);
+    }
+  });
+});
+
+describe('where byte 232 sits in the field schema', () => {
+  const group = (key: string): string | undefined =>
+    SHIMMER3_INFOMEM_FIELD_SCHEMA.find((f) => f.key === key)?.group;
+
+  it('puts how a log starts in SD Logging start-up, and the TTL input in Sensor Enables', () => {
+    expect(group('buttonMode')).toBe('sdLogging.startup');
+    expect(group('logTriggers')).toBe('sdLogging.startup');
+    expect(group('buttonStart')).toBe('sdLogging.startup');
+    expect(group('ttlInput')).toBe('sensors');
   });
 });
