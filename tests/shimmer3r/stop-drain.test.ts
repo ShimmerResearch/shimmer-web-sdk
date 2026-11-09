@@ -1,6 +1,5 @@
 /**
- * What arrives after a stop, on a re-framed link (a byte stream, or any link
- * with a CRC on).
+ * What arrives after a stop, on every link.
  *
  * Packets go on arriving for a while after STOP_STREAMING or STOP_SDBT, and
  * with them the stop's ACK and the status push the firmware sends when the log
@@ -11,8 +10,15 @@
  * it began `C1 3D …`, an SD directory listing 2,840 bytes long by its own
  * header: the push was lost and the next command timed out.
  *
+ * Over BLE with no CRC the stop ended at once, on the view that a
+ * notification is one whole message. It is not: the same unit split packets
+ * across notifications and sent the stop's ACK at the end of one that began
+ * part-way through a packet. The status read sent next then took the push for
+ * its reply and reported the sensor still streaming.
+ *
  * The stop now drains the tail through the stream parser until the link goes
- * quiet, as the Shimmer3 client's stop does, and commands wait for it.
+ * quiet, on every link, as the Shimmer3 client's stop does, and commands wait
+ * for it.
  */
 import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
@@ -85,8 +91,10 @@ const LINKS = [
     framed: false,
     modes: [CRC_MODE.OFF, CRC_MODE.ONE_BYTE, CRC_MODE.TWO_BYTE],
   },
-  // BLE is re-framed only with a CRC on; without one a stop still ends at once.
-  { name: 'BLE', framed: true, modes: [CRC_MODE.ONE_BYTE, CRC_MODE.TWO_BYTE] },
+  /* BLE with no CRC drains too. A notification there is not one whole
+   * message: a bench Shimmer3R split packets across notifications and sent
+   * the stop's ACK at the end of one that began part-way through a packet. */
+  { name: 'BLE', framed: true, modes: [CRC_MODE.OFF, CRC_MODE.ONE_BYTE, CRC_MODE.TWO_BYTE] },
 ] as const;
 const CASES = LINKS.flatMap((link) => link.modes.map((mode) => [link, mode] as const));
 const label = (link: (typeof LINKS)[number], mode: CrcMode): string =>
@@ -134,7 +142,7 @@ async function streamingDevice(framed: boolean, mode: CrcMode) {
   return { t, client, device, pushes, frames };
 }
 
-describe('after a stop on a re-framed link', () => {
+describe('after a stop', () => {
   for (const [link, mode] of CASES) {
     it(`the log-closed push and the next command get through a tail cut mid-packet (${label(link, mode)})`, async () => {
       const { t, client, device, pushes, frames } = await streamingDevice(link.framed, mode);
@@ -196,10 +204,43 @@ describe('after a stop on a re-framed link', () => {
     expect(took).toBeLessThan(1500);
   });
 
-  it('a BLE link with no CRC is not re-framed, and its stop still ends at once', async () => {
+  it('BLE with no CRC: the stop ACK at the end of a notification that starts mid-packet', async () => {
+    /* The shape a bench Shimmer3R sent: the rest of a packet, whole packets
+     * and the stop's ACK in one notification, then the push in its own. Ended
+     * at once, the stop left the ACK unseen, so the status read sent next took
+     * the push for its reply and reported the sensor still streaming. */
+    const { t, client, device, pushes, frames } = await streamingDevice(true, CRC_MODE.OFF);
+    let ts = 1000;
+    for (let i = 0; i < 4; i++, ts += TICKS_PER_FRAME) {
+      const f = wireFrame(ts, PLAIN, CRC_MODE.OFF);
+      // Two notifications per packet, as the radio split them
+      t.notify(f.slice(0, 12));
+      t.notify(f.slice(12));
+    }
+    const cut = wireFrame(ts, PLAIN, CRC_MODE.OFF);
+    ts += TICKS_PER_FRAME;
+    t.notify(cut.slice(0, 13));
+    const after = wireFrame(ts, PLAIN, CRC_MODE.OFF);
+    device.tail = [
+      new Uint8Array([...cut.slice(13), ...after, ACK]),
+      new Uint8Array([ACK, INSTREAM, STATUS, ...LOG_CLOSED]),
+    ];
+
+    await client.stopStreamingAndLogging();
+    expect(pushes.map((p) => [p.sdLogging, p.audioRecording])).toEqual([[false, false]]);
+    expect(frames).toHaveLength(6);
+    const status = (await client.getStatus()) as Shimmer3DeviceStatus;
+    expect(device.statusReads).toBe(1);
+    expect(status.sensing).toBe(false);
+    expect(status.streaming).toBe(false);
+  });
+
+  it('a BLE link with no CRC drains too, ending after the quiet period', async () => {
     const { client } = await streamingDevice(true, CRC_MODE.OFF);
     const t0 = Date.now();
     await client.stopStreamingAndLogging();
-    expect(Date.now() - t0).toBeLessThan(100);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(250);
+    expect(took).toBeLessThan(1500);
   });
 });

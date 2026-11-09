@@ -296,11 +296,12 @@ const DATA_RATE_STOP_ACK_QUIET_MS = 50;
 const DATA_RATE_TAIL_BYTES = 24;
 
 /**
- * How long a re-framed link must stay quiet after a stop before the stream
- * plane hands the link back to commands ({@link Shimmer3RClient} `_drainStreamTail`),
- * and the longest the drain waits for that. The same values as the Shimmer3
+ * How long the link must stay quiet after a stop before the stream plane
+ * hands it back to commands ({@link Shimmer3RClient} `_drainStreamTail`), and
+ * the longest the drain waits for that. The same values as the Shimmer3
  * client's stop drain. On a bench Shimmer3R the last packet, the stop's ACK and
- * the status push that closes a log all arrived within 150 ms of the stop.
+ * the status push that closes a log all arrived within 200 ms of the stop, over
+ * classic Bluetooth and BLE.
  */
 const STOP_DRAIN_QUIET_MS = 300;
 const STOP_DRAIN_MAX_MS = 3000;
@@ -4217,27 +4218,28 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /**
    * Stop streaming (STOP_STREAMING_COMMAND 0x20), best-effort: the command goes
-   * out and the state is cleared without waiting for the ACK the firmware sends
-   * back.
+   * out without waiting for the ACK the firmware sends back, and what arrives
+   * after it is parsed as stream data until the link goes quiet
+   * ({@link _stopStreamPlane}).
    *
-   * Not waiting is deliberate. Stream packets keep arriving for hundreds of ms
-   * after the stop, and the framed path routes a notification to its ACK branch
-   * on the first byte alone — so with an ACK outstanding a residual frame that
-   * happened to begin 0xFF would be taken for the ACK and its tail forwarded to
-   * the control plane, which is how a stray 0xFE fabricates a NACK and a stray
-   * 0x02 frames a bogus inquiry. A notification is not frame-aligned, which is
-   * why the stream parser resyncs on a double preamble, so that first byte can
-   * be anything. `Shimmer3Client.stopStreaming` answers the same problem the
-   * long way, draining to quiescence before it re-enables the control plane;
-   * over BLE, where a notification is already one whole message, simply not
-   * waiting is enough — and it costs nothing against firmware that does not
-   * ACK a stop mid-stream at all.
+   * Not waiting for the ACK as a command's reply is deliberate. Stream packets
+   * keep arriving for hundreds of ms after the stop, and the framed path routes
+   * a notification to its ACK branch on the first byte alone — so with an ACK
+   * outstanding a residual frame that happened to begin 0xFF would be taken for
+   * the ACK and its tail forwarded to the control plane, which is how a stray
+   * 0xFE fabricates a NACK and a stray 0x02 frames a bogus inquiry. A
+   * notification is not frame-aligned, which is why the stream parser resyncs
+   * on a double preamble, so that first byte can be anything. That holds over
+   * BLE too: a bench Shimmer3R split 24-byte packets across two notifications
+   * and sent the stop's ACK as the last byte of a notification that began
+   * part-way through a packet. So the stop drains the tail through the stream
+   * parser on every link, as `Shimmer3Client.stopStreaming` does, and the ACK
+   * and the status push behind it are taken there.
    *
-   * The price is that the ACK is still in flight when the next command goes
-   * out, and `_expectingAck` counts rather than queues, so it is spent on that
-   * command. {@link withoutLeadingAck} is what keeps that from costing the
-   * command its own reply — read it before making this wait for the ACK after
-   * all.
+   * Should the ACK come only after the drain has ended, it is still in flight
+   * when the next command goes out, and `_expectingAck` counts rather than
+   * queues, so it is spent on that command. {@link withoutLeadingAck} is what
+   * keeps that from costing the command its own reply.
    */
   override async stopStreaming(): Promise<void> {
     this._emitStatus('STOP_STREAM → sending (no ACK wait)…');
@@ -4249,14 +4251,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * Write a stop, `op`, and end the stream plane: at once on a framed link, and
-   * on a re-framed one ({@link _reframing}: a byte stream, or any link with a
-   * CRC on) once the stream's tail has been drained ({@link _drainStreamTail}).
+   * Write a stop, `op`, and end the stream plane once the stream's tail has
+   * been drained ({@link _drainStreamTail}), on every link. That once excluded
+   * BLE with no CRC, on the view that a notification there is one whole
+   * message. It is not: on a bench Shimmer3R the read sent straight after a
+   * stop took the status push that ends a log as its own reply, so it reported
+   * the sensor still streaming, and its real reply and the push were both lost.
    *
-   * On a re-framed link every other command waits from before the stop is
-   * written until the plane has ended ({@link _write}). Held only from after
-   * the write, a command sent alongside the stop could go out first and have
-   * its reply land among the last packets, where it is lost.
+   * Every other command waits from before the stop is written until the plane
+   * has ended ({@link _write}). Held only from after the write, a command sent
+   * alongside the stop could go out first and have its reply land among the
+   * last packets, where it is lost.
    *
    * `_endStreamPlane`, not the two fields by hand. It also clears
    * `_streamAligned`, and leaving that set is not cosmetic: `_parseBySchema` is
@@ -4271,12 +4276,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private async _stopStreamPlane(op: number, written: (err?: Error) => void): Promise<void> {
     const link = this._linkGeneration;
     let release = (): void => {};
-    const gate =
-      this._streaming && this._reframing
-        ? new Promise<void>((resolve) => {
-            release = resolve;
-          })
-        : null;
+    const gate = this._streaming
+      ? new Promise<void>((resolve) => {
+          release = resolve;
+        })
+      : null;
     if (gate) this._streamTailDrain = gate;
     try {
       try {
@@ -4299,9 +4303,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * been quiet for {@link STOP_DRAIN_QUIET_MS}, then end the stream plane.
    *
    * Packets go on arriving for a while after the stop, and with them the stop's
-   * ACK and the status push the firmware sends when the log closes. On a
-   * re-framed link, ending the plane at once handed that tail to the control
-   * framer, part-way through a packet. Its first byte is any sample byte, and
+   * ACK and the status push the firmware sends when the log closes. Ending the
+   * plane at once handed that tail to the control framer, part-way through a
+   * packet. Its first byte is any sample byte, and
    * one that reads as a reply opcode with a length field swallows everything
    * behind it: on a bench Shimmer3R the tail began 0xC1, an SD directory
    * listing 2,840 bytes long by its own header, so the push was lost and the
@@ -4868,10 +4872,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * The width is the status's, 1 or 2 bytes ({@link statusPayloadBytesFor});
    * until the versions are read it is unknown, and nothing is taken.
    *
-   * Checked against bytes captured from a Shimmer3R on DEV-99 firmware over
-   * classic Bluetooth, with no CRC and a 1-byte CRC: the push that starts audio
-   * recording, between two packets, and the one that ends it, in the stop's
-   * tail. HARDWARE-VERIFY: over BLE, and with a 2-byte CRC.
+   * Run live on a Shimmer3R with DEV-99 firmware, over classic Bluetooth and
+   * BLE with no CRC, a 1-byte and a 2-byte CRC: in every log, the push that
+   * starts audio recording arrived between two packets about a second in, and
+   * the one that ends it in the stop's tail.
    */
   private _streamStatusPushLength(buf: Uint8Array, at: number): number {
     let i = at;
