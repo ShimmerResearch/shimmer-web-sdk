@@ -343,6 +343,35 @@ function withoutLeadingAck(msg: Uint8Array): Uint8Array {
   return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
 }
 
+/**
+ * The sensor refused to start an SD log: it NACKed START_LOGGING_COMMAND (0x92)
+ * or START_SDBT_COMMAND (0x70).
+ *
+ * The firmware starts a log only when the sensor is undocked, off USB power,
+ * has a card with no file error and has logging on in configuration byte 232
+ * (`ShimSens_checkStartLoggingConditions`). Firmware released so far ACKs a
+ * start it cannot carry out and does nothing (START_SDBT then streams alone),
+ * so there this error never comes and the status bits are what tell. Firmware
+ * that NACKs such a start starts nothing, not even the stream.
+ */
+export class LogStartRefusedError extends Error {
+  constructor(readonly command: 'START_LOGGING' | 'START_SDBT') {
+    super(
+      `The sensor refused to start an SD log (${command} NACKed). It logs only when undocked, ` +
+        'off USB power, with an SD card and no SD file error, and with logging turned on in its ' +
+        'configuration.',
+    );
+    this.name = 'LogStartRefusedError';
+  }
+}
+
+/** A NACK of a log start as {@link LogStartRefusedError}; anything else as it was. */
+function asLogStartRefusal(e: unknown, command: LogStartRefusedError['command']): unknown {
+  return e instanceof Error && e.message === 'NACK received'
+    ? new LogStartRefusedError(command)
+    : e;
+}
+
 /** True for an ACK (0xFF) or a NACK (0xFE): every reply to a command starts with one. */
 function isAckOrNack(b: number | undefined): boolean {
   return b === OPCODES.ACK_COMMAND_PROCESSED || b === OPCODES.NACK_COMMAND_PROCESSED;
@@ -1359,6 +1388,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
         }
         this._lastAckRemainder = null;
       }
+      return;
+    }
+
+    /* 1b) A lone NACK while a command waits for its answer, even with the
+     *     stream plane open. A framed start opens the plane before it writes
+     *     the command (_beginStreamPlane), so a NACKed START_SDBT would
+     *     otherwise go to the stream buffer and the start would time out
+     *     instead of saying it was refused. The count is the waiter's to take
+     *     back, as for any NACK (_writeExpectingAck). */
+    if (
+      this._streaming &&
+      chunk.length === 1 &&
+      chunk[0] === OPCODES.NACK_COMMAND_PROCESSED &&
+      (this._expectingAck ?? 0) > 0
+    ) {
+      this._emitTemp(chunk);
       return;
     }
 
@@ -4380,9 +4425,58 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // Not across a link reset, which closed this plane already: the stream
       // plane is the next link's now
       if (this._linkGeneration === link) this._endStreamPlane();
-      throw e;
+      throw asLogStartRefusal(e, 'START_SDBT');
     }
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
+  }
+
+  /**
+   * Start SD card logging only (START_LOGGING_COMMAND 0x92), without streaming.
+   *
+   * Allowed while streaming as well: the firmware then adds a log to the
+   * running stream, and its ACK comes between two packets. The log goes on
+   * after the link closes, until {@link stopLogging}, the button, the dock or
+   * the configured duration ends it.
+   *
+   * The ACK says the command ran, not that a log started: firmware released so
+   * far ACKs a start it cannot carry out (docked, on USB power, no card, an SD
+   * file error, logging off in byte 232) and does nothing. Confirm with
+   * {@link getStatus} (`sdLogging`) or the next status push. Firmware that
+   * NACKs such a start makes this throw instead.
+   *
+   * @throws LogStartRefusedError when the firmware NACKs the start
+   */
+  async startLogging(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._refuseWhileBtModuleUpdating('Logging');
+    this._emitStatus('START_LOGGING → waiting for ACK…');
+    let remainder: Uint8Array | null;
+    try {
+      remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_LOGGING_COMMAND]),
+        1500,
+      );
+    } catch (e) {
+      throw asLogStartRefusal(e, 'START_LOGGING');
+    }
+    if (remainder?.length) this._emitTemp(remainder);
+    this._emitStatus('START_LOGGING ACK received.');
+  }
+
+  /**
+   * Stop SD card logging only (STOP_LOGGING_COMMAND 0x93). A stream that is
+   * running goes on; its ACK then comes between two packets. To end both at
+   * once use {@link stopStreamingAndLogging}.
+   */
+  async stopLogging(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus('STOP_LOGGING → waiting for ACK…');
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.STOP_LOGGING_COMMAND]),
+      1500,
+    );
+    if (remainder?.length) this._emitTemp(remainder);
+    this._emitStatus('STOP_LOGGING ACK received.');
   }
 
   /**

@@ -113,7 +113,7 @@ export type {
 } from './core/StreamStats.js';
 
 // Shimmer3R
-export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
+export { Shimmer3RClient, LogStartRefusedError } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
 export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
