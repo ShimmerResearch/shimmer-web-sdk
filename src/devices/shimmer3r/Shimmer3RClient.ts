@@ -91,6 +91,7 @@ import {
   parseShimmer3DeviceVersionResponse,
   shimmer3SupportsSetFeature,
   shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
@@ -2506,12 +2507,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Pass the answer to the InfoMem context as `audio`, which is what brings
    * byte 233 into the layout and the field schema.
    *
-   * The version alone cannot say. No release has audio yet, and the builds
-   * that do report the release they were cut from, so:
+   * LogAndStream_Shimmer3R v1.01.026 is the first release with audio, but the
+   * development builds before it that have audio report v1.01.025, the
+   * release they were cut from. So the version answers for every release, and
+   * the device is asked only on v1.01.025:
    *
-   * 1. Firmware older than that, or not LogAndStream, is ruled out by its
+   * 1. Firmware older than v1.01.025, or not LogAndStream, is ruled out by its
    *    version ({@link shimmer3RMayRecordAudio}) and is sent nothing.
-   * 2. Otherwise this sends `GET_AUDIO_STATUS_COMMAND` (0xBC) and waits a
+   * 2. v1.01.026 or later records audio ({@link shimmer3RRecordsAudio}), and
+   *    is sent nothing either.
+   * 3. On v1.01.025 this sends `GET_AUDIO_STATUS_COMMAND` (0xBC) and waits a
    *    second (`AUDIO_PROBE_TIMEOUT_MS`): a status reply is yes, silence no.
    *
    * The probe is safe on firmware without audio, which SET_FEATURE was not:
@@ -2530,8 +2535,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._audioSupport !== null) return this._audioSupport;
     const link = this._linkGeneration;
-    let answer = false;
-    if (await this._mayRecordAudio()) {
+    const byVersion = await this._audioByVersion();
+    let answer = byVersion === 'yes';
+    if (byVersion === 'ask') {
       try {
         await this.getAudioStatus(AUDIO_PROBE_TIMEOUT_MS);
         answer = true;
@@ -2548,16 +2554,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return answer;
   }
 
-  /** Whether the firmware's version leaves room for audio ({@link shimmer3RMayRecordAudio}). */
-  private async _mayRecordAudio(): Promise<boolean> {
+  /**
+   * What the firmware's version says about audio: 'yes' from v1.01.026
+   * ({@link shimmer3RRecordsAudio}), 'ask' on v1.01.025
+   * ({@link shimmer3RMayRecordAudio}), 'no' otherwise.
+   */
+  private async _audioByVersion(): Promise<'yes' | 'ask' | 'no'> {
     try {
       const v = await this.readFwVersion();
-      return shimmer3RMayRecordAudio(
-        { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch },
-        HW_ID.SHIMMER_3R,
-      );
+      const fw = { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch };
+      if (shimmer3RRecordsAudio(fw, HW_ID.SHIMMER_3R)) return 'yes';
+      return shimmer3RMayRecordAudio(fw, HW_ID.SHIMMER_3R) ? 'ask' : 'no';
     } catch {
-      return false;
+      return 'no';
     }
   }
 

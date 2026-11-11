@@ -407,9 +407,11 @@ export {
   // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
   // commands. Both clients apply it.
   shimmer3SupportsSetFeature,
-  // Whether a Shimmer3R's firmware might record audio, so is worth asking
-  // (Shimmer3RClient.supportsAudio applies it).
+  // Whether a Shimmer3R's firmware might record audio, so is worth asking, and
+  // whether its version alone says it does (Shimmer3RClient.supportsAudio
+  // applies both).
   shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,

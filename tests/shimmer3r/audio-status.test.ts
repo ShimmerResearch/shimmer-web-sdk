@@ -2,13 +2,19 @@
  * The audio recorder over Bluetooth (DEV-99): `supportsAudio`, which decides
  * whether byte 233 is offered, and `getAudioStatus` (0xBC → `[ACK][0xBD][32]`).
  *
- * A build with audio reports the release it was cut from, v1.01.025, so the
- * version can only rule older firmware out; on v1.01.025 the client asks. 0xBC
- * was never a command before DEV-99 and takes no arguments, so firmware
- * without audio drops it and sends nothing: the probe times out.
+ * LogAndStream_Shimmer3R v1.01.026 is the first release with audio, and its
+ * version answers on its own. The development builds before it that have
+ * audio report the release they were cut from, v1.01.025, so there the client
+ * asks. 0xBC was never a command before DEV-99 and takes no arguments, so
+ * firmware without audio drops it and sends nothing: the probe times out.
  */
 import { describe, it, expect } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
+import {
+  shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
+} from '../../src/devices/shimmer3/protocol.js';
+import { FW_ID, HW_ID } from '../../src/devices/infomem/layout.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { appendCrc, CRC_MODE, type CrcMode } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
@@ -18,10 +24,12 @@ import { versionReply, type FwTuple } from './configFirmware.js';
 const ACK = OPCODES.ACK_COMMAND_PROCESSED;
 const INQUIRY_BODY = [OPCODES.INQUIRY_RESPONSE, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 1, 2];
 
-/** A build with audio reports the release before it. */
+/** A development build with audio reports the release before it. */
 const FW_AUDIO: FwTuple = [3, 1, 1, 25];
 /** The release before that. */
 const FW_OLDER: FwTuple = [3, 1, 1, 24];
+/** The first release with audio. */
+const FW_RELEASE: FwTuple = [3, 1, 1, 26];
 
 /** The status payload of a unit four minutes into a raw audio and fingerprint session. */
 const STATUS: number[] = [
@@ -131,6 +139,13 @@ describe('supportsAudio', () => {
       expect(s.dev.written.filter((op) => op === OPCODES.GET_AUDIO_STATUS_COMMAND)).toHaveLength(1);
     });
 
+    it(`is true from v1.01.026, the first release with audio, without asking (${link.name})`, async () => {
+      const s = await device(link, CRC_MODE.OFF, { fw: FW_RELEASE });
+      await expect(s.client.supportsAudio()).resolves.toBe(true);
+      await expect(s.client.supportsAudio()).resolves.toBe(true);
+      expect(s.dev.written).not.toContain(OPCODES.GET_AUDIO_STATUS_COMMAND);
+    });
+
     it(`never asks firmware older than the builds with audio (${link.name})`, async () => {
       const s = await device(link, CRC_MODE.OFF, { fw: FW_OLDER });
       await expect(s.client.supportsAudio()).resolves.toBe(false);
@@ -160,5 +175,34 @@ describe('supportsAudio', () => {
     await s.client.connect(s.t);
     await s.client.supportsAudio();
     expect(s.dev.written.filter((op) => op === OPCODES.GET_AUDIO_STATUS_COMMAND)).toHaveLength(2);
+  });
+});
+
+describe('the audio version gates', () => {
+  const v = (internal: number, minor = 1, firmwareIdentifier: number = FW_ID.LOGANDSTREAM) => ({
+    firmwareIdentifier,
+    major: 1,
+    minor,
+    internal,
+  });
+
+  it('say yes from v1.01.026, ask on v1.01.025, and rule out older firmware', () => {
+    const cases: [ReturnType<typeof v>, boolean, boolean][] = [
+      [v(24), false, false],
+      [v(25), true, false],
+      [v(26), true, true],
+      [v(27), true, true],
+      [v(0, 2), true, true], // v1.02.000
+    ];
+    for (const [fw, may, records] of cases) {
+      expect(shimmer3RMayRecordAudio(fw, HW_ID.SHIMMER_3R), JSON.stringify(fw)).toBe(may);
+      expect(shimmer3RRecordsAudio(fw, HW_ID.SHIMMER_3R), JSON.stringify(fw)).toBe(records);
+    }
+  });
+
+  it('say no for a Shimmer3, which has no microphone, and for other firmware', () => {
+    expect(shimmer3RMayRecordAudio(v(26), HW_ID.SHIMMER_3)).toBe(false);
+    expect(shimmer3RRecordsAudio(v(26), HW_ID.SHIMMER_3)).toBe(false);
+    expect(shimmer3RRecordsAudio(v(26, 1, FW_ID.SDLOG), HW_ID.SHIMMER_3R)).toBe(false);
   });
 });
