@@ -41,12 +41,13 @@ const S3: InfoMemContext = {
 };
 
 describe('correctAudioMode, on every value', () => {
-  it('keeps a valid built value with bits 4-6 cleared, and reads anything else as off', () => {
+  it('keeps a valid built value with bits 5-6 cleared, and reads anything else as off', () => {
     for (let raw = 0; raw < 256; raw++) {
       const fixed = correctAudioMode(raw);
       const valid = (raw & 0x80) === 0 && (raw & 0x0c) === 0;
-      expect(fixed, `0x${raw.toString(16)}`).toBe(valid ? raw & 0x0f : 0);
-      expect(fixed & 0xf0).toBe(0);
+      // Bit 4, the sound level (DEV-1413), is kept with the rest.
+      expect(fixed, `0x${raw.toString(16)}`).toBe(valid ? raw & 0x1f : 0);
+      expect(fixed & 0xe0).toBe(0);
       expect(correctAudioMode(fixed)).toBe(fixed);
       expect(audioModeOf(raw)).toBe(fixed & 0x03);
       expect(audioGainPresetOf(raw)).toBe(0);
@@ -62,7 +63,8 @@ describe('correctAudioMode, on every value', () => {
     expect(correctAudioMode(0x83)).toBe(0); // raw audio, bit 7 set
     expect(correctAudioMode(0x05)).toBe(0); // fingerprint, gain preset 1
     expect(correctAudioMode(0x0f)).toBe(0); // raw audio, gain preset 3
-    expect(correctAudioMode(0x73)).toBe(0x03); // unused bits cleared, mode kept
+    expect(correctAudioMode(0x73)).toBe(0x13); // unused bits cleared, mode and sound level kept
+    expect(correctAudioMode(0x63)).toBe(0x03); // unused bits cleared, mode kept
   });
 
   it('encodes a mode at the default gain, and nothing outside 0-3', () => {
@@ -141,7 +143,7 @@ describe('byte 233 in the InfoMem', () => {
     expect(image[233]).toBe(0);
     image[233] = 0x73;
     expect(applyAudioModeRules(image, layout)).toEqual([233]);
-    expect(image[233]).toBe(0x03);
+    expect(image[233]).toBe(0x13);
     expect(applyAudioModeRules(image, layout)).toEqual([]);
     expect(applyAudioModeRules(image, layout, false)).toEqual([233]);
     expect(image[233]).toBe(0);

@@ -143,12 +143,14 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
   0x13: { name: 'INT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x1a: { name: 'TEMPERATURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
   0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
+  // The sound level (DEV-1413): 0.01 dB(A), 0x8000 for no level.
+  0x38: { name: 'SOUND_LEVEL', fmt: 'i16', endian: 'le', sizeBytes: 2 },
 });
 
 /**
  * Per-generation channel table, layered over {@link CHANNEL_FORMATS}.
  *
- * Five kinds of entry live here, and only the first is cosmetic:
+ * Six kinds of entry live here, and only the first is cosmetic:
  *
  * 1. **The ADC block, `0x0D`-`0x13`.** The IDs are reused with different
  *    meanings on the two platforms — `shimmer_sensing.h:107-122` defines
@@ -194,6 +196,11 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
  *    Shimmer3R's 12-bit ADXL371 value. A Shimmer3 sends its 9-axis chip's own
  *    accelerometer there as a plain big-endian `i16`, so this layer overrides
  *    the shared entry (DEV-1338).
+ * 6. **`0x38` SOUND_LEVEL, Shimmer3R only** (DEV-1413): the microphone's
+ *    A-weighted level over its last 128 ms block, a signed 16-bit
+ *    little-endian count of 0.01 dB(A), 0x8000 for no level
+ *    (`devices/audio/soundLevel.ts`). A Shimmer3 has no microphone, so, like
+ *    the bridge amplifier the other way round, it resolves to nothing there.
  *
  * Names follow the SD-log channel tables in `devices/sdlog/channels.ts` so the
  * streamed and logged copies of the same signal carry the same label. The one

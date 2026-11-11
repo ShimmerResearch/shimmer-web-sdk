@@ -171,8 +171,11 @@ export interface SdLogHeader {
   /**
    * Header byte 226 (`SDH_AUDIO_MODE`, DEV-99): configuration byte 233 as the
    * firmware acted on it for this file - what the microphone recorded into
-   * `audio/` beside it - raw. Firmware before the field leaves 0xFF, which
-   * `audioModeOf` reads as off by the byte's own rule. Null for a Shimmer3,
+   * `audio/` beside it, and in bit 4 whether the sound level (channel 0x38,
+   * DEV-1413) was sampled into it - raw. Firmware before the field leaves
+   * 0xFF, which `audioModeOf` and `soundLevelEnabled` read as off by the
+   * byte's own rule. For the sound level the channel list says the same, and
+   * the decoder goes by the channel list. Null for a Shimmer3,
    * which has no microphone, and for firmware other than LogAndStream.
    *
    * HARDWARE-VERIFY: from the firmware source only; no file carrying the field

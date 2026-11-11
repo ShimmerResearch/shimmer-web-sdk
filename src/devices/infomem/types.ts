@@ -278,7 +278,9 @@ export interface InfoMemDeviceConfig {
   buttonLogMode: number;
   /**
    * Configuration byte 233 as stored: what a Shimmer3R records from its
-   * microphone while it logs to SD (DEV-99).
+   * microphone while it logs to SD (DEV-99), and in bit 4 whether it samples
+   * the sound level into the data as channel 0x38 (DEV-1413; read it with
+   * `soundLevelEnabled`, set it with `withSoundLevel` or `joinAudioMode`).
    *
    * Kept raw, so a config read and written back unedited leaves it exactly as
    * it was. Read it through `audioModeOf`, which applies the firmware's own

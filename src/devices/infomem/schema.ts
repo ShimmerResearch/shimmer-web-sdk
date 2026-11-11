@@ -749,11 +749,13 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   // present only where the firmware has the byte, which the layout decides
   // (`idxAudioMode`). Bit 7 set - erased memory, or older firmware - or a
   // reserved gain preset makes the whole byte read as 0, off. In Sensor
-  // Enables, with what is recorded, where the microphone is looked for: it is
-  // never sampled into the stream or the data file, but recorded beside it
-  // while logging, as the event markers are. The four modes are every
-  // combination of the fingerprint and raw audio, so a host can offer them as
-  // two enables (`joinAudioMode`).
+  // Enables, with what is recorded, where the microphone is looked for: the
+  // audio is never sampled into the stream or the data file, but recorded
+  // beside it while logging, as the event markers are. The four modes are
+  // every combination of the fingerprint and raw audio, so a host can offer
+  // them as two enables (`joinAudioMode`). Bit 4 (DEV-1413) is a third: the
+  // sound level, which IS sampled into the stream and the data file, as
+  // channel 0x38, whatever the mode.
   {
     key: 'audioMode',
     label: 'Audio Recording',
@@ -768,6 +770,24 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     width: 2,
     zeroWhenAnySet: AUDIO_MODE_BYTE.INVALID | AUDIO_MODE_BYTE.GAIN_MASK,
     options: AUDIO_MODE_OPTIONS,
+    group: 'sensors',
+    appliesTo: S3R_ONLY,
+    configKey: 'audioMode',
+  },
+  {
+    key: 'soundLevel',
+    label: 'Sound Level',
+    desc:
+      'Byte 233 bit 4: the A-weighted sound level over the last 128 ms of microphone audio, ' +
+      'as channel 0x38 in the stream and the data file, in 0.01 dB(A). Nominal: from the ' +
+      "microphone's datasheet sensitivity, not checked against a calibrated meter. Independent " +
+      'of Audio Recording. Firmware without the channel reads back Off.',
+    kind: 'bit',
+    layoutKey: 'idxAudioMode',
+    shift: 4,
+    width: 1,
+    zeroWhenAnySet: AUDIO_MODE_BYTE.INVALID | AUDIO_MODE_BYTE.GAIN_MASK,
+    options: ON_OFF,
     group: 'sensors',
     appliesTo: S3R_ONLY,
     configKey: 'audioMode',

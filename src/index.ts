@@ -1038,7 +1038,8 @@ export type {
 } from './devices/events/index.js';
 
 // Shimmer3R audio recording (DEV-99): configuration byte 233, the recorder's
-// status, and the .WAV and .AFP files under audio/.
+// status, and the .WAV and .AFP files under audio/. The sound-level channel
+// (DEV-1413): byte 233 bit 4 and channel 0x38.
 export {
   AUDIO_MODE_BYTE,
   AUDIO_MODE,
@@ -1050,6 +1051,16 @@ export {
   recordsAudioFingerprint,
   recordsRawAudio,
   joinAudioMode,
+  splitAudioMode,
+  soundLevelEnabled,
+  soundLevelSupportedByReadback,
+  withSoundLevel,
+  SOUND_LEVEL_CHANNEL_ID,
+  SOUND_LEVEL_NAME,
+  SOUND_LEVEL_NO_LEVEL,
+  SOUND_LEVEL_COUNTS_PER_DB,
+  SOUND_LEVEL_UNIT,
+  soundLevelDbA,
   audioModeRecordsSpeech,
   encodeAudioMode,
   describeAudioMode,
