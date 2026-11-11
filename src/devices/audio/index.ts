@@ -16,12 +16,24 @@ export {
   recordsAudioFingerprint,
   recordsRawAudio,
   joinAudioMode,
+  splitAudioMode,
+  soundLevelEnabled,
+  soundLevelSupportedByReadback,
+  withSoundLevel,
   audioModeRecordsSpeech,
   encodeAudioMode,
   describeAudioMode,
   applyAudioModeRules,
 } from './mode.js';
 export type { AudioModeParts } from './mode.js';
+export {
+  SOUND_LEVEL_CHANNEL_ID,
+  SOUND_LEVEL_NAME,
+  SOUND_LEVEL_NO_LEVEL,
+  SOUND_LEVEL_COUNTS_PER_DB,
+  SOUND_LEVEL_UNIT,
+  soundLevelDbA,
+} from './soundLevel.js';
 export {
   AUDIO_OPCODES,
   AUDIO_STATUS_LENGTH,
