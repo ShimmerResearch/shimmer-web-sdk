@@ -23,6 +23,7 @@ import { NEED_MORE, RESYNC } from '../../core/framing.js';
 import { OPCODES } from './constants.js';
 import { EXG_BANK_LENGTH } from '../exg/registers.js';
 import { sdMessageSpan, SD_TRANSFER_OPCODES, SD_INSTREAM_BYTE } from './sdTransfer/protocol.js';
+import { EVENT_CHANNEL_STATUS_LENGTH, eventFrameLength } from '../events/record.js';
 
 /**
  * Offset of the `numChannels` byte within an opcode-prefixed
@@ -77,6 +78,8 @@ export const SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>
   [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
   [OPCODES.ALT_ACCEL_CALIBRATION_RESPONSE]: 21, // 0xAA
   [OPCODES.ALT_MAG_CALIBRATION_RESPONSE]: 21, // 0xB0
+  // 0xBA — the event channel's status, 9 bytes (`ShimEvt_buildStatus`)
+  [OPCODES.EVENT_CHANNEL_STATUS_RESPONSE]: EVENT_CHANNEL_STATUS_LENGTH,
 });
 
 /**
@@ -157,7 +160,8 @@ export function messageCarriesLinkCrc(msg: Uint8Array): boolean {
   const opcode = msg[0];
   if (CRC_EXEMPT_RESPONSE_OPCODES.has(opcode)) return false;
   if (opcode === SD_INSTREAM_BYTE) {
-    // Only the status push under this prefix is CRC'd; the SD frames are not.
+    // Only the status push under this prefix is CRC'd; the SD frames are not,
+    // and neither are the event channel's record frames, which carry their own.
     return msg.length >= 2 && msg[1] === OPCODES.STATUS_RESPONSE;
   }
   return true;
@@ -299,6 +303,10 @@ export function shimmer3rControlMessageLength(
     if (buf[1] === OPCODES.VBATT_RESPONSE) {
       // [0x8A][0x94][BattStatusRaw x3] — `Comms/shimmer_bt_uart.c:1848-1859`.
       return buf.length < 5 ? NEED_MORE : 5;
+    }
+    if (buf[1] === OPCODES.EVENT_RECORD_RESPONSE) {
+      // [0x8A][0xBB][len][record][CRC-16], taken only when its own CRC checks out.
+      return eventFrameLength(buf, 0);
     }
     return sdMessageSpan(buf);
   }

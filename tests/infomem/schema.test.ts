@@ -41,6 +41,10 @@ import {
   type Shimmer3SensorOption,
 } from '../../src/devices/shimmer3/sensorOptions.js';
 import { CTX, fullFieldInfoMem } from './fixtures.js';
+import {
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+} from '../../src/devices/events/buttonLogMode.js';
 
 const field = (key: string): InfoMemFieldDefinition => {
   const f = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((d) => d.key === key);
@@ -54,16 +58,19 @@ describe('SHIMMER3_INFOMEM_FIELD_SCHEMA — structural invariants', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it('every field names a group that exists', () => {
-    const ids = new Set(SHIMMER3_INFOMEM_FIELD_GROUPS.map((g) => g.id));
+  it('every field names a group or subgroup that exists', () => {
+    const ids = new Set(
+      SHIMMER3_INFOMEM_FIELD_GROUPS.flatMap((g) => [g.id, ...(g.subgroups ?? []).map((s) => s.id)]),
+    );
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       expect(ids.has(f.group), `${f.key} → ${f.group}`).toBe(true);
     }
   });
 
   it('every field resolves to a real byte index in both contexts', () => {
-    for (const ctx of [CTX.modernShimmer3, CTX.shimmer3R]) {
-      const layout = resolveInfoMemLayout(ctx);
+    // With the event channel, so byte 232 is in the layout too.
+    for (const base of [CTX.modernShimmer3, CTX.shimmer3R]) {
+      const layout = resolveInfoMemLayout({ ...base, eventChannel: true });
       for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
         const idx = resolveFieldIndex(f, layout);
         expect(Number.isInteger(idx), f.key).toBe(true);
@@ -170,7 +177,12 @@ describe('option tables come from devices/shimmer3/sensorOptions.ts', () => {
   }
 
   it('every option-bearing field is either a shared table or the local ON_OFF pair', () => {
-    const shared = new Set<unknown>(EXPECTED.map(([, table]) => table));
+    // Byte 232's two tables are the event channel module's own, not Java's.
+    const shared = new Set<unknown>([
+      ...EXPECTED.map(([, table]) => table),
+      BUTTON_MODE_OPTIONS,
+      LOG_TRIGGER_OPTIONS,
+    ]);
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       if (!f.options) continue;
       if (shared.has(f.options)) continue;
@@ -519,7 +531,7 @@ describe('every schema field writes ONLY into its own declared bytes', () => {
   }
 
   for (const ctx of [CTX.modernShimmer3, CTX.shimmer3R] as const) {
-    const layout = resolveInfoMemLayout(ctx);
+    const layout = resolveInfoMemLayout({ ...ctx, eventChannel: true });
     const generation: Shimmer3Generation = layout.isShimmer3R ? 'shimmer3r' : 'shimmer3-old-imu';
 
     it(`${generation}: no field touches a byte it does not declare, and the value reads back`, () => {

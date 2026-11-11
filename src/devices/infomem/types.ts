@@ -27,6 +27,12 @@ export interface InfoMemContext {
   firmwareId: number;
   /** Firmware version triplet. */
   firmwareVersion: { major: number; minor: number; internal: number };
+  /**
+   * Whether the firmware has the event channel and configuration byte 232
+   * (DEV-971), as the device itself answered: `Shimmer3RClient.supportsEventChannel`.
+   * Absent or false leaves byte 232 out of the layout and the field schema.
+   */
+  eventChannel?: boolean;
 }
 
 /**
@@ -251,6 +257,18 @@ export interface InfoMemDeviceConfig {
     /** Bluetooth disabled while logging (ExperimentConfig0 bit 3). */
     disableBluetooth: boolean;
   };
+  /**
+   * Configuration byte 232 as stored: the button mode, log triggers and TTL
+   * input of LogAndStream firmware with the event channel (DEV-971).
+   *
+   * Kept raw, so a config read and written back unedited leaves it exactly as it
+   * was. Read it through `decodeButtonLogMode` or `describeButtonLogMode`, which
+   * apply the firmware's own rules: 0xFF, what older firmware leaves there, and
+   * any other value the firmware cannot act on read as 0, "as before". Write it
+   * with `encodeButtonLogMode`. 0 unless {@link InfoMemContext.eventChannel}
+   * says the firmware has the byte.
+   */
+  buttonLogMode: number;
   /** Bluetooth baud-rate index byte. */
   btBaudRate: number;
   /**

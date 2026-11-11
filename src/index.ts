@@ -404,6 +404,9 @@ export {
   // Shimmer3Client.getStatus and getBattery apply.
   shimmer3SupportsStatusRequest,
   shimmer3SupportsBatteryRequest,
+  // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
+  // commands. Both clients apply it.
+  shimmer3SupportsSetFeature,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
@@ -557,6 +560,7 @@ export type {
 export {
   parseInfoMem,
   generateInfoMem,
+  applyTcxoRule,
   deviceWriteDivergentRanges,
   compareInfoMemExcluding,
   resolveInfoMemLayout,
@@ -941,6 +945,11 @@ export {
   decodeSdSession,
   parseSdSessionName,
   parseSdTrialFolderName,
+  SD_DATA_ROOT,
+  SD_COMPANION_KINDS,
+  sdCompanionKindOf,
+  sdCompanionPathFor,
+  sdDataPathForCompanion,
   isNewImuSensors,
 } from './devices/sdlog/index.js';
 export type {
@@ -957,7 +966,73 @@ export type {
   SdLogChannelSpec,
   SdLogDecodeOptions,
   SdLogDecodeResult,
+  SdCompanionKind,
 } from './devices/sdlog/index.js';
+
+// Event channel (DEV-971): configuration byte 232, and the button/TTL records
+// from an event file or the Bluetooth stream.
+export {
+  BUTTON_LOG_MODE,
+  BUTTON_MODE,
+  LOG_TRIGGERS,
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+  correctButtonLogMode,
+  buttonModeOf,
+  logTriggersOf,
+  isTtlInputEnabled,
+  recordsButtonPresses,
+  isDoublePress,
+  isLoggingDisabled,
+  isButtonDisabled,
+  doesPressToggleLogging,
+  doesUndockStartLogging,
+  nearestUserButtonEnable,
+  allowsSingleTouch,
+  withoutPressRecording,
+  BUTTON_LOGGING,
+  BUTTON_LOGGING_OPTIONS,
+  splitButtonMode,
+  canRecordPressesWith,
+  joinButtonMode,
+  withPressRecording,
+  decodeButtonLogMode,
+  encodeButtonLogMode,
+  describeButtonLogMode,
+  eventChannelBoardSupport,
+  applyButtonLogModeRules,
+  EVENT_TICKS_PER_SECOND,
+  EVENT_FILE,
+  EVENT_RECORD_TYPE,
+  EVENT_RECORD_FLAG,
+  EVENT_CHANNEL,
+  EVENT_INPUT,
+  EVENT_FILE_OPEN_REASON,
+  EVENT_CHANNEL_OPCODES,
+  EVENT_FRAME_LENGTH,
+  EVENT_CHANNEL_STATUS_LENGTH,
+  EventFileFormatError,
+  parseEventRecord,
+  describeEventRecord,
+  parseEventFile,
+  eventTicksToUnixMs,
+  eventFrameLength,
+  parseEventFrame,
+  parseEventChannelStatus,
+} from './devices/events/index.js';
+export type {
+  ButtonMode,
+  LogTriggers,
+  ButtonLogModeSettings,
+  ButtonLogging,
+  ButtonModeParts,
+  ButtonLogModeBehaviour,
+  EventChannelBoardSupport,
+  EventRecord,
+  EventFileHeader,
+  EventFile,
+  EventChannelStatus,
+} from './devices/events/index.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';

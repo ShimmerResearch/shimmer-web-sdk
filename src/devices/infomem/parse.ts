@@ -242,6 +242,7 @@ function emptyConfig(raw: Uint8Array): InfoMemDeviceConfig {
       tcxo: false,
       disableBluetooth: false,
     },
+    buttonLogMode: 0,
     btBaudRate: 0,
     macAddress: '',
     exg1: new Uint8Array(EXG_BANK_LENGTH),
@@ -338,6 +339,8 @@ export function parseInfoMem(bytes: Uint8Array, ctx: InfoMemContext): InfoMemDev
   const numShimmers = layout.supportsSdLogSync ? raw[layout.idxSDNumOfShimmers] & 0xff : 0;
 
   const macAddress = macToHex(raw, layout.idxMacAddress);
+  const buttonLogMode =
+    layout.idxButtonLogMode !== undefined ? raw[layout.idxButtonLogMode] & 0xff : 0;
 
   return {
     samplingRateHz,
@@ -358,6 +361,7 @@ export function parseInfoMem(bytes: Uint8Array, ctx: InfoMemContext): InfoMemDev
       tcxo,
       disableBluetooth,
     },
+    buttonLogMode,
     btBaudRate,
     macAddress,
     exg1,
