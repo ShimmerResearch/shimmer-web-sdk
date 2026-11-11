@@ -227,9 +227,10 @@ export interface InfoMemLayout {
    * (DEV-971). See `devices/events/buttonLogMode.ts`.
    *
    * Undefined unless {@link InfoMemContext.eventChannel} says the firmware has
-   * it. No release has it yet, and the builds that do report the same version
-   * as the release before them, so there is no version to gate on; a host asks
-   * the device instead (`Shimmer3RClient.supportsEventChannel`). Older firmware
+   * it. LogAndStream_Shimmer3R v1.01.026 is the first Shimmer3R release with
+   * it, and no Shimmer3 release has it yet. The development builds before a
+   * release report the version of the release before them, so a host asks the
+   * device (`Shimmer3RClient.supportsEventChannel`). Older firmware
    * never writes the byte and leaves it at 0xFF, which reads as "as before".
    */
   idxButtonLogMode?: number;
@@ -237,11 +238,11 @@ export interface InfoMemLayout {
    * Configuration byte 233 (`NV_AUDIO_MODE`): what a Shimmer3R records from
    * its microphone while it logs to SD (DEV-99). See `devices/audio/mode.ts`.
    *
-   * Undefined unless {@link InfoMemContext.audio} says the firmware has it. No
-   * release has it yet, and the builds that do report the release before them,
-   * so there is no version to gate on; a host asks the device instead
-   * (`Shimmer3RClient.supportsAudio`). Older firmware leaves the byte at 0xFF,
-   * which reads as off.
+   * Undefined unless {@link InfoMemContext.audio} says the firmware has it, as
+   * `Shimmer3RClient.supportsAudio` answers: from LogAndStream_Shimmer3R
+   * v1.01.026, the first release with it, by the version alone; on v1.01.025,
+   * which the development builds before it report, by asking the device.
+   * Older firmware leaves the byte at 0xFF, which reads as off.
    */
   idxAudioMode?: number;
   idxBtFactoryReset: number;
