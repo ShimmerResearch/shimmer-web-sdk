@@ -169,6 +169,17 @@ export interface SdLogHeader {
    */
   buttonLogMode: number | null;
   /**
+   * Header byte 226 (`SDH_AUDIO_MODE`, DEV-99): configuration byte 233 as the
+   * firmware acted on it for this file - what the microphone recorded into
+   * `audio/` beside it - raw. Firmware before the field leaves 0xFF, which
+   * `audioModeOf` reads as off by the byte's own rule. Null for a Shimmer3,
+   * which has no microphone, and for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  audioMode: number | null;
+  /**
    * Human-readable notes on anything the decoder had to work around or could
    * not confirm in this header. Empty when there is nothing to report.
    */

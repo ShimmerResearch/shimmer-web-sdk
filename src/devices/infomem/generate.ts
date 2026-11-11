@@ -229,6 +229,10 @@ function writeModelledFields(
   if (layout.idxButtonLogMode !== undefined && typeof config.buttonLogMode === 'number') {
     out[layout.idxButtonLogMode] = config.buttonLogMode & 0xff;
   }
+  // Byte 233 the same way (DEV-99).
+  if (layout.idxAudioMode !== undefined && typeof config.audioMode === 'number') {
+    out[layout.idxAudioMode] = config.audioMode & 0xff;
+  }
 
   writeImu(out, config, layout);
   writeSd(out, config, layout);

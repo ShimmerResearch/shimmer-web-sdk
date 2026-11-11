@@ -81,6 +81,19 @@ describe('companion files', () => {
     expect(Object.isFrozen(SD_COMPANION_KINDS[0].extensions)).toBe(true);
   });
 
+  it('lists the audio files as the second kind, a WAV and a fingerprint per data file (DEV-99)', () => {
+    const audio = SD_COMPANION_KINDS[1];
+    expect(audio).toEqual({ root: 'audio', label: 'audio file', extensions: ['.WAV', '.AFP'] });
+    expect(Object.isFrozen(audio.extensions)).toBe(true);
+    expect(sdCompanionPathFor('data/T_1/S-000/001', audio, '.WAV')).toBe('audio/T_1/S-000/001.WAV');
+    expect(sdCompanionPathFor('data/T_1/S-000/001', audio, '.afp')).toBe('audio/T_1/S-000/001.AFP');
+    expect(sdCompanionPathFor('data/T_1/S-000', audio)).toBe('audio/T_1/S-000');
+    expect(sdDataPathForCompanion('audio/T_1/S-000/001.WAV')).toBe('data/T_1/S-000/001');
+    expect(sdDataPathForCompanion('AUDIO/T_1/S-000/001.afp')).toBe('data/T_1/S-000/001');
+    expect(sdCompanionKindOf('audio/T_1/S-000/001.AFP')).toBe(audio);
+    expect(sdCompanionKindOf('audiox/T_1')).toBeNull();
+  });
+
   it('maps a data folder or file to its companion, and the data root to the companion root', () => {
     expect(sdCompanionPathFor('data/Trial_5f2c1a90/Shimmer_8091-000', events)).toBe(
       'events/Trial_5f2c1a90/Shimmer_8091-000',

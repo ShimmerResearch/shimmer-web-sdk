@@ -31,6 +31,7 @@ import {
   BUTTON_MODE_OPTIONS,
   LOG_TRIGGER_OPTIONS,
 } from '../events/buttonLogMode.js';
+import { AUDIO_MODE_BYTE, AUDIO_MODE_OPTIONS } from '../audio/mode.js';
 import {
   SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
   SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
@@ -744,6 +745,34 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     configKey: 'buttonLogMode',
   },
 
+  // ---- Audio recording: configuration byte 233 (DEV-99). Shimmer3R only, and
+  // present only where the firmware has the byte, which the layout decides
+  // (`idxAudioMode`). Bit 7 set - erased memory, or older firmware - or a
+  // reserved gain preset makes the whole byte read as 0, off. In Sensor
+  // Enables, with what is recorded, where the microphone is looked for: it is
+  // never sampled into the stream or the data file, but recorded beside it
+  // while logging, as the event markers are. The four modes are every
+  // combination of the fingerprint and raw audio, so a host can offer them as
+  // two enables (`joinAudioMode`).
+  {
+    key: 'audioMode',
+    label: 'Audio Recording',
+    desc:
+      'Byte 233 bits 0-1 (NV_AUDIO_MODE): what the microphone records while logging to SD, ' +
+      'into audio/ beside each data file. Modes 2 and 3 store raw audio, which records ' +
+      'speech: confirm with the user first, and tell everyone near the device. A mode the ' +
+      'firmware does not build reads back as Off.',
+    kind: 'bit',
+    layoutKey: 'idxAudioMode',
+    shift: 0,
+    width: 2,
+    zeroWhenAnySet: AUDIO_MODE_BYTE.INVALID | AUDIO_MODE_BYTE.GAIN_MASK,
+    options: AUDIO_MODE_OPTIONS,
+    group: 'sensors',
+    appliesTo: S3R_ONLY,
+    configKey: 'audioMode',
+  },
+
   // ---- Trial / experiment identity
   {
     key: 'deviceName',
@@ -1126,17 +1155,20 @@ export function writeInfoMemFieldValue(
 /**
  * Layout keys a layout may leave undefined, because the byte exists only on
  * firmware the device has said it runs: configuration byte 232, which
- * `InfoMemContext.eventChannel` brings in.
+ * `InfoMemContext.eventChannel` brings in, and byte 233, which
+ * `InfoMemContext.audio` does.
  */
 const CONDITIONAL_LAYOUT_KEYS: ReadonlySet<keyof InfoMemLayout> = new Set<keyof InfoMemLayout>([
   'idxButtonLogMode',
+  'idxAudioMode',
 ]);
 
 /**
  * The schema fields that apply to a given part generation, in schema order.
  *
  * Pass the device's resolved layout to get exactly the fields it has bytes
- * for, byte 232's three included when its firmware has them. Without one,
+ * for, byte 232's three and byte 233's one included when its firmware has
+ * them. Without one,
  * fields on a byte only some firmware has are left out, so a caller that reads
  * every field it is given never meets an offset the layout does not define.
  */

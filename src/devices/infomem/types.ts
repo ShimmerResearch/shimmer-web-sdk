@@ -33,6 +33,13 @@ export interface InfoMemContext {
    * Absent or false leaves byte 232 out of the layout and the field schema.
    */
   eventChannel?: boolean;
+  /**
+   * Whether the firmware has audio recording and configuration byte 233
+   * (DEV-99), as the device itself answered: `Shimmer3RClient.supportsAudio`.
+   * Absent or false leaves byte 233 out of the layout and the field schema.
+   * Only a Shimmer3R has a microphone; its field is Shimmer3R-only.
+   */
+  audio?: boolean;
 }
 
 /**
@@ -269,6 +276,19 @@ export interface InfoMemDeviceConfig {
    * says the firmware has the byte.
    */
   buttonLogMode: number;
+  /**
+   * Configuration byte 233 as stored: what a Shimmer3R records from its
+   * microphone while it logs to SD (DEV-99).
+   *
+   * Kept raw, so a config read and written back unedited leaves it exactly as
+   * it was. Read it through `audioModeOf`, which applies the firmware's own
+   * rule: 0xFF, what older firmware leaves there, and any other value the
+   * firmware cannot act on read as 0, off. Write it with `encodeAudioMode`,
+   * and ask the user first for a mode that records speech
+   * (`audioModeRecordsSpeech`). 0 unless {@link InfoMemContext.audio} says the
+   * firmware has the byte.
+   */
+  audioMode: number;
   /** Bluetooth baud-rate index byte. */
   btBaudRate: number;
   /**
