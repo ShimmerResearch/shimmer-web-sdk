@@ -23,8 +23,12 @@
  * It is sampled while streaming, logging, or both, whenever configuration
  * byte 233 bit 4 is set ({@link soundLevelEnabled}). A Shimmer3 never sends it.
  *
- * HARDWARE-VERIFY: written from the firmware specification; no packet or file
- * from a unit with the channel has been decoded yet.
+ * HARDWARE-VERIFY: written from the firmware specification. Decoding has since
+ * been checked against a unit's bytes: two streams (122,482 packets) and an SD
+ * data file (30,719 records) captured from a Shimmer3R on the channel's
+ * firmware build, replayed here, give the level the firmware's own test rig
+ * decoded on every one, no level included. Turning the channel on over a live
+ * link, and the readback check in mode.ts, have not run against a unit.
  */
 
 import { CHANNEL_UNITS } from '../../core/units.js';
