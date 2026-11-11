@@ -140,7 +140,10 @@ export function soundLevelEnabled(raw: number): boolean {
  *
  * The firmware corrects the byte when it takes a configuration, so compare
  * with what the device reads back (`readInfoMemConfig`), not with the image
- * that was written.
+ * that was written. Only firmware that has byte 233 corrects it: firmware
+ * from before audio recording stores it as written, so there the bit reads
+ * back set with no channel behind it. Ask only where `supportsAudio()` said
+ * yes, which is where the layout has the byte (`InfoMemContext.audio`).
  */
 export function soundLevelSupportedByReadback(written: number, readBack: number): boolean | null {
   if (!soundLevelEnabled(written)) return null;
