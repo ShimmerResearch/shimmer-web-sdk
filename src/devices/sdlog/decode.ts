@@ -36,6 +36,7 @@ import {
 import { calibrateGsrSample } from '../calibration/gsr.js';
 import { buildSdLogCalibPlan, applyCalibPlan, refreshGyroOnTheFlyInfo } from './calibrate.js';
 import { compensateBmp581 } from '../pressure/bmp581.js';
+import { SOUND_LEVEL_NAME, soundLevelDbA } from '../audio/soundLevel.js';
 import { StreamTimeline } from '../../core/StreamTimeline.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
@@ -189,11 +190,14 @@ function decodeRecordsFromFile(
     for (let c = 0; c < channels.length; c++) {
       const spec = channels[c];
       const raw = decodeSdLogValue(bytes, p, spec.dataType);
-      // GSR is calibrated inline (amplifier equation). Inertial channels are
-      // marked calibrated by the plan but keep their raw value here and are
+      // GSR is calibrated inline (amplifier equation), and so is the sound
+      // level (0.01 dB(A), NaN for no level). Inertial channels are marked
+      // calibrated by the plan but keep their raw value here and are
       // calibrated together (per triple) by applyCalibPlan below, and the
       // BMP581 pair likewise by applyBmp581.
-      values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
+      if (spec.calibrated && spec.name === 'GSR') values[c] = calibrateGsr(raw, header.gsrRange);
+      else if (spec.calibrated && spec.name === SOUND_LEVEL_NAME) values[c] = soundLevelDbA(raw);
+      else values[c] = raw;
       p += spec.sizeBytes;
     }
     if (calibPlan.entries.length) {

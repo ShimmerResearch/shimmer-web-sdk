@@ -47,6 +47,8 @@ export {
 } from './generate.js';
 export type { GenerateInfoMemOptions, DeviceWriteDivergentRanges } from './generate.js';
 
+export { applyTcxoRule } from './tcxo.js';
+
 export {
   SHIMMER3_INFOMEM_FIELD_SCHEMA,
   SHIMMER3_INFOMEM_FIELD_GROUPS,

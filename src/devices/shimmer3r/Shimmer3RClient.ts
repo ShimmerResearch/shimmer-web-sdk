@@ -89,6 +89,9 @@ import {
 } from './factoryTest.js';
 import {
   parseShimmer3DeviceVersionResponse,
+  shimmer3SupportsSetFeature,
+  shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
 import { HW_ID } from '../infomem/layout.js';
@@ -106,6 +109,15 @@ import {
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
 import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { NEED_MORE, RESYNC, drainByteStream } from '../../core/framing.js';
+import {
+  EVENT_CHANNEL_STATUS_LENGTH,
+  eventFrameLength,
+  parseEventChannelStatus,
+  parseEventFrame,
+  type EventChannelStatus,
+  type EventRecord,
+} from '../events/record.js';
+import { AUDIO_STATUS_LENGTH, parseAudioStatus, type AudioStatus } from '../audio/status.js';
 import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
@@ -284,6 +296,18 @@ const DATA_RATE_STOP_ACK_QUIET_MS = 50;
  */
 const DATA_RATE_TAIL_BYTES = 24;
 
+/**
+ * How long the link must stay quiet after a stop before the stream plane
+ * hands it back to commands ({@link Shimmer3RClient} `_drainStreamTail`), and
+ * the longest the drain waits for that. The same values as the Shimmer3
+ * client's stop drain. On a bench Shimmer3R the last packet, the stop's ACK and
+ * the status push that closes a log all arrived within 200 ms of the stop, over
+ * classic Bluetooth and BLE.
+ */
+const STOP_DRAIN_QUIET_MS = 300;
+const STOP_DRAIN_MAX_MS = 3000;
+const STOP_DRAIN_POLL_MS = 50;
+
 // ---------------------------------------------------------------------------
 // Stray-ACK tolerance
 // ---------------------------------------------------------------------------
@@ -320,6 +344,35 @@ function withoutLeadingAck(msg: Uint8Array): Uint8Array {
   return msg.length > 1 && msg[0] === OPCODES.ACK_COMMAND_PROCESSED ? msg.subarray(1) : msg;
 }
 
+/**
+ * The sensor refused to start an SD log: it NACKed START_LOGGING_COMMAND (0x92)
+ * or START_SDBT_COMMAND (0x70).
+ *
+ * The firmware starts a log only when the sensor is undocked, off USB power,
+ * has a card with no file error and has logging on in configuration byte 232
+ * (`ShimSens_checkStartLoggingConditions`). Firmware released so far ACKs a
+ * start it cannot carry out and does nothing (START_SDBT then streams alone),
+ * so there this error never comes and the status bits are what tell. Firmware
+ * that NACKs such a start starts nothing, not even the stream.
+ */
+export class LogStartRefusedError extends Error {
+  constructor(readonly command: 'START_LOGGING' | 'START_SDBT') {
+    super(
+      `The sensor refused to start an SD log (${command} NACKed). It logs only when undocked, ` +
+        'off USB power, with an SD card and no SD file error, and with logging turned on in its ' +
+        'configuration.',
+    );
+    this.name = 'LogStartRefusedError';
+  }
+}
+
+/** A NACK of a log start as {@link LogStartRefusedError}; anything else as it was. */
+function asLogStartRefusal(e: unknown, command: LogStartRefusedError['command']): unknown {
+  return e instanceof Error && e.message === 'NACK received'
+    ? new LogStartRefusedError(command)
+    : e;
+}
+
 /** True for an ACK (0xFF) or a NACK (0xFE): every reply to a command starts with one. */
 function isAckOrNack(b: number | undefined): boolean {
   return b === OPCODES.ACK_COMMAND_PROCESSED || b === OPCODES.NACK_COMMAND_PROCESSED;
@@ -329,6 +382,13 @@ function isAckOrNack(b: number | undefined): boolean {
 function firmwareTag(major: number, minor: number, internal: number): string {
   return `v${major}.${String(minor).padStart(2, '0')}.${String(internal).padStart(3, '0')}`;
 }
+
+/**
+ * How long {@link Shimmer3RClient.supportsAudio} waits for the audio status
+ * probe's ACK. Firmware with audio answers at once; firmware without it never
+ * does, so this is what the probe costs there, once per link.
+ */
+const AUDIO_PROBE_TIMEOUT_MS = 1000;
 
 /** {@link Shimmer3RClient.setCrcMode}'s refusal while a stream is running. */
 const CRC_CHANGE_MID_STREAM =
@@ -539,8 +599,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _desiredCrcMode: CrcMode = CRC_MODE.OFF;
   /** True while the active transport is a byte stream with no message framing. */
   private _unframed = false;
-  /** Re-framing accumulator, used only when {@link _unframed}. */
+  /**
+   * True once this link has asked for event record frames
+   * ({@link setEventStream}), and from then on until the link ends: a frame
+   * queued before an opt-out still arrives after it. While set, inbound bytes
+   * are re-framed even over BLE with no CRC ({@link _reframing}).
+   */
+  private _eventFramesPossible = false;
+  /** Re-framing accumulator, used only while {@link _reframing}. */
   private _ctrlBuf: Uint8Array = new Uint8Array(0);
+  /** Bumped once per inbound chunk, for {@link _drainStreamTail}'s quiet test. */
+  private _rxSeq = 0;
+  /** A stop's drain of the stream tail, while one runs; commands wait for it. */
+  private _streamTailDrain: Promise<void> | null = null;
+  /**
+   * Set only for the last parse of a drained stream tail. The link has gone
+   * quiet, so a reply that ends the buffer ends the transmission, which is as
+   * good as the next packet's preamble for telling where it stops.
+   */
+  private _streamTailQuiet = false;
   /**
    * How many bytes a STATUS_RESPONSE payload carries: 2 on a Shimmer3R running
    * LogAndStream v1.00.024 or later, 1 on anything else
@@ -553,6 +630,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * a status from the byte after it instead of assuming a width.
    */
   private _statusPayloadBytes: 1 | 2 | null = null;
+  /**
+   * What {@link supportsAudio} learnt on this link: `null` until it has asked.
+   * Cleared with the version caches at connect, since a reconnect may reach a
+   * different sensor.
+   */
+  private _audioSupport: boolean | null = null;
   /**
    * The version reads {@link getStatus} has in flight to learn
    * {@link _statusPayloadBytes}, shared so that status reads made together
@@ -741,12 +824,32 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * {@link getStatus}, which reads them itself. Until both are known a
    * one-byte push is reported as it is, because it may be complete.
    *
-   * **Only fires while idle.** Once streaming, every inbound byte belongs to the
-   * data plane and goes to the schema parser, which has no way to tell a status
-   * push from sample bytes and will consume it. Do not rely on this callback to
-   * notice that a recording stopped mid-stream; poll {@link getStatus} instead.
+   * **While streaming too.** The firmware queues a push between two packets, and
+   * the stream parser takes it there once it knows the status length (the
+   * versions are read at connect): with a link CRC it is checked by the CRC,
+   * without one by the packet that follows it. So a host sees SD logging,
+   * docking and the audio bits change during a stream as it does when idle. A
+   * push that lands while the parser is still finding the packet boundary, at
+   * the start of a stream, can still be lost.
    */
   onDeviceStatus: ((status: Shimmer3DeviceStatus) => void) | null = null;
+
+  /**
+   * Invoked for each event channel record the device streams: a button press
+   * or release, a TTL edge, lost edges, and first the inputs' state at the
+   * opt-in (DEV-971; log-and-stream-common
+   * `docs/SHIMMER3_BT_COMMUNICATION_PROTOCOL.md` §7.15).
+   *
+   * Nothing arrives until {@link setEventStream} opts this connection in. Each
+   * frame carries its own CRC and is delivered only once it checks out, whether
+   * it arrives idle or between stream data packets. Frames can arrive after
+   * packets sampled later than their edge, so order by `ticks`, whose low 24
+   * bits line up with a packet's timestamp.
+   *
+   * HARDWARE-VERIFY: built from the firmware source and its doc's example
+   * frame; no device has streamed a record to this client yet.
+   */
+  onEventRecord: ((record: EventRecord) => void) | null = null;
 
   /**
    * Invoked whenever {@link factoryTestState} changes, synchronously. A host uses
@@ -860,6 +963,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._resetInquiredConfig();
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
+    this._audioSupport = null;
     this._statusPayloadBytes = null;
     this._statusWidthReads = null;
     /* `device` describes the far end exactly as the version caches do, so it
@@ -1020,6 +1124,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _resetLinkProtocolState(): void {
     this._rxBuf = new Uint8Array(0);
     this._ctrlBuf = new Uint8Array(0);
+    // The firmware clears the opt-in on every connect and disconnect
+    this._eventFramesPossible = false;
     this._streaming = false;
     this._streamAligned = false;
     this._streamAlignRejects = 0;
@@ -1136,12 +1242,19 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * would fail every long response. The framer already sizes each message from
    * its opcode and length, and already accumulates across reads, so a CRC just
    * turns on a path that splits correctly.
+   *
+   * **And true once the link has opted in to event records.** A record frame is
+   * 21 bytes sent whenever an input changes, with no regard for the replies
+   * around it, so a notification can cut one in two or carry it behind a reply
+   * or in front of an ACK. Read a notification at a time, the first loses the
+   * record and the others the reply or the ACK a command is waiting for.
    */
   private get _reframing(): boolean {
-    return this._unframed || this._crcMode !== CRC_MODE.OFF;
+    return this._unframed || this._crcMode !== CRC_MODE.OFF || this._eventFramesPossible;
   }
 
   private _handleNotify = (chunk: Uint8Array): void => {
+    this._rxSeq++;
     let bytes = chunk;
     if (this._dataRateTestActive && bytes.length > 0) {
       this._dataRateTestLastRxAt = Date.now();
@@ -1226,7 +1339,36 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._log('ACK detected at start of notify (expected)');
       this._expectingAck = Math.max(0, this._expectingAck - 1);
 
-      const remainder = chunk.slice(1);
+      let remainder = chunk.slice(1);
+      /* An event record frame is never a command's reply, but on a byte stream
+         it can be framed onto the ACK a command is waiting for - the opt-in's
+         own ACK and the first record, say. Deliver it, rather than let the
+         command take it as its response and drop it. */
+      if (
+        remainder.length >= 2 &&
+        remainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        remainder[1] === OPCODES.EVENT_RECORD_RESPONSE
+      ) {
+        this._maybeEmitEventRecords(remainder);
+        remainder = new Uint8Array(0);
+      }
+      /* Nor is a status push, unless a status read is waiting for one. Without
+         a CRC, BLE delivers the firmware's `[ACK][0x8A][0x71][status]` push as
+         this shape, and it cannot be told from a command's ACK with a push
+         behind it, so the ACK is taken as the command's. The status still has
+         to reach onDeviceStatus, rather than be handed to a command that does
+         not read it. */
+      if (
+        remainder.length >= 2 &&
+        remainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        remainder[1] === OPCODES.STATUS_RESPONSE &&
+        this._statusReadsInFlight === 0 &&
+        // Test traffic is never a status push, whatever its first bytes (below).
+        !this._dataRateTestActive
+      ) {
+        this._maybeEmitDeviceStatus(remainder);
+        remainder = new Uint8Array(0);
+      }
       this._lastAckRemainder = remainder.length ? remainder : null;
 
       this._emitTemp(new Uint8Array([OPCODES.ACK_COMMAND_PROCESSED]));
@@ -1250,6 +1392,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return;
     }
 
+    /* 1b) A lone NACK while a command waits for its answer, even with the
+     *     stream plane open. A framed start opens the plane before it writes
+     *     the command (_beginStreamPlane), so a NACKed START_SDBT would
+     *     otherwise go to the stream buffer and the start would time out
+     *     instead of saying it was refused. The count is the waiter's to take
+     *     back, as for any NACK (_writeExpectingAck). */
+    if (
+      this._streaming &&
+      chunk.length === 1 &&
+      chunk[0] === OPCODES.NACK_COMMAND_PROCESSED &&
+      (this._expectingAck ?? 0) > 0
+    ) {
+      this._emitTemp(chunk);
+      return;
+    }
+
     // 2) During streaming, all bytes are data-plane, bar the bare ACKs and NACKs
     //    the stream parser finds between packets
     if (this._streaming) {
@@ -1257,6 +1415,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } else {
       this._emitTemp(chunk);
       this._maybeEmitDeviceStatus(chunk);
+      this._maybeEmitEventRecords(chunk);
       if (chunk.length && chunk[0] === OPCODES.DATA_PACKET) {
         this._rxBuf = concatU8(this._rxBuf, chunk);
       }
@@ -1346,6 +1505,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
+    }
+  }
+
+  /**
+   * Deliver the event record frames a control-plane chunk carries on
+   * {@link onEventRecord}. A notification can hold several back to back - the
+   * firmware sends up to eight a pass - and a stray ACK may sit in front.
+   */
+  private _maybeEmitEventRecords(chunk: Uint8Array): void {
+    let msg = withoutLeadingAck(chunk);
+    if (msg.length < 2 || msg[0] !== OPCODES.INSTREAM_CMD_RESPONSE) return;
+    if (msg[1] !== OPCODES.EVENT_RECORD_RESPONSE) return;
+    while (msg.length > 0) {
+      const n = eventFrameLength(msg, 0);
+      if (n <= 0) {
+        this._log('Event frame failed its CRC or was cut short; dropped', msg.length, 'byte(s)');
+        return;
+      }
+      this._emitEventRecord(msg.subarray(0, n));
+      msg = msg.subarray(n);
+    }
+  }
+
+  /** Decode one whole, CRC-checked event frame and hand it to {@link onEventRecord}. */
+  private _emitEventRecord(frame: Uint8Array): void {
+    const rec = parseEventFrame(frame);
+    if (!rec || !this.onEventRecord) return;
+    try {
+      this.onEventRecord(rec);
+    } catch (e) {
+      this._log('onEventRecord handler error', e);
     }
   }
 
@@ -2184,17 +2374,234 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * active SD recording, and clears the request either way - it is strictly
    * one-shot and never carries into a later disconnect.
    *
-   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; older
-   * firmware NACKs the unknown feature id.
+   * Requires firmware with FEATURE_REBOOT_ON_DISCONNECT support; firmware
+   * with SET_FEATURE but not this feature NACKs it. Firmware older than
+   * SET_FEATURE itself (`shimmer3SupportsSetFeature`) is not sent it, and
+   * this throws: there the bytes would run as commands and be ACKed.
    */
   async setRebootOnDisconnect(enabled: boolean): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!(await this._hasSetFeature())) {
+      throw new Error(
+        'Reboot-on-disconnect needs SET_FEATURE (LogAndStream_Shimmer3R v1.00.052 or later)',
+      );
+    }
     this._emitStatus(`SET_FEATURE reboot-on-disconnect=${enabled ? 1 : 0} → waiting for ACK…`);
     await this._writeExpectingAck(
       new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.REBOOT_ON_DISCONNECT, enabled ? 1 : 0]),
       1500,
     );
     this._emitStatus(`Reboot-on-disconnect ${enabled ? 'armed' : 'cleared'}`);
+  }
+
+  /**
+   * Opt this connection in to (or out of) the event channel's records
+   * (SET_FEATURE / FEATURE_EVENT_STREAM, DEV-971). Once in, every button and
+   * TTL record arrives on {@link onEventRecord}, starting with the inputs'
+   * state at the opt-in, whether or not the device is streaming or logging.
+   *
+   * It lasts for this connection only: the firmware clears it on connect and
+   * on disconnect, so call it again after every reconnection. It enables no
+   * input - configuration byte 232 decides which are recorded - but it does
+   * arm an enabled TTL input outside a logging session.
+   *
+   * @returns false when the firmware NACKs feature 3, which is how firmware
+   *   without the event channel answers, or is older than SET_FEATURE itself
+   *   and so is not asked (`_hasSetFeature`); true once it is ACKed
+   */
+  async setEventStream(enabled: boolean): Promise<boolean> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (!(await this._hasSetFeature())) {
+      this._emitStatus('Event stream not supported by this firmware (older than SET_FEATURE)');
+      return false;
+    }
+    this._emitStatus(`SET_FEATURE event-stream=${enabled ? 1 : 0} → waiting for ACK…`);
+    /* Before the write, not after the ACK: the firmware sends the inputs' state
+     * straight after its ACK, often in the same notification. */
+    if (enabled) this._eventFramesPossible = true;
+    try {
+      await this._writeExpectingAck(
+        new Uint8Array([OPCODES.SET_FEATURE, BT_FEATURE.EVENT_STREAM, enabled ? 1 : 0]),
+        1500,
+      );
+    } catch (e) {
+      if (e instanceof Error && e.message === 'NACK received') {
+        this._emitStatus('Event stream not supported by this firmware (feature 3 NACKed)');
+        return false;
+      }
+      throw e;
+    }
+    this._emitStatus(`Event stream ${enabled ? 'on' : 'off'}`);
+    return true;
+  }
+
+  /**
+   * Ask the device whether its firmware has the event channel, and with it
+   * configuration byte 232 (DEV-971): {@link setEventStream} with `false`,
+   * which firmware with SET_FEATURE answers - ACK with the event channel, NACK
+   * without - and which changes nothing, since a connection starts opted out.
+   * Firmware older than SET_FEATURE is not asked, and has no event channel.
+   *
+   * Pass the answer to the InfoMem context as `eventChannel`, which is what
+   * brings byte 232 into the layout and the field schema. The version alone
+   * cannot say: the builds that have it report the release before them.
+   */
+  async supportsEventChannel(): Promise<boolean> {
+    return this.setEventStream(false);
+  }
+
+  /**
+   * Whether the firmware has SET_FEATURE (0xB7) and NACKs a feature it does
+   * not know: LogAndStream_Shimmer3R v1.00.052 on, where it came with
+   * log-and-stream-common (`shimmer3SupportsSetFeature`). Older firmware drops
+   * the 0xB7 byte unanswered and runs the two bytes after it as commands, and
+   * ACKs them, so a SET_FEATURE there would read as accepted.
+   */
+  private async _hasSetFeature(): Promise<boolean> {
+    try {
+      const v = await this.readFwVersion();
+      return shimmer3SupportsSetFeature(
+        { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch },
+        HW_ID.SHIMMER_3R,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Read the event channel's status (GET_EVENT_CHANNEL_STATUS_COMMAND 0xB9 →
+   * `[ACK][0xBA][9 bytes]`): which inputs the configuration enables, whether
+   * this connection is opted in, whether an event file is open or has failed,
+   * whether the TTL input is armed or throttled, each input's state, and the
+   * link's counters.
+   *
+   * Firmware without the event channel does not answer, so this times out
+   * there.
+   *
+   * HARDWARE-VERIFY: from the firmware source (`ShimEvt_buildStatus`) only.
+   */
+  async getEventChannelStatus(): Promise<EventChannelStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_EVENT_CHANNEL_STATUS_COMMAND]),
+      1500,
+    );
+    const rsp =
+      remainder && remainder[0] === OPCODES.EVENT_CHANNEL_STATUS_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.EVENT_CHANNEL_STATUS_RESPONSE, 1500, link);
+    if (
+      rsp[0] !== OPCODES.EVENT_CHANNEL_STATUS_RESPONSE ||
+      rsp.length < 1 + EVENT_CHANNEL_STATUS_LENGTH
+    ) {
+      throw new Error(`Malformed event channel status (${rsp.length} bytes).`);
+    }
+    return parseEventChannelStatus(rsp.subarray(1, 1 + EVENT_CHANNEL_STATUS_LENGTH));
+  }
+
+  /**
+   * Ask the device whether its firmware records audio (DEV-99): configuration
+   * byte 233, status byte 1's audio bits, and `GET_AUDIO_STATUS_COMMAND`.
+   * Pass the answer to the InfoMem context as `audio`, which is what brings
+   * byte 233 into the layout and the field schema.
+   *
+   * LogAndStream_Shimmer3R v1.01.026 is the first release with audio, but the
+   * development builds before it that have audio report v1.01.025, the
+   * release they were cut from. So the version answers for every release, and
+   * the device is asked only on v1.01.025:
+   *
+   * 1. Firmware older than v1.01.025, or not LogAndStream, is ruled out by its
+   *    version ({@link shimmer3RMayRecordAudio}) and is sent nothing.
+   * 2. v1.01.026 or later records audio ({@link shimmer3RRecordsAudio}), and
+   *    is sent nothing either.
+   * 3. On v1.01.025 this sends `GET_AUDIO_STATUS_COMMAND` (0xBC) and waits a
+   *    second (`AUDIO_PROBE_TIMEOUT_MS`): a status reply is yes, silence no.
+   *
+   * The probe is safe on firmware without audio, which SET_FEATURE was not:
+   * 0xBC was never a command before DEV-99, and it takes no arguments, so
+   * older firmware drops the one byte unanswered and there is nothing after
+   * it to run as a command. The cost is the timeout, once per link: the
+   * answer is cached until the next connect.
+   *
+   * Not while streaming ({@link getAudioStatus}); ask at connect.
+   *
+   * HARDWARE-VERIFY: from the firmware source. Neither answer has been seen
+   * from a unit: not the reply from a DEV-99 build, nor the silence from an
+   * older one.
+   */
+  async supportsAudio(): Promise<boolean> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._audioSupport !== null) return this._audioSupport;
+    const link = this._linkGeneration;
+    const byVersion = await this._audioByVersion();
+    let answer = byVersion === 'yes';
+    if (byVersion === 'ask') {
+      try {
+        await this.getAudioStatus(AUDIO_PROBE_TIMEOUT_MS);
+        answer = true;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '';
+        /* Silence is firmware without the command. Anything else - a link
+           reset, the link busy, a reply that would not parse - says nothing
+           about the firmware, so it is not remembered. */
+        if (msg !== 'ACK timeout' && msg !== 'NACK received') throw e;
+        this._emitStatus('Audio recording not supported by this firmware (0xBC unanswered)');
+      }
+    }
+    if (this._linkGeneration === link) this._audioSupport = answer;
+    return answer;
+  }
+
+  /**
+   * What the firmware's version says about audio: 'yes' from v1.01.026
+   * ({@link shimmer3RRecordsAudio}), 'ask' on v1.01.025
+   * ({@link shimmer3RMayRecordAudio}), 'no' otherwise.
+   */
+  private async _audioByVersion(): Promise<'yes' | 'ask' | 'no'> {
+    try {
+      const v = await this.readFwVersion();
+      const fw = { firmwareIdentifier: v.fwId, major: v.major, minor: v.minor, internal: v.patch };
+      if (shimmer3RRecordsAudio(fw, HW_ID.SHIMMER_3R)) return 'yes';
+      return shimmer3RMayRecordAudio(fw, HW_ID.SHIMMER_3R) ? 'ask' : 'no';
+    } catch {
+      return 'no';
+    }
+  }
+
+  /**
+   * Read the audio recorder's status (GET_AUDIO_STATUS_COMMAND 0xBC →
+   * `[ACK][0xBD][32 bytes]`, DEV-99): the mode configured, the recorder's
+   * state and first fault, and this session's counters.
+   *
+   * Firmware without audio does not answer, so this times out there; ask
+   * {@link supportsAudio} first. The firmware answers while streaming too, but
+   * between packets this client's stream parser takes only bare replies, event
+   * frames and status pushes, so it refuses while streaming rather than lose
+   * the reply. The status bits ({@link onDeviceStatus}) follow a recording
+   * while streaming.
+   *
+   * HARDWARE-VERIFY: from the firmware source (`PlatAudio_buildStatus`) only.
+   *
+   * @param timeoutMs how long to wait for the ACK, and then the reply
+   */
+  async getAudioStatus(timeoutMs = 1500): Promise<AudioStatus> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot read the audio status while streaming');
+    const link = this._linkGeneration;
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.GET_AUDIO_STATUS_COMMAND]),
+      timeoutMs,
+    );
+    const rsp =
+      remainder && remainder[0] === OPCODES.AUDIO_STATUS_RESPONSE
+        ? remainder
+        : await this._waitForResponse(OPCODES.AUDIO_STATUS_RESPONSE, timeoutMs, link);
+    if (rsp[0] !== OPCODES.AUDIO_STATUS_RESPONSE || rsp.length < 1 + AUDIO_STATUS_LENGTH) {
+      throw new Error(`Malformed audio status (${rsp.length} bytes).`);
+    }
+    return parseAudioStatus(rsp.subarray(1, 1 + AUDIO_STATUS_LENGTH));
   }
 
   /**
@@ -3865,46 +4272,132 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /**
    * Stop streaming (STOP_STREAMING_COMMAND 0x20), best-effort: the command goes
-   * out and the state is cleared without waiting for the ACK the firmware sends
-   * back.
+   * out without waiting for the ACK the firmware sends back, and what arrives
+   * after it is parsed as stream data until the link goes quiet
+   * ({@link _stopStreamPlane}).
    *
-   * Not waiting is deliberate. Stream packets keep arriving for hundreds of ms
-   * after the stop, and the framed path routes a notification to its ACK branch
-   * on the first byte alone — so with an ACK outstanding a residual frame that
-   * happened to begin 0xFF would be taken for the ACK and its tail forwarded to
-   * the control plane, which is how a stray 0xFE fabricates a NACK and a stray
-   * 0x02 frames a bogus inquiry. A notification is not frame-aligned, which is
-   * why the stream parser resyncs on a double preamble, so that first byte can
-   * be anything. `Shimmer3Client.stopStreaming` answers the same problem the
-   * long way, draining to quiescence before it re-enables the control plane;
-   * over BLE, where a notification is already one whole message, simply not
-   * waiting is enough — and it costs nothing against firmware that does not
-   * ACK a stop mid-stream at all.
+   * Not waiting for the ACK as a command's reply is deliberate. Stream packets
+   * keep arriving for hundreds of ms after the stop, and the framed path routes
+   * a notification to its ACK branch on the first byte alone — so with an ACK
+   * outstanding a residual frame that happened to begin 0xFF would be taken for
+   * the ACK and its tail forwarded to the control plane, which is how a stray
+   * 0xFE fabricates a NACK and a stray 0x02 frames a bogus inquiry. A
+   * notification is not frame-aligned, which is why the stream parser resyncs
+   * on a double preamble, so that first byte can be anything. That holds over
+   * BLE too: a bench Shimmer3R split 24-byte packets across two notifications
+   * and sent the stop's ACK as the last byte of a notification that began
+   * part-way through a packet. So the stop drains the tail through the stream
+   * parser on every link, as `Shimmer3Client.stopStreaming` does, and the ACK
+   * and the status push behind it are taken there.
    *
-   * The price is that the ACK is still in flight when the next command goes
-   * out, and `_expectingAck` counts rather than queues, so it is spent on that
-   * command. {@link withoutLeadingAck} is what keeps that from costing the
-   * command its own reply — read it before making this wait for the ACK after
-   * all.
+   * Should the ACK come only after the drain has ended, it is still in flight
+   * when the next command goes out, and `_expectingAck` counts rather than
+   * queues, so it is spent on that command. {@link withoutLeadingAck} is what
+   * keeps that from costing the command its own reply.
    */
   override async stopStreaming(): Promise<void> {
     this._emitStatus('STOP_STREAM → sending (no ACK wait)…');
-    const link = this._linkGeneration;
-    try {
-      await this._writeOnLink(new Uint8Array([OPCODES.STOP_STREAMING_COMMAND]), link);
-      this._emitStatus('STOP_STREAM command sent (skipped ACK wait).');
-    } catch (err: unknown) {
-      this._emitStatus(`STOP_STREAM write failed: ${(err as Error).message}`);
-    }
-    /* `_endStreamPlane`, not the two fields by hand. It also clears
-       `_streamAligned`, and leaving that set is not cosmetic: `_parseBySchema`
-       is gated on `schema`, NOT on `_streaming`, and a chunk starting with
-       DATA_PACKET is still appended to `_rxBuf` while not streaming. So frames
-       already in flight when the stop was sent get parsed with alignment still
-       claimed, skipping acquisition entirely and accepting whatever offset they
-       happen to land on. Not across a link reset, as in startStreaming. */
-    if (this._linkGeneration === link) this._endStreamPlane();
+    await this._stopStreamPlane(OPCODES.STOP_STREAMING_COMMAND, (err) => {
+      if (err) this._emitStatus(`STOP_STREAM write failed: ${err.message}`);
+      else this._emitStatus('STOP_STREAM command sent (skipped ACK wait).');
+    });
     this._emitStatus('Streaming stopped.');
+  }
+
+  /**
+   * Write a stop, `op`, and end the stream plane once the stream's tail has
+   * been drained ({@link _drainStreamTail}), on every link. That once excluded
+   * BLE with no CRC, on the view that a notification there is one whole
+   * message. It is not: on a bench Shimmer3R the read sent straight after a
+   * stop took the status push that ends a log as its own reply, so it reported
+   * the sensor still streaming, and its real reply and the push were both lost.
+   *
+   * Every other command waits from before the stop is written until the plane
+   * has ended ({@link _write}). Held only from after the write, a command sent
+   * alongside the stop could go out first and have its reply land among the
+   * last packets, where it is lost.
+   *
+   * `_endStreamPlane`, not the two fields by hand. It also clears
+   * `_streamAligned`, and leaving that set is not cosmetic: `_parseBySchema` is
+   * gated on `schema`, NOT on `_streaming`, and a chunk starting with
+   * DATA_PACKET is still appended to `_rxBuf` while not streaming. So frames
+   * already in flight when the stop was sent got parsed with alignment still
+   * claimed, skipping acquisition entirely and accepting whatever offset they
+   * happened to land on. Not across a link reset, as in startStreaming.
+   *
+   * @param written told once the write has settled: with its error, if it failed
+   */
+  private async _stopStreamPlane(op: number, written: (err?: Error) => void): Promise<void> {
+    const link = this._linkGeneration;
+    let release = (): void => {};
+    const gate = this._streaming
+      ? new Promise<void>((resolve) => {
+          release = resolve;
+        })
+      : null;
+    if (gate) this._streamTailDrain = gate;
+    try {
+      try {
+        await this._writeOnLink(new Uint8Array([op]), link, true);
+        written();
+      } catch (err: unknown) {
+        written(err as Error);
+      }
+      if (this._linkGeneration !== link) return;
+      if (gate && this._streaming) await this._drainStreamTail(link);
+      else this._endStreamPlane();
+    } finally {
+      release();
+      if (gate && this._streamTailDrain === gate) this._streamTailDrain = null;
+    }
+  }
+
+  /**
+   * Keep parsing what arrives after a stop as stream data until the link has
+   * been quiet for {@link STOP_DRAIN_QUIET_MS}, then end the stream plane.
+   *
+   * Packets go on arriving for a while after the stop, and with them the stop's
+   * ACK and the status push the firmware sends when the log closes. Ending the
+   * plane at once handed that tail to the control framer, part-way through a
+   * packet. Its first byte is any sample byte, and
+   * one that reads as a reply opcode with a length field swallows everything
+   * behind it: on a bench Shimmer3R the tail began 0xC1, an SD directory
+   * listing 2,840 bytes long by its own header, so the push was lost and the
+   * next command timed out. The stream parser knows where the packets end, so
+   * it takes the tail instead, as the Shimmer3 client's stop already does.
+   *
+   * Once quiet, the tail is parsed one last time with {@link _streamTailQuiet}
+   * set, so a packet or reply that ends the transmission is taken without the
+   * next packet behind it. Whatever is left is discarded. Not across a link
+   * reset: that has ended the plane already, and the bytes are the next link's.
+   */
+  private async _drainStreamTail(link: number): Promise<void> {
+    const start = Date.now();
+    let seq = this._rxSeq;
+    let quietSince = start;
+    for (;;) {
+      await new Promise<void>((r) => setTimeout(r, STOP_DRAIN_POLL_MS));
+      if (this._linkGeneration !== link) return;
+      if (this._rxSeq !== seq) {
+        seq = this._rxSeq;
+        quietSince = Date.now();
+      }
+      if (Date.now() - quietSince >= STOP_DRAIN_QUIET_MS) break;
+      if (Date.now() - start >= STOP_DRAIN_MAX_MS) {
+        this._log('stop drain: the link was still busy after', STOP_DRAIN_MAX_MS, 'ms');
+        break;
+      }
+    }
+    this._streamTailQuiet = true;
+    try {
+      this._parseStreamIfPossible();
+    } finally {
+      this._streamTailQuiet = false;
+    }
+    if (this._rxBuf.length) {
+      this._log('stop drain: discarding', this._rxBuf.length, 'residual byte(s)');
+    }
+    this._endStreamPlane();
   }
 
   /** Start streaming AND SD card logging simultaneously. */
@@ -3941,9 +4434,58 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // Not across a link reset, which closed this plane already: the stream
       // plane is the next link's now
       if (this._linkGeneration === link) this._endStreamPlane();
-      throw e;
+      throw asLogStartRefusal(e, 'START_SDBT');
     }
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
+  }
+
+  /**
+   * Start SD card logging only (START_LOGGING_COMMAND 0x92), without streaming.
+   *
+   * Allowed while streaming as well: the firmware then adds a log to the
+   * running stream, and its ACK comes between two packets. The log goes on
+   * after the link closes, until {@link stopLogging}, the button, the dock or
+   * the configured duration ends it.
+   *
+   * The ACK says the command ran, not that a log started: firmware released so
+   * far ACKs a start it cannot carry out (docked, on USB power, no card, an SD
+   * file error, logging off in byte 232) and does nothing. Confirm with
+   * {@link getStatus} (`sdLogging`) or the next status push. Firmware that
+   * NACKs such a start makes this throw instead.
+   *
+   * @throws LogStartRefusedError when the firmware NACKs the start
+   */
+  async startLogging(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._refuseWhileBtModuleUpdating('Logging');
+    this._emitStatus('START_LOGGING → waiting for ACK…');
+    let remainder: Uint8Array | null;
+    try {
+      remainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.START_LOGGING_COMMAND]),
+        1500,
+      );
+    } catch (e) {
+      throw asLogStartRefusal(e, 'START_LOGGING');
+    }
+    if (remainder?.length) this._emitTemp(remainder);
+    this._emitStatus('START_LOGGING ACK received.');
+  }
+
+  /**
+   * Stop SD card logging only (STOP_LOGGING_COMMAND 0x93). A stream that is
+   * running goes on; its ACK then comes between two packets. To end both at
+   * once use {@link stopStreamingAndLogging}.
+   */
+  async stopLogging(): Promise<void> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    this._emitStatus('STOP_LOGGING → waiting for ACK…');
+    const remainder = await this._writeExpectingAck(
+      new Uint8Array([OPCODES.STOP_LOGGING_COMMAND]),
+      1500,
+    );
+    if (remainder?.length) this._emitTemp(remainder);
+    this._emitStatus('STOP_LOGGING ACK received.');
   }
 
   /**
@@ -3953,13 +4495,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async stopStreamingAndLogging(): Promise<void> {
     this._emitStatus('STOP_BT_STREAM_SD_LOGGING → sending…');
-    const link = this._linkGeneration;
-    try {
-      await this._writeOnLink(new Uint8Array([OPCODES.STOP_SDBT_COMMAND]), link);
-    } catch (err: unknown) {
-      this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${(err as Error).message}`);
-    }
-    if (this._linkGeneration === link) this._endStreamPlane();
+    await this._stopStreamPlane(OPCODES.STOP_SDBT_COMMAND, (err) => {
+      if (err) this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${err.message}`);
+    });
     this._emitStatus('Streaming + logging stopped.');
   }
 
@@ -4398,7 +4936,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * in flight, in any CRC mode or over any link.
    */
   private _streamReplyLength(buf: Uint8Array, at: number): number {
+    const push = this._streamStatusPushLength(buf, at);
+    if (push !== RESYNC) return push;
     const op = buf[at];
+    /* An event record frame, which the firmware queues into the same ring. It
+       carries its own CRC whatever the link's mode, so it vouches for itself as
+       a CRC'd reply does. */
+    if (op === OPCODES.INSTREAM_CMD_RESPONSE) return eventFrameLength(buf, at);
     if (!isAckOrNack(op)) return RESYNC;
     const trailer = crcTrailerBytes(this._crcMode);
     if (trailer > 0) {
@@ -4406,9 +4950,61 @@ export class Shimmer3RClient extends BaseShimmerClient {
       return verifyCrc(buf.subarray(at, at + 1 + trailer), this._crcMode) ? 1 + trailer : RESYNC;
     }
     if (op === OPCODES.NACK_COMMAND_PROCESSED) return 1;
-    if (buf.length < at + 2) return NEED_MORE;
+    // A last ACK at the end of a drained tail: nothing is coming after it.
+    if (buf.length < at + 2) return this._streamTailQuiet ? 1 : NEED_MORE;
     const after = buf[at + 1];
     return after === OPCODES.DATA_PACKET || isAckOrNack(after) ? 1 : RESYNC;
+  }
+
+  /**
+   * The length of the status push at `buf[at]`, `[ACK][0x8A][0x71][status]` and
+   * the link CRC: `RESYNC` when `buf[at]` does not start one, `NEED_MORE` when
+   * the buffer ends before that can be told.
+   *
+   * The firmware sends it whenever docking, logging, streaming, the USB rail or
+   * the audio bits change, streaming or not, into the same transmit ring as the
+   * packets (`ShimBt_instreamStatusRespSend`, `Comms/shimmer_bt_uart.c`). The
+   * ACK is there only while the in-stream ACK prefix is on, which is the
+   * default. The CRC, when the link has one, covers every byte from the ACK.
+   *
+   * With a CRC, the CRC tells, as for a bare ACK. With none, the push says
+   * nothing for itself, so it is taken only where the byte after it starts a
+   * data packet or another reply, and it never vouches for the packet in front
+   * of it: that packet's end is still found by the timestamp test.
+   *
+   * The width is the status's, 1 or 2 bytes ({@link statusPayloadBytesFor});
+   * until the versions are read it is unknown, and nothing is taken.
+   *
+   * Run live on a Shimmer3R with DEV-99 firmware, over classic Bluetooth and
+   * BLE with no CRC, a 1-byte and a 2-byte CRC: in every log, the push that
+   * starts audio recording arrived between two packets about a second in, and
+   * the one that ends it in the stop's tail.
+   */
+  private _streamStatusPushLength(buf: Uint8Array, at: number): number {
+    let i = at;
+    if (buf[i] === OPCODES.ACK_COMMAND_PROCESSED) {
+      if (buf.length < i + 2) return NEED_MORE;
+      i++;
+    }
+    if (buf[i] !== OPCODES.INSTREAM_CMD_RESPONSE) return RESYNC;
+    if (buf.length < i + 2) return NEED_MORE;
+    if (buf[i + 1] !== OPCODES.STATUS_RESPONSE) return RESYNC;
+    const width = this._statusPayloadBytes;
+    if (width === null) return RESYNC;
+    const trailer = crcTrailerBytes(this._crcMode);
+    const len = i - at + 2 + width + trailer;
+    if (buf.length < at + len) return NEED_MORE;
+    if (trailer > 0) return verifyCrc(buf.subarray(at, at + len), this._crcMode) ? len : RESYNC;
+    // At the end of a drained tail, the end of the transmission tells instead.
+    if (buf.length < at + len + 1) {
+      return this._streamTailQuiet && buf.length === at + len ? len : NEED_MORE;
+    }
+    const after = buf[at + len];
+    return after === OPCODES.DATA_PACKET ||
+      isAckOrNack(after) ||
+      after === OPCODES.INSTREAM_CMD_RESPONSE
+      ? len
+      : RESYNC;
   }
 
   /** How many bytes of bare replies run from `buf[at]`, each as {@link _streamReplyLength} measures it. */
@@ -4428,7 +5024,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * An ACK that no command is counting on is dropped, such as the one for
    * {@link toggleLed}, which does not wait for it while streaming.
    */
-  private _takeStreamReply(op: number): void {
+  private _takeStreamReply(op: number, frame?: Uint8Array): void {
+    /* A status push, whose ACK prefix acknowledges no command: reported as an
+       idle one is, and never counted against a command waiting for its ACK. */
+    const msg = frame ? withoutLeadingAck(frame) : null;
+    if (
+      frame &&
+      msg &&
+      msg.length >= 2 &&
+      msg[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+      msg[1] === OPCODES.STATUS_RESPONSE
+    ) {
+      const trailer = crcTrailerBytes(this._crcMode);
+      this._maybeEmitDeviceStatus(frame.subarray(0, frame.length - trailer));
+      return;
+    }
+    if (op === OPCODES.INSTREAM_CMD_RESPONSE) {
+      if (frame) this._emitEventRecord(frame);
+      return;
+    }
     if (op === OPCODES.NACK_COMMAND_PROCESSED) {
       // _waitForAck rejects on it, and its caller gives the count back
       this._log('NACK between stream packets');
@@ -4472,11 +5086,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
        * here only where a boundary is known, after a packet or another reply,
        * and never from bytes the parser has yet to place, which could be
        * anything. A packet with replies behind it, below, leaves them here. */
-      if (this._streaming && this._streamAligned && isAckOrNack(buf[0])) {
+      if (
+        this._streaming &&
+        this._streamAligned &&
+        (isAckOrNack(buf[0]) || buf[0] === OPCODES.INSTREAM_CMD_RESPONSE)
+      ) {
         const n = this._streamReplyLength(buf, 0);
         if (n === NEED_MORE) break;
         if (n !== RESYNC) {
-          this._takeStreamReply(buf[0]);
+          this._takeStreamReply(buf[0], buf.subarray(0, n));
           buf = buf.subarray(n);
           continue;
         }
@@ -4500,13 +5118,32 @@ export class Shimmer3RClient extends BaseShimmerClient {
         buf.length > wireBytes &&
         buf[wireBytes] !== preamble
       ) {
-        const vouchable = crcBytes > 0 && this._streamAligned;
+        /* An event frame's own CRC vouches for it on any link, as a reply's
+           does on a CRC'd one. A status push has no CRC of its own, so it
+           vouches only on a CRC'd link (_streamStatusPushLength). */
+        const eventFrame =
+          buf[wireBytes] === OPCODES.INSTREAM_CMD_RESPONSE &&
+          buf[wireBytes + 1] !== OPCODES.STATUS_RESPONSE;
+        const vouchable = (crcBytes > 0 || eventFrame) && this._streamAligned;
         const replies = vouchable
           ? this._streamReplyLength(buf, wireBytes)
           : this._streamRepliesLength(buf, wireBytes);
         if (replies === NEED_MORE) break;
         vouched = vouchable && replies !== RESYNC;
         if (!vouched) next += replies;
+      }
+      /* The last parse of a drained tail (_streamTailQuiet): a packet at a
+         known boundary with nothing behind it, or only replies running exactly
+         to the end, ends the transmission. There is no next packet to test its
+         timestamp against, and none is coming. */
+      if (
+        !vouched &&
+        this._streamTailQuiet &&
+        this._streamAligned &&
+        buf[0] === preamble &&
+        next === buf.length
+      ) {
+        vouched = true;
       }
       if (!vouched && buf.length < Math.max(wireBytes * 2, next + 1 + tsBytes)) break;
 
@@ -4679,7 +5316,20 @@ export class Shimmer3RClient extends BaseShimmerClient {
   // Low-level transport helpers
   // ---------------------------------------------------------------------------
 
-  private async _write(u8: Uint8Array): Promise<void> {
+  /** Resolve once no stop is ending the stream plane ({@link _stopStreamPlane}). */
+  private async _afterStopDrain(): Promise<void> {
+    while (this._streamTailDrain) await this._streamTailDrain;
+  }
+
+  /**
+   * @param isStop the stop that holds the other commands back while it ends the
+   *   stream plane ({@link _stopStreamPlane}), which must not wait for itself
+   */
+  private async _write(u8: Uint8Array, isStop = false): Promise<void> {
+    /* A stop is ending the stream plane: what this command gets back would
+       land among the last packets, where only bare ACKs and status pushes are
+       taken. */
+    if (!isStop) await this._afterStopDrain();
     if (!this._transport) throw new Error('Not connected (RX missing)');
     /*
      * Nothing may be written while a factory test holds the link. The firmware's
@@ -4709,13 +5359,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * caller's cleanup against whatever link had replaced it by then: a held
    * START_STREAMING ended the next link's stream.
    */
-  private _writeOnLink(u8: Uint8Array, link: number): Promise<void> {
+  private _writeOnLink(u8: Uint8Array, link: number, isStop = false): Promise<void> {
     const gone = (): Error => new Error('The link was reset while the command was being sent');
     if (link !== this._linkGeneration) return Promise.reject(gone());
     return new Promise<void>((resolve, reject) => {
       const onReset = (): void => reject(gone());
       this._linkWaiters.add(onReset);
-      this._write(u8).then(
+      this._write(u8, isStop).then(
         () => {
           this._linkWaiters.delete(onReset);
           resolve();
@@ -4738,6 +5388,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     ackTimeoutMs = 1000,
     link = this._linkGeneration,
   ): Promise<Uint8Array | null> {
+    /* Before it is counted: the stop's own ACK, among the last packets, would
+       otherwise be spent on this command. */
+    await this._afterStopDrain();
     /* A step of an operation whose link has already been replaced: refused
        before it is counted, since the count is now the next link's and the
        catch below leaves it alone across a reset. */
@@ -5124,6 +5777,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async getStatus(): Promise<Shimmer3DeviceStatus> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    /* Nor claimed while a stop drains the stream's tail: the push that closes
+     * a log comes in it, and is news, not this read's answer. */
+    await this._afterStopDrain();
     const link = this._linkGeneration;
     /* Before the read is claimed below, so a push that lands during the version
      * reads is still reported as one. */

@@ -593,3 +593,27 @@ describe('parseSdLogHeader — header pressure sensor id, byte 224 (DEV-1123)', 
     expect(h.warnings).toEqual([]);
   });
 });
+
+describe('parseSdLogHeader — Shimmer3R audio mode, byte 226 (DEV-99)', () => {
+  const withByte226 = (hw: number, value: number): Uint8Array => {
+    const h = buildSdLogHeader({
+      hw,
+      fwId: 3,
+      fwVersion: [1, 1, 25],
+      enabledSensors: BM.ACCEL_LN,
+      signalIds: [0x00, 0x01, 0x02],
+    });
+    h[226] = value;
+    return h;
+  };
+
+  it('reads byte 233 as the firmware acted on it, raw, on a Shimmer3R', () => {
+    expect(parseSdLogHeader(withByte226(10, 0x02)).audioMode).toBe(0x02);
+    // Firmware before the field leaves 0xFF, which reads as off by the byte's rule.
+    expect(parseSdLogHeader(withByte226(10, 0xff)).audioMode).toBe(0xff);
+  });
+
+  it('is null on a Shimmer3, which has no microphone', () => {
+    expect(parseSdLogHeader(withByte226(3, 0x02)).audioMode).toBeNull();
+  });
+});

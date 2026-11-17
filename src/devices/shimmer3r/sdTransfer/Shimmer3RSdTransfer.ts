@@ -424,8 +424,10 @@ export async function downloadSdTree(
 
 /**
  * Delete verified files from the card (files first, then any directories that
- * emptied out, deepest first). Only paths under `data/` are accepted by the
- * firmware. Returns the paths actually deleted; failures are skipped.
+ * emptied out, deepest first). The firmware accepts only paths under `data/`,
+ * under `events/` once it has the event channel, and under `audio/` once it
+ * records audio (DEV-99). Returns the paths actually deleted; failures are
+ * skipped.
  */
 export async function deleteDownloadedFromCard(
   client: Shimmer3RClient,

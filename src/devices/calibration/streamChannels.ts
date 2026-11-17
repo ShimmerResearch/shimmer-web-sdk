@@ -34,6 +34,7 @@ import { calibrateU12AdcValue } from '../shimmer3r/calibration.js';
 import { calibrateExgSample, type ExgSampleResolution } from '../exg/calibration.js';
 import type { ExgBanks } from '../exg/knobs.js';
 import { compensatePressure } from '../pressure/compensate.js';
+import { SOUND_LEVEL_UNIT, soundLevelDbA } from '../audio/soundLevel.js';
 import type { PressureCalibration } from '../pressure/types.js';
 import { calibrateGsrChannel } from './gsr.js';
 import { applyStreamingCalibration, type StreamingImuRanges } from './streaming.js';
@@ -207,6 +208,16 @@ export const SCALAR_CALIBRATORS: Readonly<Record<string, ScalarCalibrator>> = Ob
   Exg2_Status: {
     unit: CHANNEL_UNITS.NO_UNITS,
     calibrate: (raw) => raw,
+  },
+
+  /*
+   * The Shimmer3R sound level (DEV-1413): 0.01 dB(A) counts, nominal. The
+   * no-level value, 0x8000, calibrates to NaN rather than -327.68 dB, and the
+   * field is still added, so a frame keeps its width while capture settles.
+   */
+  SOUND_LEVEL: {
+    unit: SOUND_LEVEL_UNIT,
+    calibrate: (raw) => soundLevelDbA(raw),
   },
 });
 
