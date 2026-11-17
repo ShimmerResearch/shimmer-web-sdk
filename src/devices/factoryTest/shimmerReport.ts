@@ -376,13 +376,53 @@ function readShimmerSubLine(
     return true;
   }
 
-  // The SD card's CID, printed as one line above the read/write verdict.
-  const card = /^-?\s*Manufacturer\s*:\s*(.+?)\s*,\s*Manufacture Date\s*=\s*(\S+)\s*$/i.exec(
+  // The SD card's identity, above its read/write verdict. Shimmer3R firmware
+  // from DEV-1398 prints three lines, Manufacturer, Model and CID
+  // (SHIMMER3R_FACTORY_TEST_REPORT.md §5.5); older firmware prints only the
+  // first, with the card's size run into the name ("SanDisk7.45GB").
+  const card = /^-?\s*Manufacturer\s*:\s*(.*?)\s*,\s*Manufacture Date\s*=\s*(\S+)\s*$/i.exec(
     trimmed,
   );
   if (card) {
-    put('sd_manufacturer', card[1]);
+    const runOn = /^(.*?)(\d+\.\d{2})GB$/.exec(card[1]);
+    put('sd_manufacturer', runOn ? runOn[1] : card[1]);
+    if (runOn) put('sd_size_gb', Number(runOn[2]));
     put('sd_manufacture_date', card[2]);
+    addDetail(trimmed);
+    return true;
+  }
+
+  // "matches <brand> <part>" when the firmware recognises the card, else
+  // "not recognised". "matches" is all it claims: several brands sell other
+  // makers' cards, so a generic CID can fit more than one part.
+  const model = /^-?\s*Model\s*:\s*(?:matches\s+(.+?)|(not recognised))\s*$/i.exec(trimmed);
+  if (model) {
+    put('sd_model_recognised', model[1] !== undefined);
+    if (model[1] !== undefined) put('sd_model', model[1]);
+    addDetail(trimmed);
+    return true;
+  }
+
+  // The CID register. OID is 2 characters and PNM 5, or "0x" and their bytes in
+  // hex when one is unprintable, so each is matched by width: PNM may hold a
+  // space or a comma.
+  const cid =
+    /^-?\s*CID\s*:\s*MID=0x([0-9A-F]{2}),\s*OID=(0x[0-9A-F]{4}|.{2}),\s*PNM=(0x[0-9A-F]{10}|.{5}),\s*PRV=(\d+\.\d+),\s*PSN=0x([0-9A-F]{1,8}),\s*Size=([\d.]+)GB\s*$/i.exec(
+      trimmed,
+    );
+  if (cid) {
+    put('sd_cid_available', true);
+    put('sd_mid', parseInt(cid[1], 16));
+    put('sd_oid', cid[2]);
+    put('sd_pnm', cid[3]);
+    put('sd_prv', cid[4]);
+    put('sd_psn', parseInt(cid[5], 16));
+    put('sd_size_gb', Number(cid[6]));
+    addDetail(trimmed);
+    return true;
+  }
+  if (/^-?\s*CID\s*:\s*unavailable\b/i.test(trimmed)) {
+    put('sd_cid_available', false);
     addDetail(trimmed);
     return true;
   }

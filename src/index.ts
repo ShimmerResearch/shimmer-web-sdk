@@ -111,6 +111,28 @@ export type {
   SensorStreamStats,
   StreamStatsSnapshot,
 } from './core/StreamStats.js';
+export {
+  DEFAULT_RECONNECT_POLICY,
+  nextReconnectDelayMs,
+  planStreamResume,
+  reconnectDelayMs,
+  resolveReconnectPolicy,
+  startAutoReconnect,
+} from './core/autoReconnect.js';
+export type {
+  ActivityAtDrop,
+  AutoReconnectAbandoned,
+  AutoReconnectAbandonReason,
+  AutoReconnectAttempt,
+  AutoReconnectFailure,
+  AutoReconnectHandle,
+  AutoReconnectOptions,
+  AutoReconnectOutcome,
+  AutoReconnectResult,
+  AutoReconnectTimers,
+  ReconnectPolicy,
+  StreamResumeAction,
+} from './core/autoReconnect.js';
 
 // Shimmer3R
 export { Shimmer3RClient, LogStartRefusedError } from './devices/shimmer3r/Shimmer3RClient.js';
