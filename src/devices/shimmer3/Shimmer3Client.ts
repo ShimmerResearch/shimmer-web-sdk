@@ -28,7 +28,13 @@ import {
   parseExpansionBoard,
   type WiredBatteryStatus,
 } from '../dock/protocol.js';
-import type { ShimmerSrBoard } from '../identity.js';
+import {
+  buildShimmerSrIdPage,
+  formatShimmerSrCode,
+  isSameShimmerSrBoard,
+  srReadBackError,
+  type ShimmerSrBoard,
+} from '../identity.js';
 import { isNewImuSensors } from '../sdlog/header.js';
 import { parseShimmer3StatusBytes, type Shimmer3DeviceStatus } from '../shimmer3r/protocol.js';
 import {
@@ -1721,6 +1727,48 @@ export class Shimmer3Client extends BaseShimmerClient {
           : ''),
     );
     return board;
+  }
+
+  /**
+   * Program the daughter-card id — the board's SR identity — and read it back.
+   *
+   * Writes the whole 16-byte identity page, `[boardId, boardRev, specialRev,
+   * 0xFF × 13]` ({@link buildShimmerSrIdPage}, the page Consensys writes), with
+   * SET_DAUGHTER_CARD_ID_COMMAND (0x64, `[0x64][16][offset 0][page…]` → ACK;
+   * log-and-stream-common `Comms/shimmer_bt_uart.c`). Then
+   * {@link readExpansionBoard} reads it back, which also takes the new board's
+   * IMU generation into this client, and a read-back that differs from what
+   * was written throws: the firmware acknowledges an out-of-range write
+   * without writing anything, so the ACK alone proves nothing.
+   *
+   * The sensor keeps what it decided from the old board at boot (its sensors,
+   * its pressure chip, whether ExG is fitted) until it restarts, so have it
+   * rebooted before it is used as the new board.
+   *
+   * Refused while streaming here, and by the firmware while it is sensing.
+   *
+   * HARDWARE-VERIFY: follows the firmware source; no Shimmer3 has been
+   * reprogrammed over this client yet.
+   */
+  async writeExpansionBoard(board: ShimmerSrBoard): Promise<ShimmerSrBoard> {
+    const link = this._link.current;
+    if (!this._linkLive) throw new Error('Not connected');
+    if (this._streaming) throw new Error('Cannot program the SR number while streaming');
+    const page = buildShimmerSrIdPage(board);
+    const code = formatShimmerSrCode(board);
+    this._emitStatus(`SET_DAUGHTER_CARD_ID ${code} → waiting for ACK…`);
+    const cmd = new Uint8Array(3 + page.length);
+    cmd[0] = OPCODES.SET_DAUGHTER_CARD_ID_COMMAND;
+    cmd[1] = page.length;
+    cmd[2] = 0;
+    cmd.set(page, 3);
+    await this._writeExpectingAck(cmd, SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS, link);
+    const readBack = await this._readExpansionBoardOn(link);
+    if (!readBack || !isSameShimmerSrBoard(readBack, board)) {
+      throw srReadBackError(board, readBack);
+    }
+    this._emitStatus(`SR number programmed: ${code}`);
+    return readBack;
   }
 
   /**

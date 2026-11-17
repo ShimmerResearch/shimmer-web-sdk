@@ -108,6 +108,147 @@ export function isShimmerSrBoardAtLeast(
   return board.boardRev > rev || (board.boardRev === rev && board.specialRev >= specialRev);
 }
 
+// ---------------------------------------------------------------------------
+// Programming the SR identity
+// ---------------------------------------------------------------------------
+
+/**
+ * The daughter-card identity page: page 0 of the board's CAT24C16 EEPROM,
+ * absolute bytes 0-15. Only its first three bytes mean anything to a
+ * Shimmer3 or Shimmer3R (`Boards/shimmer_boards.c`, which reads
+ * `exp_brd_id`, `exp_brd_major` and `exp_brd_minor` and nothing past them).
+ */
+export const SHIMMER_SR_ID_PAGE_SIZE = 16;
+
+/**
+ * The SR codes a Shimmer3R is built on: the five fourth-generation boards in
+ * the "Shimmer3R revision quick reference" of log-and-stream-common's
+ * `docs/SHIMMER3_BOARD_REVISIONS.md`. A Shimmer3R has no separate expansion
+ * board, so its page names the main board itself.
+ */
+export const SHIMMER3R_SR_BOARD_IDS: readonly number[] = Object.freeze([31, 38, 47, 48, 49]);
+
+/**
+ * The SR codes a Shimmer3 can carry: every board in
+ * {@link SHIMMER_SR_BOARD_NAMES} that is fitted to a sensor. The docks
+ * (SR41 Base15U, SR42 Base6U) and the Span (SR9) are left out: they are
+ * products of their own, and a sensor that claimed to be one would be
+ * misprogrammed.
+ */
+export const SHIMMER3_SR_BOARD_IDS: readonly number[] = Object.freeze([
+  8, 14, 31, 36, 37, 38, 44, 46, 47, 48, 49, 55,
+]);
+
+/** One entry of the list a host offers when it programs an SR number. */
+export interface ShimmerSrBoardChoice {
+  boardId: number;
+  /** `'ECG/EMG/Resp'`. */
+  name: string;
+  /** `'ECG/EMG/Resp (SR47)'`, the form Consensys's own list uses. */
+  label: string;
+}
+
+/**
+ * `'ECG/EMG/Resp (SR47)'` for a named code, `'SR232'` for one this SDK has no
+ * name for. The form is Consensys's (`PnlExpBrdIdSelection.createListOfExpBrds`).
+ */
+export function formatShimmerSrBoardName(boardId: number): string {
+  const name = SHIMMER_SR_BOARD_NAMES[boardId];
+  return name ? `${name} (SR${boardId})` : `SR${boardId}`;
+}
+
+/**
+ * The boards a host should offer when it programs a sensor's SR number, in SR
+ * order, each with its friendly name.
+ *
+ * `hardwareVersion` 10 (Shimmer3R) gives {@link SHIMMER3R_SR_BOARD_IDS};
+ * anything else, a Shimmer3 or a sensor that has not said, gives
+ * {@link SHIMMER3_SR_BOARD_IDS}, which contains the Shimmer3R's five.
+ *
+ * GSR+ and Bridge Amplifier+ each appear twice on a Shimmer3, as the
+ * separate-board and the unified-board code. The label's SR number is what
+ * tells them apart.
+ */
+export function listShimmerSrBoards(hardwareVersion?: number | null): ShimmerSrBoardChoice[] {
+  const ids = hardwareVersion === 10 ? SHIMMER3R_SR_BOARD_IDS : SHIMMER3_SR_BOARD_IDS;
+  return ids.map((boardId) => {
+    const name = SHIMMER_SR_BOARD_NAMES[boardId] ?? `SR${boardId}`;
+    return { boardId, name, label: formatShimmerSrBoardName(boardId) };
+  });
+}
+
+/**
+ * Check that `board` can be written as an SR identity, and throw if not.
+ *
+ * - `boardId` is an integer 1..254. 0x00 and 0xFF are the two "nothing here"
+ *   patterns ({@link isShimmerSrBoardValid}), so writing either would leave
+ *   the sensor with no board at all; the firmware treats both as unset
+ *   (`ShimBrd_isDaughterCardIdSet`).
+ * - `boardRev` and `specialRev` are integers 0..255, one byte each.
+ *
+ * A code outside the SR table is accepted: a board newer than this SDK has to
+ * be programmable. It is the host's job to warn about one.
+ */
+export function assertShimmerSrBoardWritable(board: ShimmerSrBoard): void {
+  const byte = (v: unknown): boolean =>
+    Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 255;
+  if (!board || !Number.isInteger(board.boardId) || board.boardId < 1 || board.boardId > 254) {
+    throw new Error(
+      `SR board id must be an integer 1..254 (got ${board?.boardId}); 0 and 255 mean "no board".`,
+    );
+  }
+  if (!byte(board.boardRev)) {
+    throw new Error(`SR board revision must be an integer 0..255 (got ${board.boardRev}).`);
+  }
+  if (!byte(board.specialRev)) {
+    throw new Error(`SR special revision must be an integer 0..255 (got ${board.specialRev}).`);
+  }
+}
+
+/**
+ * The 16-byte identity page that programs `board`:
+ * `[boardId, boardRev, specialRev, 0xFF × 13]`.
+ *
+ * Port of the Java driver's `ExpansionBoardDetails.generateExpBrdIdArray`,
+ * which is what Consensys writes: the whole page, so bytes left over from an
+ * earlier programming do not survive. Bytes 3-4 are reserved and 5-10 carry a
+ * MAC on a ShimmerGQ 802.15.4 board only, so a Shimmer3 or Shimmer3R leaves
+ * them erased.
+ *
+ * Throws as {@link assertShimmerSrBoardWritable} does.
+ */
+export function buildShimmerSrIdPage(board: ShimmerSrBoard): Uint8Array {
+  assertShimmerSrBoardWritable(board);
+  const page = new Uint8Array(SHIMMER_SR_ID_PAGE_SIZE).fill(0xff);
+  page[0] = board.boardId;
+  page[1] = board.boardRev;
+  page[2] = board.specialRev;
+  return page;
+}
+
+/** True when `a` and `b` name the same board, revision and special revision. */
+export function isSameShimmerSrBoard(
+  a: ShimmerSrBoard | null | undefined,
+  b: ShimmerSrBoard | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return a.boardId === b.boardId && a.boardRev === b.boardRev && a.specialRev === b.specialRev;
+}
+
+/**
+ * The error a client throws when the page it wrote does not read back. The
+ * read-back is the only proof a write landed: the Bluetooth command is
+ * acknowledged whether or not its range was accepted, and an out-of-range
+ * write is acknowledged with nothing written (`Comms/shimmer_bt_uart.c`,
+ * `SET_DAUGHTER_CARD_ID_COMMAND`).
+ */
+export function srReadBackError(wanted: ShimmerSrBoard, got: ShimmerSrBoard | null): Error {
+  return new Error(
+    `SR number did not read back: wrote ${formatShimmerSrCode(wanted)}, ` +
+      `read ${got ? formatShimmerSrCode(got) : 'a blank page'}.`,
+  );
+}
+
 /** A sensor's board identity, ready to render. */
 export interface ShimmerHardwareDescription {
   /** `'Shimmer3'` / `'Shimmer3R'`, or null when the hardware id is unknown. */

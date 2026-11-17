@@ -71,8 +71,11 @@ import {
   type WiredBatteryStatus,
 } from '../dock/protocol.js';
 import {
+  buildShimmerSrIdPage,
   formatShimmerSrCode,
+  isSameShimmerSrBoard,
   parseBluetoothModuleVersion,
+  srReadBackError,
   type BluetoothModuleVersion,
   type ShimmerSrBoard,
 } from '../identity.js';
@@ -2635,6 +2638,55 @@ export class Shimmer3RClient extends BaseShimmerClient {
       board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank',
     );
     return board;
+  }
+
+  /**
+   * Program the board's SR identity — the counterpart of {@link readSrBoard},
+   * and what Consensys's factory "Program Exp. Board ID" does over a dock.
+   *
+   * Writes the whole 16-byte identity page, `[boardId, boardRev, specialRev,
+   * 0xFF × 13]` ({@link buildShimmerSrIdPage}), with SET_DAUGHTER_CARD_ID_COMMAND
+   * (0x64, `[0x64][16][offset 0][page…]` → ACK; `Comms/shimmer_bt_uart.c`,
+   * `SET_DAUGHTER_CARD_ID_COMMAND`), then reads the page back and returns what
+   * it read. A read-back that differs from what was written throws: the ACK
+   * alone proves nothing, because the firmware acknowledges an out-of-range
+   * write without writing anything.
+   *
+   * The firmware writes the EEPROM and its cached copy of the page together,
+   * so the read-back sees the new board at once. What the firmware decided
+   * from the old board at boot (which sensors are fitted, which pressure
+   * chip, whether ExG is there) does not change until the sensor restarts,
+   * so a host should have the sensor rebooted before it is used as the new
+   * board.
+   *
+   * Refused while streaming here, and by the firmware while it is sensing
+   * (`ShimBt_isCmdBlockedWhileSensing`), as every SET is.
+   *
+   * HARDWARE-VERIFY: the command and the read-back follow the firmware
+   * source; no Shimmer3R has been reprogrammed over this client yet.
+   */
+  async writeSrBoard(board: ShimmerSrBoard): Promise<ShimmerSrBoard> {
+    if (!this._transport) throw new Error('Not connected (RX missing)');
+    if (this._streaming) throw new Error('Cannot program the SR number while streaming');
+    const page = buildShimmerSrIdPage(board);
+    const link = this._linkGeneration;
+    const code = formatShimmerSrCode(board);
+    this._emitStatus(`SET_DAUGHTER_CARD_ID ${code} → waiting for ACK…`);
+    const cmd = new Uint8Array(3 + page.length);
+    cmd[0] = OPCODES.SET_DAUGHTER_CARD_ID_COMMAND;
+    cmd[1] = page.length;
+    cmd[2] = 0;
+    cmd.set(page, 3);
+    await this._writeExpectingAck(cmd, 1500, link);
+    if (link !== this._linkGeneration) {
+      throw new Error('The link was reset before the SR number could be read back');
+    }
+    const readBack = await this.readSrBoard();
+    if (!readBack || !isSameShimmerSrBoard(readBack, board)) {
+      throw srReadBackError(board, readBack);
+    }
+    this._emitStatus(`SR number programmed: ${code}`);
+    return readBack;
   }
 
   /**
