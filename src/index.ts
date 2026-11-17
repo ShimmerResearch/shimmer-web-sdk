@@ -1438,10 +1438,23 @@ export type {
 // reaches the sensor over, so the tables and the display formatting live in one
 // place. Read today by `Shimmer3RClient` and `WiredShimmerClient`; the
 // classic-only `Shimmer3Client` has no identity reads yet.
+//
+// The SR identity is also WRITTEN through these (DEV-1493): the board list a
+// host offers, the 16-byte page Consensys programs, and the check that a page
+// may be written. The clients' `writeSrBoard` (Shimmer3RClient) and
+// `writeExpansionBoard` (Shimmer3Client, WiredShimmerClient) build on them.
 export {
   SHIMMER_PLATFORM_NAMES,
   SHIMMER_SR_BOARD_NAMES,
+  SHIMMER_SR_ID_PAGE_SIZE,
+  SHIMMER3R_SR_BOARD_IDS,
+  SHIMMER3_SR_BOARD_IDS,
   formatShimmerSrCode,
+  formatShimmerSrBoardName,
+  listShimmerSrBoards,
+  assertShimmerSrBoardWritable,
+  buildShimmerSrIdPage,
+  isSameShimmerSrBoard,
   isShimmerSrBoardValid,
   isShimmerSrBoardAtLeast,
   describeShimmerHardware,
@@ -1450,6 +1463,7 @@ export {
 } from './devices/identity.js';
 export type {
   ShimmerSrBoard,
+  ShimmerSrBoardChoice,
   ShimmerHardwareDescription,
   BluetoothModuleFamily,
   BluetoothModuleVersionEntry,

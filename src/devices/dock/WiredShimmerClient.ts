@@ -44,7 +44,15 @@ import {
   type WiredBatteryStatus,
   type ExpansionBoardInfo,
 } from './protocol.js';
-import { parseBluetoothModuleVersion, type BluetoothModuleVersion } from '../identity.js';
+import {
+  buildShimmerSrIdPage,
+  formatShimmerSrCode,
+  isSameShimmerSrBoard,
+  parseBluetoothModuleVersion,
+  srReadBackError,
+  type BluetoothModuleVersion,
+  type ShimmerSrBoard,
+} from '../identity.js';
 import {
   resolveInfoMemLayout,
   parseInfoMem,
@@ -540,6 +548,41 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _readExpansionBoardImpl(): Promise<ExpansionBoardInfo | null> {
     const payload = await this._readMem(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, 16);
     return parseExpansionBoard(payload);
+  }
+
+  /**
+   * Program the daughter-card (expansion board) ID — the SR identity — and
+   * read it back. This is exactly what Consensys's factory "Program Exp.
+   * Board ID" does: `DockManager.writeExpansionBoardId` →
+   * `CommsProtocolWiredShimmerViaDock.writeDaughterCardId`, a WRITE of
+   * `DAUGHTER_CARD.CARD_ID` at address 0 with the 16-byte page
+   * `[boardId, boardRev, specialRev, 0xFF × 13]` ({@link buildShimmerSrIdPage}).
+   *
+   * The page is then read back (READ `CARD_ID`, 16 bytes from 0), and a
+   * read-back that differs from what was written throws. On success
+   * {@link identity}, when it has been read, takes the new board.
+   *
+   * The sensor keeps what it decided from the old board at boot until it
+   * restarts, so have it rebooted (undocked and powered off and on) before it
+   * is used as the new board.
+   *
+   * HARDWARE-VERIFY: the WRITE is the Java driver's, which Consensys has used
+   * in production for years; this client has not yet sent it to a sensor.
+   */
+  async writeExpansionBoard(board: ShimmerSrBoard): Promise<ExpansionBoardInfo> {
+    const page = buildShimmerSrIdPage(board);
+    const code = formatShimmerSrCode(board);
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, page);
+      await this._writeRaw(UART_PROP.DAUGHTER_CARD.CARD_ID, payload);
+      const readBack = await this._readExpansionBoardImpl();
+      if (!readBack || !isSameShimmerSrBoard(readBack, board)) {
+        throw srReadBackError(board, readBack);
+      }
+      if (this.identity) this.identity = { ...this.identity, expansionBoard: readBack };
+      this._emitStatus(`SR number programmed: ${code}`);
+      return readBack;
+    });
   }
 
   /**
