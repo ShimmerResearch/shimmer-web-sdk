@@ -90,6 +90,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`WiredShimmerClient.runFactoryTest()`'s doc comment no longer says the ExG test always fails from the dock** (DEV-1340). That is Shimmer3 only: its firmware prints `- FAIL: ADS1292R test will not work from dock` without running the test, because its dock UART and the ExG chip share pins. A Shimmer3R runs the ExG test (S3R_TEST_0021) normally over USB-C and over the dock, since its ExG SPI3 and dock USART1 share no pins, so an ExG FAIL from a Shimmer3R is a real result. Documentation only; no code changed.
+
 - **A stop no longer loses the tail of the stream, the stop's push or the next command's reply** (`Shimmer3RClient`). Packets go on arriving after `stopStreaming` and `stopStreamingAndLogging`, and with them the stop's ACK and the status push that closes a log. The client ended the stream plane as soon as the stop was written, so that tail reached the control framer part-way through a packet.
   - **Over classic Bluetooth, or any link with a CRC,** a first byte that reads as a reply with a length field swallowed everything behind it. On a bench Shimmer3R over classic Bluetooth with no CRC, the tail began 0xC1, an SD directory listing 2,840 bytes long by its own header. The push that ends audio recording was lost and the next command, a status read, timed out.
   - **Over BLE with no CRC,** which was thought safe because a notification was taken to be one whole message, the same unit split packets across notifications and sent the stop's ACK as the last byte of one that began part-way through a packet. The status read sent next took the push for its own reply and reported the sensor still streaming; its real reply and the push were lost.
