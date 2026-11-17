@@ -646,6 +646,86 @@ for any object that has the `BluetoothDevice`'s `gatt` server. Run end to end
 on a Shimmer3R from Chrome; the stalled-link fallback (reconnect, then 63-byte
 writes) is not yet hardware-verified under Web Bluetooth: `HARDWARE-VERIFY:`.
 
+## Reconnecting After a Dropped Link
+
+A sensor that walks out of range, or is switched off, drops the link. The
+browser's pickers appear only when a page asks for a new device
+(`requestDevice()`, `requestPort()`), so a page that kept what it was given
+reconnects with no picker and no click:
+
+- **BLE:** a new `WebBluetoothTransport` with `device:` set to the same
+  `BluetoothDevice` reconnects through `device.gatt.connect()`.
+- **Classic Bluetooth:** a new `WebSerialTransport` with `port:` set to the
+  same `SerialPort` reopens it, which brings the RFCOMM link up again. Keep
+  the port when connecting: the transport lets go of it on disconnect.
+
+`startAutoReconnect` runs the tries; the caller says what one try is.
+
+```ts
+import {
+  Shimmer3RClient,
+  WebBluetoothTransport,
+  SHIMMER3R_DEFAULTS,
+  planStreamResume,
+  startAutoReconnect,
+} from '@shimmerresearch/shimmer-web-sdk';
+
+client.onDisconnect = () => {
+  // Fired only for a drop the page did not ask for, never by disconnect().
+  const before = { streaming: wasStreaming, sdLogging: wasLogging };
+  const device = keptDevice;
+  const handle = startAutoReconnect({
+    attempt: async () => {
+      client = new Shimmer3RClient({
+        transport: new WebBluetoothTransport({
+          serviceUUID: SHIMMER3R_DEFAULTS.SERVICE_UUID,
+          writeCharUUID: SHIMMER3R_DEFAULTS.CHAR_RX_UUID,
+          notifyCharUUID: SHIMMER3R_DEFAULTS.CHAR_TX_UUID,
+          device, // no picker
+          defaultWriteWithResponse: true,
+        }),
+      });
+      await client.connect();
+    },
+    abandon: () => device.gatt?.disconnect(), // ends a connect stuck pending
+    onAttemptFailed: ({ nextDelayMs }) => show(`retrying in ${nextDelayMs} ms`),
+  });
+  cancelButton.onclick = () => handle.cancel();
+  handle.done.then(async ({ outcome }) => {
+    if (outcome !== 'connected') return;
+    const action = planStreamResume(before, await client.getStatus());
+    if (action === 'start-streaming') await client.startStreaming();
+    if (action === 'start-streaming-and-logging') await client.startStreamingAndLogging();
+  });
+};
+```
+
+- **Every try has a deadline** (`attemptTimeoutMs`, 30 s). On Windows a
+  `gatt.connect()` to a sensor that is out of range, or whose bond the PC holds
+  stale, can stay pending forever (DEV-845). An overrun try is abandoned: its
+  `signal` aborts and `abandon` is called. If it succeeds anyway, `abandon` is
+  called again with `late: true`, so the link it opened can be closed.
+- **The waits grow:** 1 s before the first try, then 2, 4, 8 and 15 s at most
+  (`initialDelayMs`, `retryDelayMs`, `backoffFactor`, `maxDelayMs`). It keeps
+  going until cancelled unless `maxAttempts` or `maxDurationMs` is set.
+  `reconnectDelayMs` and `nextReconnectDelayMs` give the schedule on their own.
+- **`cancel()` is immediate.** It abandons a try in progress without waiting
+  for it, and `done` resolves `'cancelled'`.
+- **What to send once back is `planStreamResume`'s answer.** On a lost link
+  the firmware stops the stream and leaves an SD log running, so a stream with
+  a log comes back as a plain stream while the log is still running, and as a
+  stream and log only once the status says the log ended too. With no status
+  it never starts a second log on a guess.
+- **Data sent while the link was down is lost.** The firmware does not buffer
+  it for the host; an SD log, if one was running, has it.
+- **Not across a page reload.** The device or port object is gone then, and
+  getting it back without a picker needs `navigator.bluetooth.getDevices()`,
+  which Chrome still keeps behind a flag.
+
+`HARDWARE-VERIFY:` the loop and the resume rule are tested against fakes and
+the firmware source; reconnecting a real sensor over BLE and Classic Bluetooth
+from Chrome has not been run yet.
+
 ## Building
 
 ```bash

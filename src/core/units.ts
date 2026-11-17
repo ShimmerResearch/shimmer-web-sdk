@@ -58,6 +58,11 @@ export const CHANNEL_UNITS = Object.freeze({
   MAG: 'local_flux',
   /** Microtesla. What the Verisense decoders emit for their magnetometer. */
   MICRO_TESLA: 'uT',
+  /**
+   * A-weighted sound pressure level, in decibels: the Shimmer3R sound-level
+   * channel's unit, and nominal (`devices/audio/soundLevel.ts`).
+   */
+  DECIBELS_A: 'dB(A)',
 } as const);
 
 /** One of the {@link CHANNEL_UNITS} strings. */

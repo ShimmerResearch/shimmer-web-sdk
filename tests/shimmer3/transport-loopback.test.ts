@@ -185,6 +185,41 @@ describe('Shimmer3Client setters', () => {
   });
 });
 
+describe('Shimmer3Client setRebootOnDisconnect', () => {
+  /** Connect to LogAndStream `major.minor.internal`. */
+  async function connectedAt(major: number, minor: number, internal: number) {
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, 3, 0, major & 0xff, major >> 8, minor, internal]), 0);
+      else replyHandshake(bytes, tr);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    return { t, client };
+  }
+
+  it('arms the reboot on firmware with SET_FEATURE (LogAndStream 1.0.17 on)', async () => {
+    const { t, client } = await connectedAt(1, 0, 17);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_FEATURE) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.setRebootOnDisconnect(true);
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_FEATURE)!;
+    expect(Array.from(cmd.bytes)).toEqual([OPCODES.SET_FEATURE, 2, 1]);
+  });
+
+  it('sends nothing to older firmware, which would ACK the bytes as commands', async () => {
+    const { t, client } = await connectedAt(1, 0, 16);
+    t.setOnWrite((bytes, tr) => {
+      // 0xB7 and 0x02 are dropped; 0x01 is INQUIRY_COMMAND, which is ACKed.
+      if (bytes[0] === OPCODES.SET_FEATURE) setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+    });
+    await expect(client.setRebootOnDisconnect(true)).rejects.toThrow(/SET_FEATURE/);
+    expect(t.writes.some((w) => w.bytes[0] === OPCODES.SET_FEATURE)).toBe(false);
+  });
+});
+
 describe('Shimmer3Client error paths', () => {
   it('rejects on a NACK', async () => {
     const { t, client } = await connected();

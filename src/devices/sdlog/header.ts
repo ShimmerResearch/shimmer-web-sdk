@@ -218,6 +218,11 @@ function parseImuRanges(bytes: Uint8Array, hw: number): SdLogImuRanges {
   return { lnAccel, wrAccel, gyro, mag, altAccel: 0, altMag: 0 };
 }
 
+/** Header byte 225, `SDH_BUTTON_LOG_MODE`: configuration byte 232 as acted on. */
+const SDLOG_BUTTON_LOG_MODE_OFFSET = 225;
+/** Header byte 226, `SDH_AUDIO_MODE`: configuration byte 233 as acted on, Shimmer3R only. */
+const SDLOG_AUDIO_MODE_OFFSET = 226;
+
 /** What header byte 224 says, once the firmware gate has been applied. */
 interface PressureSensorField {
   sensor: SdLogPressureSensor | null;
@@ -582,6 +587,12 @@ export function parseSdLog(bytes: Uint8Array): ParsedSdLog {
     pressureSensor: pressureField.sensor,
     pressureSensorId: pressureField.id,
     pressureSensorInferred: pressureField.inferred,
+    buttonLogMode:
+      firmwareId === SDLOG_FW_ID.LOGANDSTREAM ? bytes[SDLOG_BUTTON_LOG_MODE_OFFSET] : null,
+    audioMode:
+      firmwareId === SDLOG_FW_ID.LOGANDSTREAM && hardwareVersion === SDLOG_HW_ID.SHIMMER_3R
+        ? bytes[SDLOG_AUDIO_MODE_OFFSET]
+        : null,
     warnings,
   };
 

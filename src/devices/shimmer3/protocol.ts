@@ -496,6 +496,53 @@ export function shimmer3SupportsBatteryRequest(
   );
 }
 
+/**
+ * Whether this firmware has SET_FEATURE (0xB7) and NACKs a feature it does not
+ * know: LogAndStream 1.0.52 on a Shimmer3R and 1.0.17 on a Shimmer3, where it
+ * came with log-and-stream-common (the Java driver's
+ * `ShimmerVerObject.isSupportedSetFeature`).
+ *
+ * Older firmware must not be sent it. It drops the 0xB7 byte unanswered and
+ * runs each byte after it as a command - feature 3 is GET_SAMPLING_RATE_COMMAND,
+ * and a value of 1 is INQUIRY_COMMAND - which it ACKs, so the request would
+ * read as accepted.
+ */
+export function shimmer3SupportsSetFeature(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 0, 52) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 1, 0, 17)
+  );
+}
+
+/**
+ * Whether this firmware might record audio (DEV-99), and so is worth asking:
+ * Shimmer3R LogAndStream v1.01.025 or later. False rules it out without
+ * sending anything. True from v1.01.026 means yes
+ * ({@link shimmer3RRecordsAudio}); on v1.01.025 it means ask the device
+ * (`Shimmer3RClient.supportsAudio`).
+ *
+ * LogAndStream_Shimmer3R v1.01.026 is the first release with audio. The
+ * development builds before it that have audio report the release they were
+ * cut from, v1.01.025, so for that version only the device can say.
+ * A Shimmer3 has no microphone.
+ */
+export function shimmer3RMayRecordAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 25);
+}
+
+/**
+ * Whether this firmware records audio (DEV-99) by its version alone:
+ * Shimmer3R LogAndStream v1.01.026, the first release with audio, or later.
+ * Every build from that release on has it, so a host need not ask. False
+ * does not rule audio out on v1.01.025 ({@link shimmer3RMayRecordAudio}).
+ */
+export function shimmer3RRecordsAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 26);
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------

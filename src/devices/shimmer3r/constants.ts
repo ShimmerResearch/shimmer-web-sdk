@@ -19,6 +19,13 @@ export const BT_FEATURE = Object.freeze({
    * active SD recording.
    */
   REBOOT_ON_DISCONNECT: 2,
+  /**
+   * Stream the event channel's records to this host, as
+   * `[0x8A][0xBB][len][record][CRC-16]` frames (DEV-971; log-and-stream-common
+   * `docs/SHIMMER3_BT_COMMUNICATION_PROTOCOL.md` §7.15). Per connection: cleared
+   * on connect and disconnect. Firmware without the event channel NACKs it.
+   */
+  EVENT_STREAM: 3,
 } as const);
 
 export const OPCODES = Object.freeze({
@@ -184,6 +191,17 @@ export const OPCODES = Object.freeze({
   DUMMY_COMMAND: 0xb5,
   RESET_BT_ERROR_COUNTS: 0xb6,
   SET_FEATURE: 0xb7,
+  /** Event channel (DEV-971): `[0xB9]` → `[ACK][0xBA][status × 9]`. */
+  GET_EVENT_CHANNEL_STATUS_COMMAND: 0xb9,
+  EVENT_CHANNEL_STATUS_RESPONSE: 0xba,
+  /** Event channel record frame, under the `0x8A` in-stream prefix. */
+  EVENT_RECORD_RESPONSE: 0xbb,
+  /**
+   * Audio recording (DEV-99): `[0xBC]` → `[ACK][0xBD][status × 32]`. Firmware
+   * before DEV-99 has no command 0xBC and drops it unanswered.
+   */
+  GET_AUDIO_STATUS_COMMAND: 0xbc,
+  AUDIO_STATUS_RESPONSE: 0xbd,
   SET_SD_SYNC_COMMAND: 0xe0,
   SD_SYNC_RESPONSE: 0xe1,
   NACK_COMMAND_PROCESSED: 0xfe,

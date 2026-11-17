@@ -57,20 +57,22 @@ describe('read-only configuration', () => {
     expect(SHIMMER3_INFOMEM_FIELD_SCHEMA.some((f) => f.group === 'sync')).toBe(true);
   });
 
-  it('locks the deprecated Single-Touch Start and TCXO options', () => {
-    for (const key of ['singleTouch', 'tcxo']) {
-      const field = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((f) => f.key === key);
-      expect(field, key).toBeTruthy();
-      expect(field!.readOnly, key).toBe(true);
-      expect(field!.readOnlyReason, key).toMatch(/Deprecated/i);
-    }
+  it('locks the deprecated Single-Touch Start option', () => {
+    const field = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((f) => f.key === 'singleTouch');
+    expect(field).toBeTruthy();
+    expect(field!.readOnly).toBe(true);
+    expect(field!.readOnlyReason).toMatch(/Deprecated/i);
+  });
+
+  it('does not offer the TCXO at all: no build supports it, and applyTcxoRule clears it', () => {
+    expect(SHIMMER3_INFOMEM_FIELD_SCHEMA.some((f) => f.key === 'tcxo')).toBe(false);
   });
 
   it('leaves every other field editable', () => {
-    // A guard against a read-only flag spreading by copy-paste: only the two
-    // deprecated options carry one at field level.
+    // A guard against a read-only flag spreading by copy-paste: only the
+    // deprecated option carries one at field level.
     const locked = SHIMMER3_INFOMEM_FIELD_SCHEMA.filter((f) => f.readOnly).map((f) => f.key);
-    expect(locked.sort()).toEqual(['singleTouch', 'tcxo']);
+    expect(locked.sort()).toEqual(['singleTouch']);
   });
 
   it('gives every read-only flag a reason to show the user', () => {

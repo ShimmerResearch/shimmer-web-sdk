@@ -111,9 +111,31 @@ export type {
   SensorStreamStats,
   StreamStatsSnapshot,
 } from './core/StreamStats.js';
+export {
+  DEFAULT_RECONNECT_POLICY,
+  nextReconnectDelayMs,
+  planStreamResume,
+  reconnectDelayMs,
+  resolveReconnectPolicy,
+  startAutoReconnect,
+} from './core/autoReconnect.js';
+export type {
+  ActivityAtDrop,
+  AutoReconnectAbandoned,
+  AutoReconnectAbandonReason,
+  AutoReconnectAttempt,
+  AutoReconnectFailure,
+  AutoReconnectHandle,
+  AutoReconnectOptions,
+  AutoReconnectOutcome,
+  AutoReconnectResult,
+  AutoReconnectTimers,
+  ReconnectPolicy,
+  StreamResumeAction,
+} from './core/autoReconnect.js';
 
 // Shimmer3R
-export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
+export { Shimmer3RClient, LogStartRefusedError } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
 export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
@@ -404,6 +426,14 @@ export {
   // Shimmer3Client.getStatus and getBattery apply.
   shimmer3SupportsStatusRequest,
   shimmer3SupportsBatteryRequest,
+  // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
+  // commands. Both clients apply it.
+  shimmer3SupportsSetFeature,
+  // Whether a Shimmer3R's firmware might record audio, so is worth asking, and
+  // whether its version alone says it does (Shimmer3RClient.supportsAudio
+  // applies both).
+  shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
@@ -557,6 +587,7 @@ export type {
 export {
   parseInfoMem,
   generateInfoMem,
+  applyTcxoRule,
   deviceWriteDivergentRanges,
   compareInfoMemExcluding,
   resolveInfoMemLayout,
@@ -941,6 +972,11 @@ export {
   decodeSdSession,
   parseSdSessionName,
   parseSdTrialFolderName,
+  SD_DATA_ROOT,
+  SD_COMPANION_KINDS,
+  sdCompanionKindOf,
+  sdCompanionPathFor,
+  sdDataPathForCompanion,
   isNewImuSensors,
 } from './devices/sdlog/index.js';
 export type {
@@ -957,7 +993,133 @@ export type {
   SdLogChannelSpec,
   SdLogDecodeOptions,
   SdLogDecodeResult,
+  SdCompanionKind,
 } from './devices/sdlog/index.js';
+
+// Event channel (DEV-971): configuration byte 232, and the button/TTL records
+// from an event file or the Bluetooth stream.
+export {
+  BUTTON_LOG_MODE,
+  BUTTON_MODE,
+  LOG_TRIGGERS,
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+  correctButtonLogMode,
+  buttonModeOf,
+  logTriggersOf,
+  isTtlInputEnabled,
+  recordsButtonPresses,
+  isDoublePress,
+  isLoggingDisabled,
+  isButtonDisabled,
+  doesPressToggleLogging,
+  doesUndockStartLogging,
+  nearestUserButtonEnable,
+  allowsSingleTouch,
+  withoutPressRecording,
+  BUTTON_LOGGING,
+  BUTTON_LOGGING_OPTIONS,
+  splitButtonMode,
+  canRecordPressesWith,
+  joinButtonMode,
+  withPressRecording,
+  decodeButtonLogMode,
+  encodeButtonLogMode,
+  describeButtonLogMode,
+  eventChannelBoardSupport,
+  applyButtonLogModeRules,
+  EVENT_TICKS_PER_SECOND,
+  EVENT_FILE,
+  EVENT_RECORD_TYPE,
+  EVENT_RECORD_FLAG,
+  EVENT_CHANNEL,
+  EVENT_INPUT,
+  EVENT_FILE_OPEN_REASON,
+  EVENT_CHANNEL_OPCODES,
+  EVENT_FRAME_LENGTH,
+  EVENT_CHANNEL_STATUS_LENGTH,
+  EventFileFormatError,
+  parseEventRecord,
+  describeEventRecord,
+  parseEventFile,
+  eventTicksToUnixMs,
+  eventFrameLength,
+  parseEventFrame,
+  parseEventChannelStatus,
+} from './devices/events/index.js';
+export type {
+  ButtonMode,
+  LogTriggers,
+  ButtonLogModeSettings,
+  ButtonLogging,
+  ButtonModeParts,
+  ButtonLogModeBehaviour,
+  EventChannelBoardSupport,
+  EventRecord,
+  EventFileHeader,
+  EventFile,
+  EventChannelStatus,
+} from './devices/events/index.js';
+
+// Shimmer3R audio recording (DEV-99): configuration byte 233, the recorder's
+// status, and the .WAV and .AFP files under audio/. The sound-level channel
+// (DEV-1413): byte 233 bit 4 and channel 0x38.
+export {
+  AUDIO_MODE_BYTE,
+  AUDIO_MODE,
+  AUDIO_GAIN_PRESET,
+  AUDIO_MODE_OPTIONS,
+  correctAudioMode,
+  audioModeOf,
+  audioGainPresetOf,
+  recordsAudioFingerprint,
+  recordsRawAudio,
+  joinAudioMode,
+  splitAudioMode,
+  soundLevelEnabled,
+  soundLevelSupportedByReadback,
+  withSoundLevel,
+  SOUND_LEVEL_CHANNEL_ID,
+  SOUND_LEVEL_NAME,
+  SOUND_LEVEL_NO_LEVEL,
+  SOUND_LEVEL_COUNTS_PER_DB,
+  SOUND_LEVEL_UNIT,
+  soundLevelDbA,
+  audioModeRecordsSpeech,
+  encodeAudioMode,
+  describeAudioMode,
+  applyAudioModeRules,
+  AUDIO_OPCODES,
+  AUDIO_STATUS_LENGTH,
+  AUDIO_STATUS_VERSION,
+  AUDIO_STATUS_BITS,
+  AUDIO_STATE,
+  AUDIO_FAULT,
+  describeAudioState,
+  describeAudioFault,
+  isAudioFaultFatal,
+  parseAudioStatus,
+  AUDIO_FILE,
+  AUDIO_FINGERPRINT_FILE,
+  AUDIO_FILE_OPEN_REASON,
+  AudioFileFormatError,
+  parseAudioWavHeader,
+  audioSampleTicks,
+  parseAudioFingerprintHeader,
+  parseAudioFingerprintRecord,
+  parseAudioFingerprintFile,
+  audioFingerprintRecordTicks,
+} from './devices/audio/index.js';
+export type {
+  AudioStatus,
+  AudioModeParts,
+  AudioFileIdentity,
+  AudioWavHeader,
+  AudioFingerprintHeader,
+  AudioFingerprintRecord,
+  AudioFingerprintChunk,
+  AudioFingerprintFile,
+} from './devices/audio/index.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
