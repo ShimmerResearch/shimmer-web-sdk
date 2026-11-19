@@ -15,7 +15,11 @@ import {
   verifyCrc,
   type CrcMode,
 } from './crcMode.js';
-import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
+import {
+  generationFromHardwareVersion,
+  SHIMMER3_OLD_IMU_MAG_FORMATS,
+  type ShimmerGeneration,
+} from './channelFormats.js';
 import {
   EXG_BANK_LENGTH,
   EXG_CHIP1,
@@ -92,11 +96,17 @@ import {
 } from './factoryTest.js';
 import {
   parseShimmer3DeviceVersionResponse,
+  shimmer3ImuRanges,
   shimmer3SupportsSetFeature,
   shimmer3RMayRecordAudio,
   shimmer3RRecordsAudio,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
+import {
+  shimmer3ImuFamily,
+  shimmer3ImuGenerationOfBoard,
+  type Shimmer3ImuGeneration,
+} from '../shimmer3/imu.js';
 import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import {
@@ -135,6 +145,7 @@ import {
   MAX_CALIB_DUMP_BYTES,
   type StreamingImuRanges,
   type InertialGroup,
+  type ImuFamily,
   type KinematicCalibration,
   type CalibDump,
 } from '../calibration/index.js';
@@ -453,6 +464,16 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * connection. Web Bluetooth only lets a page reach services listed here.
    */
   optionalServices?: string[];
+  /**
+   * A classic Shimmer3's IMU generation, when the host knows it: `'old'`
+   * (LSM303DLHC) or `'new'` (LSM303AHTR). It wins over what
+   * {@link Shimmer3RClient.readSrBoard} reads, as `Shimmer3ClientOptions`'s
+   * option of the same name does. Ignored on a Shimmer3R, which has one IMU.
+   *
+   * Usually left out: reading the board decides it (see
+   * {@link Shimmer3RClient.imuGeneration}).
+   */
+  imuGeneration?: Shimmer3ImuGeneration;
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +720,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Inertial-sensor hardware ranges, refreshed from each inquiry's config word.
    * Used to select the default calibration for streaming inertial channels.
+   *
+   * Read with the meanings of the device that answered ({@link generation}).
+   * On a classic Shimmer3 `wrAccel` is the LSM303 accel, `gyro` the MPU9x50
+   * gyro, `mag` the LSM303 mag, and the other three are 0, as
+   * `Shimmer3Client.imuRanges` has them (DEV-1515).
    */
   imuRanges: StreamingImuRanges = {
     lnAccel: 0,
@@ -747,6 +773,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * ranges that are not currently selected.
    */
   private _dumpCalibrations: DumpCalibrationsByGroup = {};
+
+  /**
+   * The dump {@link applyCalibDump} adopted, and the IMU family its blocks
+   * were sorted into groups for. A dump names its blocks by sensor ID, and the
+   * IDs differ between families, so if the family changes afterwards (a
+   * version or board read that lands later) {@link _reselectDeviceCalibrations}
+   * sorts it again.
+   */
+  private _adoptedDump: { dump: CalibDump; family: ImuFamily } | null = null;
+
+  /** `imuGeneration` as the caller gave it; it wins over a board read. */
+  private readonly _imuGenerationOption: Shimmer3ImuGeneration | undefined;
+
+  /**
+   * What {@link readSrBoard} last read on this link (`board` is null for a
+   * blank id page), or null when it has not been read. Kept as read rather
+   * than as a generation, so that the version read may land before it or
+   * after.
+   */
+  private _srBoardRead: { board: ShimmerSrBoard | null } | null = null;
 
   /**
    * Blocks fetched by {@link readCalibration}, with the range each was read at.
@@ -877,6 +923,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._injectedTransport = opts.transport ?? null;
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
     this._extraOptionalServices = opts.optionalServices ?? [];
+    this._imuGenerationOption = opts.imuGeneration;
   }
 
   /**
@@ -972,6 +1019,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._resetInquiredConfig();
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
+    // The board read, and the IMU generation it decides, are the old sensor's too.
+    this._srBoardRead = null;
     this._audioSupport = null;
     this._statusPayloadBytes = null;
     this._statusWidthReads = null;
@@ -1194,6 +1243,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _resetCalibrationState(): void {
     this._deviceCalibrations = {};
     this._dumpCalibrations = {};
+    this._adoptedDump = null;
     this._btCommandCalibrations = {};
     this._exgBanks = null;
     this._exgBanksSource = null;
@@ -2637,9 +2687,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * page carries the SR code of the board itself, drawn from the same table
    * the Shimmer3 uses. Pair it with {@link describeShimmerHardware} to get a
    * line like `Shimmer3R GSR+ (SR48-3-0)`.
+   *
+   * On a classic Shimmer3 the board also decides {@link imuGeneration}, and
+   * with it the default calibrations for the inertial channels and the old
+   * IMU's big-endian mag. That is `Shimmer3Client.readExpansionBoard`'s rule,
+   * and a blank page means the old IMU there too. Call it before
+   * {@link inquiry}, which builds the schema, and after
+   * {@link readDeviceVersion}, which says whether the device is a Shimmer3.
+   * Shimmer Capture Web does both on connect.
    */
   async readSrBoard(): Promise<ShimmerSrBoard | null> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
     this._emitStatus('GET_DAUGHTER_CARD_ID → waiting for ACK then RSP…');
     const payload = await this._readLengthPrefixedResponse(
       new Uint8Array([OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, 3, 0]),
@@ -2648,8 +2707,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
       'Daughter-card id read',
     );
     const board = parseExpansionBoard(payload);
+    /* Stored before the status line, which runs onStatus and can end the link,
+       and only for the link it was read on: the next sensor's IMU is not this
+       one's. */
+    if (this._linkGeneration === link) {
+      this._srBoardRead = { board };
+      this._reselectDeviceCalibrations();
+    }
+    const imu =
+      this.generation === 'shimmer3' && this._linkGeneration === link
+        ? ` → ${this.imuGeneration ?? 'old'} IMU` +
+          (this._imuGenerationOption !== undefined
+            ? ` (imuGeneration option '${this._imuGenerationOption}' kept)`
+            : '')
+        : '';
     this._emitStatus(
-      board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank',
+      (board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank') + imu,
     );
     return board;
   }
@@ -3815,7 +3888,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         : await this._waitForResponse(respOpcode, timeoutMs, link);
     if (rsp.length < 22) return null; // opcode + 21-byte block
     const block = rsp.subarray(1, 22);
-    const scale = getGroupDefaults('shimmer3r', group)?.sensitivityScale ?? 1;
+    const scale = getGroupDefaults(this._imuFamily, group)?.sensitivityScale ?? 1;
     return parseKinematicCalibBlock(block, { sensitivityScale: scale });
   }
 
@@ -4632,7 +4705,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this.ExpPower = internalExpPower;
     this.gsrRangeSetting = gsrRange;
 
-    // Inertial ranges from the config setup bytes (ConfigByteLayoutShimmer3):
+    // Inertial ranges from the config setup bytes, with the answering device's
+    // meanings. On a Shimmer3R (ConfigByteLayoutShimmer3):
     //   WR accel (LIS2DW12): setup0 bits 2-3  → cfg bits 2-3
     //   gyro (LSM6DSV): LSB setup2 bits 0-1 (cfg bits 16-17) + MSB setup4 bit 2
     //     (cfg bit 34) → 6 ranges (0-5)
@@ -4641,21 +4715,25 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // The LIS2MDL magnetometer and the ADXL371 high-g accel are single-range
     // parts, so 0 is not a placeholder for them — it is their only range.
     //
-    // These are the Shimmer3R's meanings, and they are read on a Shimmer3 too.
-    // There the same bits are the Shimmer3's own parts' ranges: setup2 bits 5-7
-    // the LSM303 magnetometer's, and setup3 bits 6-7 the MPU9x50 accel's, not a
-    // low-noise accel range (`interpretShimmer3InquiryResponse`). Not yet
-    // generation-aware, nor is the inertial calibration this client applies.
-    const gyroLsb = Number((cfg >> 16n) & 0x3n);
-    const gyroMsb = Number((cfg >> 34n) & 0x1n);
-    this.imuRanges = {
-      lnAccel: Number((cfg >> 30n) & 0x3n),
-      wrAccel: Number((cfg >> 2n) & 0x3n),
-      gyro: gyroLsb | (gyroMsb << 2),
-      mag: 0,
-      altAccel: 0,
-      altMag: Number((cfg >> 21n) & 0x7n),
-    };
+    // A Shimmer3 gives some of the same bits other meanings: setup2 bits 5-7
+    // are its LSM303 magnetometer's range, so `mag` and not `altMag`, and setup3
+    // bits 6-7 its MPU9x50 accel's, not a low-noise accel range (its Kionix has
+    // one). Reading them as a Shimmer3R's calibrated its mag at the wrong range
+    // (DEV-1515). `shimmer3ImuRanges` is what `Shimmer3Client` reads them with.
+    if (this.generation === 'shimmer3') {
+      this.imuRanges = shimmer3ImuRanges(Number(cfg & 0xffffffffn));
+    } else {
+      const gyroLsb = Number((cfg >> 16n) & 0x3n);
+      const gyroMsb = Number((cfg >> 34n) & 0x1n);
+      this.imuRanges = {
+        lnAccel: Number((cfg >> 30n) & 0x3n),
+        wrAccel: Number((cfg >> 2n) & 0x3n),
+        gyro: gyroLsb | (gyroMsb << 2),
+        mag: 0,
+        altAccel: 0,
+        altMag: Number((cfg >> 21n) & 0x7n),
+      };
+    }
     /* Pressure oversampling: ConfigSetupByte3 bits 4-5 → cfg bits 28-29, plus
        the MSB at ConfigSetupByte4 bit 0 → cfg bit 32 for the BMP390/BMP581's
        wider ladder (schema keys `pressureOversampling.bmpX80` and
@@ -4721,6 +4799,44 @@ export class Shimmer3RClient extends BaseShimmerClient {
     return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) === null;
   }
 
+  /**
+   * A classic Shimmer3's IMU generation, as this client decodes and
+   * calibrates it: the `imuGeneration` option when given, else what
+   * {@link readSrBoard} read on this link, else null (not read). The rule
+   * `Shimmer3Client.imuGeneration` follows.
+   *
+   * It matters only when {@link generation} is `'shimmer3'`. There it picks
+   * the inertial channels' default calibrations, `'shimmer3-new'` for new and
+   * `'shimmer3-old'` otherwise, null included, as `Shimmer3Client` and the
+   * Java driver do. An old IMU's mag streams big-endian, and the schema
+   * decodes it so; null keeps little-endian, as `buildShimmer3Schema` does,
+   * so that a skipped board read never flips the byte order of the boards
+   * made since. A Shimmer3R has one IMU and ignores this.
+   *
+   * HARDWARE-VERIFY: exercised against scripted Shimmer3s only (DEV-1515). The
+   * rule is `Shimmer3Client`'s, which has run on Shimmer3 hardware, but no
+   * Shimmer3 has yet streamed calibrated inertial data through this client,
+   * nor has an old-IMU board's big-endian mag.
+   */
+  get imuGeneration(): Shimmer3ImuGeneration | null {
+    if (this._imuGenerationOption !== undefined) return this._imuGenerationOption;
+    if (!this._srBoardRead) return null;
+    return shimmer3ImuGenerationOfBoard(
+      this._deviceVersionCache?.hardwareVersion ?? HW_ID.SHIMMER_3,
+      this._srBoardRead.board,
+    );
+  }
+
+  /**
+   * Whose default inertial calibrations, and whose calibration-dump sensor
+   * IDs, apply to this device: the Shimmer3R's, or on a Shimmer3 those of its
+   * IMU generation. Until {@link readDeviceVersion} has answered the device is
+   * taken for a Shimmer3R, as {@link generation} takes it.
+   */
+  private get _imuFamily(): ImuFamily {
+    return this.generation === 'shimmer3' ? shimmer3ImuFamily(this.imuGeneration) : 'shimmer3r';
+  }
+
   private _buildSchemaFromChannels(
     channelIds: number[],
     timestampFmt: TimestampFmt,
@@ -4734,6 +4850,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // guessed width shifts every later channel in the frame, and the decode
       // fails silently rather than throwing.
       onProblem: (m) => this._emitStatus(`⚠️ ${m}`),
+      // An old-IMU Shimmer3's LSM303DLHC sends its mag big-endian, as
+      // `buildShimmer3Schema` decodes it (see `imuGeneration`).
+      formatOverrides:
+        this.generation === 'shimmer3' && this.imuGeneration === 'old'
+          ? SHIMMER3_OLD_IMU_MAG_FORMATS
+          : undefined,
     });
     // Each problem ran onStatus, which can end the link before the schema lands
     if (this._linkGeneration !== link) throw this._linkResetError('the inquiry to be applied');
@@ -4812,7 +4934,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _streamCalibrationState(): StreamCalibrationState {
     return {
       generation: this.generation,
-      family: 'shimmer3r',
+      family: this._imuFamily,
       ranges: this.imuRanges,
       device: this._deviceCalibrations,
       emitInertial: this.emitCalibratedInertial,
@@ -4850,6 +4972,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * one.
    */
   private _reselectDeviceCalibrations(): void {
+    /* A version or board read since the dump was adopted can move the family,
+       and with it which sensor ID names which group's blocks. */
+    const family = this._imuFamily;
+    if (this._adoptedDump && this._adoptedDump.family !== family) {
+      this._adoptedDump = { dump: this._adoptedDump.dump, family };
+      this._dumpCalibrations = selectDumpCalibrations(this._adoptedDump.dump, family);
+    }
     const next: Partial<Record<InertialGroup, KinematicCalibration>> = {};
     const groups = Object.keys(this.imuRanges) as InertialGroup[];
     for (const group of groups) {
@@ -4880,10 +5009,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Blocks the dump holds for ranges other than the configured ones are kept,
    * so a later range change re-selects without another read.
    *
+   * The dump's blocks are sorted into groups by the sensor IDs of this
+   * device's IMU family: the Shimmer3R's, or a Shimmer3's old or new IMU
+   * ({@link imuGeneration}). A {@link readDeviceVersion} or
+   * {@link readSrBoard} that lands later and changes the family sorts them
+   * again.
+   *
    * @returns the groups this dump supplied a usable block for, at any range.
    */
   applyCalibDump(dump: CalibDump): InertialGroup[] {
-    this._dumpCalibrations = selectDumpCalibrations(dump, 'shimmer3r');
+    const family = this._imuFamily;
+    this._adoptedDump = { dump, family };
+    this._dumpCalibrations = selectDumpCalibrations(dump, family);
     this._reselectDeviceCalibrations();
     const groups = Object.keys(this._dumpCalibrations) as InertialGroup[];
     this._emitStatus(
@@ -4915,10 +5052,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   get calibrationInfo(): StreamCalibrationInfo {
     const inertial: StreamCalibrationInfo['inertial'] = {};
+    const family = this._imuFamily;
     const groups = Object.keys(this.imuRanges) as InertialGroup[];
     for (const group of groups) {
       const range = this.imuRanges[group];
-      const defaults = getDefaultCalibration('shimmer3r', group, range);
+      const defaults = getDefaultCalibration(family, group, range);
       if (!defaults) continue;
       const fromDump = this._dumpCalibrations[group]?.[range];
       const fromCommand = this._btCommandCalibrations[group];
@@ -4936,7 +5074,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     const gyroBase =
       this._deviceCalibrations.gyro ??
-      getDefaultCalibration('shimmer3r', 'gyro', this.imuRanges.gyro)?.calibration ??
+      getDefaultCalibration(family, 'gyro', this.imuRanges.gyro)?.calibration ??
       null;
     return {
       inertial,
@@ -5751,6 +5889,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (rsp.length < 2) throw new Error('short DEVICE_VERSION_RESPONSE');
     this._deviceVersionCache = parseShimmer3DeviceVersionResponse(rsp);
     this._settleStatusWidth();
+    // A Shimmer3's answer moves the IMU family, and a dump adopted before it.
+    this._reselectDeviceCalibrations();
     return this._deviceVersionCache;
   }
 
