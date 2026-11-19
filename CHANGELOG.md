@@ -104,6 +104,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`Shimmer3RClient` reads a Shimmer3's inquiry reply with the Shimmer3's layout** (DEV-1514). The client also drives a classic Shimmer3, and Shimmer Capture Web uses it for every Bluetooth sensor. But it sized and parsed every inquiry reply as a Shimmer3R's. The config word is 4 bytes on a Shimmer3 and 7 on a Shimmer3R, so the channel count sits at offset 7 on one and 10 on the other.
+  - **Over Classic Bluetooth, or any link with a CRC,** the framer cut a Shimmer3's reply short. Shimmer3 A615's 21-channel reply is 30 bytes, and offset 10 holds a channel ID, `0x01`, so the framer sized it at 13. The inquiry then timed out (under a CRC, the CRC was checked in the wrong place and the reply dropped). The 17 bytes left over put the next replies out of line, so the battery, status and clock reads after it failed too.
+  - **Over BLE with no CRC** the reply arrived whole, and the parser took a channel ID for the count: one channel.
+  - **Now** the framer (`Shimmer3RFramingOptions.generation`, `inquiryNumChannelsOffset`), the reassembly and the parser all take the layout from `generation`, the hardware version `readDeviceVersion()` reads. With no version read the client still assumes a Shimmer3R, as `generation` does, so a host that may be talking to a Shimmer3 has to read the version first. Shimmer Capture Web does.
+  - **Not fixed here:** on a Shimmer3 this client still reads the config word's ranges with the Shimmer3R's meanings, and calibrates inertial channels with the Shimmer3R's defaults.
+  - **Tests:** A615's reply as captured, over BLE and a byte stream, with no CRC and with 1 and 2 bytes, followed by battery and status reads. `stream-schema.test.ts`'s scripted Shimmer3 now sends a Shimmer3's reply rather than a Shimmer3R's.
+  - `Shimmer3Client` always used the Shimmer3 layout, and `shimmer-host-core` sizes the reply per platform.
+
 - **`WiredShimmerClient.runFactoryTest()`'s doc comment no longer says the ExG test always fails from the dock** (DEV-1340). That is Shimmer3 only: its firmware prints `- FAIL: ADS1292R test will not work from dock` without running the test, because its dock UART and the ExG chip share pins. A Shimmer3R runs the ExG test (S3R_TEST_0021) normally over USB-C and over the dock, since its ExG SPI3 and dock USART1 share no pins, so an ExG FAIL from a Shimmer3R is a real result. Documentation only; no code changed.
 
 - **A stop no longer loses the tail of the stream, the stop's push or the next command's reply** (`Shimmer3RClient`). Packets go on arriving after `stopStreaming` and `stopStreamingAndLogging`, and with them the stop's ACK and the status push that closes a log. The client ended the stream plane as soon as the stop was written, so that tail reached the control framer part-way through a packet.
