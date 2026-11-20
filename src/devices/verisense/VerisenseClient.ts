@@ -134,6 +134,17 @@ import { describePlatformSupport, transportAdvice } from '../../core/platformSup
 // property) so it always aborts the retry loop.
 const CONNECT_CANCELLED_MESSAGE = 'Connect cancelled: disconnect requested during connect attempt.';
 
+/** A NUL-padded ASCII field of a .msbl header, up to its first NUL, with any
+ * unprintable byte shown as `\xNN` so a wrong file reads clearly in an error. */
+function msblAscii(img: Uint8Array, off: number, len: number): string {
+  let s = '';
+  for (const b of img.subarray(off, off + len)) {
+    if (b === 0) break;
+    s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`;
+  }
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // VerisenseBleDevice
 // ---------------------------------------------------------------------------
@@ -1716,6 +1727,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
    * erased and each page is written. Only SR68 Pulse+ hardware (the only board
    * carrying the hub) accepts it — other hardware NACKs the BEGIN stage.
    *
+   * The image is refused, before anything is sent, unless its header says
+   * `msbl` and names the hub's die, `MAX32670`. BEGIN erases the hub's
+   * application and the device does not read the target, so an image for
+   * another part, such as a MAX32664's (`MAX32660`), would leave the hub empty.
+   * The C-keyed and development-keyed builds both name `MAX32670`, so this
+   * cannot tell which key an image carries.
+   *
    * @param msbl       raw .msbl file bytes
    * @param onProgress optional progress callback (pagesDone, totalPages)
    * @returns the hub application firmware version string read back after flashing
@@ -1727,6 +1745,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const img = msbl instanceof Uint8Array ? msbl : new Uint8Array(msbl);
     if (img.length < MSBL.HEADER_SIZE) {
       throw new Error('uploadHubFirmware: file is too small to be a valid .msbl');
+    }
+
+    const magic = msblAscii(img, 0, MSBL.MAGIC.length);
+    if (magic !== MSBL.MAGIC) {
+      throw new Error(
+        `uploadHubFirmware: not a .msbl image (header starts "${magic}", expected "${MSBL.MAGIC}"); nothing was sent`,
+      );
+    }
+    const target = msblAscii(img, MSBL.OFF_TARGET, MSBL.TARGET_LEN);
+    if (target !== MSBL.HUB_TARGET) {
+      throw new Error(
+        `uploadHubFirmware: this .msbl is built for "${target}", not the MAX32674C algorithm hub ` +
+          `(expected "${MSBL.HUB_TARGET}"); nothing was sent and the hub was not erased`,
+      );
     }
 
     const numPages = img[MSBL.OFF_NUMPAGES] | (img[MSBL.OFF_NUMPAGES + 1] << 8);

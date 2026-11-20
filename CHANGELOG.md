@@ -104,6 +104,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`VerisenseBleDevice.uploadHubFirmware` refuses a `.msbl` built for another part** (DEV-1522). It used to check only the length, and BEGIN erases the MAX32674C hub's application before the first page. The device firmware never reads the header's target, so a wrong image left the hub empty, and its bootloader then rejected the image because it was keyed for another part.
+  - **The wrong file is close at hand.** The only `.msbl` files in the shared Projects folder are MAX32664C images, `MAX32664C_MAX86174_WHRM_AEC_SCD_WSPO2_{C,Z}_35.7.1.msbl`, which name `MAX32660`. They have the right extension and the right length.
+  - **Now:** the header must start `msbl` and name the target `MAX32670`, the die ADI's MAX32674C images name, as in `MAX32670_WHRM_AEC_SCD_WSPO2_C_50.4.4.msbl`. Anything else is refused before a byte is sent, with an error that names the target it found. `MSBL` gains `MAGIC`, `OFF_TARGET`, `TARGET_LEN` and `HUB_TARGET`.
+  - **What it can't tell:** the C-keyed and development-keyed builds both name `MAX32670`, so a key mismatch still erases the hub.
+
 - **`Shimmer3RClient.supportsSdTransfer()` refuses a Shimmer3 at every firmware version** (DEV-1517). It answered from the firmware version alone, against the Shimmer3R's threshold of v1.01.011, but `Shimmer3RClient` drives a Shimmer3 too, and the two number their LogAndStream releases separately.
   - **What the firmware does:** no LogAndStream_Shimmer3 release serves the SD file-transfer commands. The Shimmer3 build compiles the transfer module as empty stubs and every SD opcode in the shared parser as `#if defined(SHIMMER3R)` (log-and-stream-common `71d283f` on, still so at `bf7fe41`). The 3-byte block shift that sets the Shimmer3R threshold was the STM32U5's SDMMC IDMA (`679f94c`), which a Shimmer3 never had.
   - **Before:** a Shimmer3 at v1.01.009, the newest release, was refused, for the wrong reason, and the error named a Shimmer3R update. From Shimmer3 v1.01.011 it would have passed, and the SDK would have sent SD commands that its parser reads as other commands: `/data` reaches SET_DAUGHTER_CARD_ID, which then waits for 97 bytes of payload and swallows the commands after it.

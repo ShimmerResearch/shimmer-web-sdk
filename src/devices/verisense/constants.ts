@@ -128,9 +128,20 @@ export const HUB_FW_UPLOAD_STAGE = Object.freeze({
 } as const);
 
 /** MAX32674C .msbl image geometry (mirrors firmware flashUpdater.h). A page on
- * the wire is PAGE_PAYLOAD + PAGE_CRC bytes; HEADER_SIZE bytes precede page 0. */
+ * the wire is PAGE_PAYLOAD + PAGE_CRC bytes; HEADER_SIZE bytes precede page 0.
+ *
+ * The header opens with the magic `msbl` and, at OFF_TARGET, the part the image
+ * was built for: NUL-padded ASCII. ADI's MAX32674C images name its die,
+ * `MAX32670`, for example `MAX32670_WHRM_AEC_SCD_WSPO2_C_50.4.4.msbl`, the v50.4.4
+ * the SR68 hubs report. A MAX32664 image names `MAX32660`. The device firmware
+ * reads neither field, and it erases the hub before the first page. */
 export const MSBL = Object.freeze({
   HEADER_SIZE: 0x4c,
+  MAGIC: 'msbl',
+  OFF_TARGET: 0x08,
+  TARGET_LEN: 16,
+  /** The only target the Verisense algorithm hub (MAX32674C) accepts. */
+  HUB_TARGET: 'MAX32670',
   OFF_NUMPAGES: 0x44,
   PAGE_PAYLOAD: 8192,
   PAGE_CRC: 16,
