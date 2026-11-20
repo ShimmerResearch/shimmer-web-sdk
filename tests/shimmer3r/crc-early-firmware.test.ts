@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
-import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { BYTE_STREAM_LINK, OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import {
   CRC_MODE,
   SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
@@ -287,7 +287,7 @@ describe('a link CRC on Shimmer3R firmware that drops it when sensing stops', ()
       const refused = expect(client.setCrcMode(CRC_MODE.TWO_BYTE)).rejects.toThrow(
         /hardware version could not be read/,
       );
-      await vi.advanceTimersByTimeAsync(1500);
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS);
       await refused;
     } finally {
       vi.useRealTimers();

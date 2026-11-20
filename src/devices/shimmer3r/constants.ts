@@ -211,6 +211,39 @@ export const OPCODES = Object.freeze({
 export type Opcode = (typeof OPCODES)[keyof typeof OPCODES];
 
 /**
+ * Timing for a byte-stream link: Web Serial, over a Bluetooth Classic COM port
+ * or over USB.
+ *
+ * A Bluetooth Classic link that has carried nothing for a while answers its
+ * next command late. shimmer-host-core measured about 1.8 s after 10-20 s of
+ * quiet, on Windows, with a Shimmer3 and a Shimmer3R alike. On a Shimmer3
+ * (RN4678) over Web Serial on 20 Nov 2026 (DEV-1516), the first battery read
+ * after a minute's quiet took 1.1 s to over 1.5 s. BLE does not slow down this
+ * way. The rule here is the one shimmer-host-core and the Java driver follow.
+ */
+export const BYTE_STREAM_LINK = Object.freeze({
+  /**
+   * How long the link may carry nothing before the client sends a command to
+   * keep it awake. The Java driver's `TIMER_READ_STATUS_PERIOD` and
+   * shimmer-host-core's `STATUS_READ_PERIOD_MS`. This is the default for
+   * `Shimmer3RClient.idleKeepAliveMs`.
+   */
+  KEEP_ALIVE_IDLE_MS: 5000,
+  /**
+   * The shortest ACK wait a command gets on this link, whatever its caller
+   * asked for. shimmer-host-core's `DEFAULT_TIMEOUT_MS`. It covers the first
+   * command after a quiet the keep-alive did not prevent: one sent while the
+   * keep-alive was off, paused, or still waiting out its idle period.
+   */
+  MIN_ACK_WAIT_MS: 2000,
+  /**
+   * When a keep-alive is due but the link is busy, how long before it looks
+   * again: shimmer-host-core's `BATTERY_RETRY_MS`.
+   */
+  KEEP_ALIVE_RETRY_MS: 1000,
+} as const);
+
+/**
  * Default BLE service / characteristic UUIDs for Shimmer3R.
  *
  * The Shimmer3R's BLE transport is the CYW20820 module's CYSPP profile. Per the
