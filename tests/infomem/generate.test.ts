@@ -44,39 +44,58 @@ describe('generateInfoMem — device-write finalization', () => {
 });
 
 describe('generateInfoMem — base preservation of unmodelled bytes', () => {
-  it('preserves calibration/rate regions (bytes we do not model) from the base', () => {
+  it('preserves genuinely unmodelled regions (MPL calibration, reserved bytes) from the base', () => {
     const ctx = CTX.modernShimmer3;
-    const l = resolveInfoMemLayout(ctx);
     const base = new Uint8Array(INFOMEM_SIZE);
     // Fill unmodelled regions with a sentinel; also make first 6 bytes non-0xFF.
     base.fill(0x5a);
     base[0] = 0; // will be overwritten by sampling rate anyway
-    const cfg = seedConfig(ctx);
-    cfg.samplingRateHz = 256;
+    // Parse the SAME base so every modelled field is an identity write.
+    const cfg = { ...parseInfoMem(base, ctx), samplingRateHz: 256 };
     const bytes = generateInfoMem(cfg, ctx, { base });
 
-    // A calibration byte (analog-accel calib @ 34 in the relocated layout) is untouched.
-    expect(bytes[34]).toBe(0x5a);
-    // ConfigSetupByte0 (accel rate/range — not modelled) preserved.
-    expect(bytes[l.idxConfigSetupByte0]).toBe(0x5a);
-    // But ConfigSetupByte3's GSR/expPower bits are our fields → written (not 0x5a's bits).
+    // MPL accel/mag calibration region (128+5 .. 128+46) — deliberately not
+    // modelled (ConfigByteLayoutShimmer3.java:226-248), must survive verbatim.
+    expect(bytes[133]).toBe(0x5a);
+    expect(bytes[154]).toBe(0x5a);
+    // MPL gyro calibration region == FW `unusedIdx175To186[12]`.
+    expect(bytes[175]).toBe(0x5a);
+    expect(bytes[186]).toBe(0x5a);
+    // ConfigSetupByte6 (idx 132) is MPL-only / FW `unusedIdx132`.
+    expect(bytes[132]).toBe(0x5a);
+    // Reserved InfoMem D bytes 123-127 (FW `unusedIdx123`..`unusedIdx127`).
+    for (let i = 123; i <= 127; i++) expect(bytes[i]).toBe(0x5a);
     // Sampling rate WAS written.
     const divider = (bytes[0] & 0xff) + ((bytes[1] & 0xff) << 8);
     expect(32768 / divider).toBeCloseTo(256, 6);
   });
 
-  it('read-modify-writes ConfigSetupByte3, preserving its non-GSR/expPower bits', () => {
+  it('read-modify-writes ConfigSetupByte3, preserving its unmodelled bits', () => {
     const ctx = CTX.modernShimmer3;
     const l = resolveInfoMemLayout(ctx);
     const base = new Uint8Array(INFOMEM_SIZE);
     base[0] = 1; // valid
-    base[l.idxConfigSetupByte3] = 0b1100_0000; // upper bits set (accel range etc.)
-    const cfg = seedConfig(ctx);
-    cfg.gsrRange = 3; // 0b011 << 1
-    cfg.expPowerEnabled = true; // bit 0
+    // Alt-accel range = 0b11 (bits 6-7), pressure oversampling LSB = 0 (bits 4-5).
+    base[l.idxConfigSetupByte3] = 0b1100_0000;
+    const cfg = { ...parseInfoMem(base, ctx), gsrRange: 3, expPowerEnabled: true };
     const bytes = generateInfoMem(cfg, ctx, { base });
-    // Upper bits preserved, GSR + expPower layered in: 0b1100_0000 | (3<<1) | 1 = 0b1100_0111
+    // Alt-accel range preserved, GSR + expPower layered in:
+    // 0b1100_0000 | (3<<1) | 1 = 0b1100_0111
     expect(bytes[l.idxConfigSetupByte3]).toBe(0b1100_0111);
+  });
+
+  it('leaves the Shimmer3R-only ConfigSetupByte4/5 bits alone on a Shimmer3 context', () => {
+    const ctx = CTX.modernShimmer3;
+    const l = resolveInfoMemLayout(ctx);
+    const base = new Uint8Array(INFOMEM_SIZE);
+    base[0] = 1;
+    // On Shimmer3 these bytes hold MPU9150 DMP/MPL settings — never touched.
+    base[l.idxConfigSetupByte4] = 0xa5;
+    base[l.idxConfigSetupByte5] = 0x5a;
+    const cfg = parseInfoMem(base, ctx);
+    const bytes = generateInfoMem(cfg, ctx, { base });
+    expect(bytes[l.idxConfigSetupByte4]).toBe(0xa5);
+    expect(bytes[l.idxConfigSetupByte5]).toBe(0x5a);
   });
 });
 

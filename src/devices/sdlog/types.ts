@@ -2,6 +2,16 @@
  * Public types for the Shimmer3 / Shimmer3R binary SD-log decoder.
  */
 
+import type { PressureSensorKind } from '../pressure/types.js';
+import type { GyroOnTheFlyInfo } from '../calibration/gyroOnTheFly.js';
+
+/**
+ * The pressure part an SD-log header records (byte 224, DEV-1123): a known
+ * part, `'unknown'` for an id this SDK does not recognise, or `'none'` when
+ * the firmware found no pressure sensor fitted.
+ */
+export type SdLogPressureSensor = PressureSensorKind | 'unknown' | 'none';
+
 /** One decoded channel within an SD-log data packet. */
 export interface SdLogChannel {
   /** Signal name, following the SDK's streaming channel naming where a streaming equivalent exists. */
@@ -25,7 +35,8 @@ export interface SdLogCalibrationBytes {
   /**
    * Pressure/temperature block — header offset 160, 22 bytes, plus header
    * bytes 222-223 appended (24 bytes total) when the device carries a
-   * BMP280/BMP390 (new-IMU boards and every Shimmer3R).
+   * BMP280/BMP390 (new-IMU boards and every Shimmer3R). A BMP581 has no trim
+   * block and the firmware leaves this region unwritten (0xFF) for one.
    */
   pressure: Uint8Array;
   /** Shimmer3R alternative (high-g) accel block — header offset 256, 21 bytes. */
@@ -97,6 +108,15 @@ export interface SdLogHeader {
   calibrationBytes: SdLogCalibrationBytes;
   /** GSR hardware range setting from the header (0-3 fixed, 4 = auto). */
   gsrRange: number;
+  /**
+   * Raw 10-byte ADS1292R chip-1 (ExG1) register bank, from SD header bytes
+   * 56-65 (ShimmerSDLog.java:253 Shimmer3R, :323 Shimmer3). Decode it with
+   * `decodeExgRegisters`, or identify the whole-device preset with
+   * `detectExgPreset(exg1, exg2)`. All-zero on a non-ExG device.
+   */
+  exg1: Uint8Array;
+  /** Raw 10-byte ADS1292R chip-2 (ExG2) register bank, from header bytes 66-75. */
+  exg2: Uint8Array;
   /** Expansion-board identity, when the firmware stores it in the header. */
   expansionBoard: SdLogExpansionBoard | null;
   /**
@@ -112,6 +132,61 @@ export interface SdLogHeader {
    * files) yield an empty array.
    */
   calibration: SdLogChannelCalibrationInfo[];
+  /**
+   * The pressure part header byte 224 records, or null when the header does
+   * not record one: SDLog firmware, LogAndStream older than v1.01.006 on a
+   * Shimmer3 or v1.01.018 on a Shimmer3R, or the byte left at 0xFF. When null,
+   * the part is inferred from the expansion-board revision (Shimmer3) or SR
+   * number (Shimmer3R), as before the field existed.
+   *
+   * When set it decides the pressure channels, even against that inference:
+   * a BMP581 pair on a Shimmer3R is emitted calibrated (kPa, °C), every other
+   * part's pair raw. `'unknown'`, and `'none'` with pressure channels
+   * nonetheless enabled, yield raw, part-neutral `PRESSURE`/`TEMPERATURE`
+   * channels and an entry in {@link warnings}.
+   */
+  pressureSensor: SdLogPressureSensor | null;
+  /**
+   * The sensor id from byte 224 (its low 7 bits) when the byte names a part,
+   * known or not; null when {@link pressureSensor} is null or `'none'`.
+   */
+  pressureSensorId: number | null;
+  /**
+   * True when byte 224 has bit 7 set: the firmware could not confirm the part
+   * by chip id and inferred it from the board's SR number. Always comes with
+   * an entry in {@link warnings}.
+   */
+  pressureSensorInferred: boolean;
+  /**
+   * Header byte 225 (`SDH_BUTTON_LOG_MODE`, DEV-971): configuration byte 232
+   * as the firmware acted on it for this file - button mode, log triggers and
+   * TTL input - raw. Firmware before the field leaves 0xFF, which
+   * `decodeButtonLogMode` reads as "as before" by the byte's own rule. Null
+   * for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  buttonLogMode: number | null;
+  /**
+   * Header byte 226 (`SDH_AUDIO_MODE`, DEV-99): configuration byte 233 as the
+   * firmware acted on it for this file - what the microphone recorded into
+   * `audio/` beside it, and in bit 4 whether the sound level (channel 0x38,
+   * DEV-1413) was sampled into it - raw. Firmware before the field leaves
+   * 0xFF, which `audioModeOf` and `soundLevelEnabled` read as off by the
+   * byte's own rule. For the sound level the channel list says the same, and
+   * the decoder goes by the channel list. Null for a Shimmer3,
+   * which has no microphone, and for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  audioMode: number | null;
+  /**
+   * Human-readable notes on anything the decoder had to work around or could
+   * not confirm in this header. Empty when there is nothing to report.
+   */
+  warnings: string[];
 }
 
 /** Inertial-sensor hardware ranges from the SD config setup bytes. */
@@ -142,6 +217,13 @@ export interface SdLogChannelCalibrationInfo {
   source: 'sd-header' | 'default';
   /** The hardware range value used to select the calibration. */
   range: number;
+  /**
+   * Gyro only: the on-the-fly offset calibration (derived-sensor bit 29).
+   * `enabled` comes from the header; `active`, `updates` and `offset` describe
+   * the decode once it has run - for a session, the state the last file left,
+   * with `updates` summed over every file.
+   */
+  gyroOnTheFly?: GyroOnTheFlyInfo;
 }
 
 /** Machine-readable reasons for rejecting an SD-log input. */
@@ -167,11 +249,12 @@ export class SdLogFormatError extends Error {
 /** One decoded sample. `values` aligns 1:1 with `SdLogHeader.channels`. */
 export interface SdLogRecord {
   /**
-   * Device-clock time in milliseconds:
-   * (initialTimestampTicks + unwrapped ticks - first packet's raw ticks)
-   * / 32768 * 1000, exactly as the Java driver computes the SD calibrated
-   * timestamp (parseTimestampShimmer3 with mFirstTsOffsetFromInitialTsTicks).
-   * On modern firmware this equals the device's full 40-bit clock in ms.
+   * Device-clock time in milliseconds: the record's own 40-bit counter value
+   * / 32768 * 1000. The first packet's full value is rebuilt from the header's
+   * initial timestamp (the RTC at file creation) and the packet's 24-bit raw
+   * timestamp, and later packets advance by their unwrapped ticks — as the
+   * Java driver computes the SD calibrated timestamp (parseTimestampShimmer3
+   * with mFirstTsOffsetFromInitialTsTicks; DEV-1095).
    */
   timestampMs: number;
   /**

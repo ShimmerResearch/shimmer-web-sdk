@@ -36,6 +36,16 @@ export interface HeaderFixtureOptions {
   signalIds?: number[];
   /** Optional per-block fill for the calibration areas (default pattern). */
   calibFill?: (offset: number) => number;
+  /** ADS1292R chip-1 register bank → SD header bytes 56-65. */
+  exg1?: number[];
+  /** ADS1292R chip-2 register bank → SD header bytes 66-75. */
+  exg2?: number[];
+  /**
+   * Pressure sensor id → SD header byte 224 (DEV-1123). Defaults to 0xFF, the
+   * firmware's pre-fill ("not recorded"): a zero-filled byte would read as a
+   * BMP180 on firmware new enough to trust it.
+   */
+  pressureSensorId?: number;
 }
 
 /** Build a modern Shimmer3 (256 B) or Shimmer3R (384 B) SD-log header. */
@@ -95,11 +105,16 @@ export function buildSdLogHeader(opts: HeaderFixtureOptions = {}): Uint8Array {
   b[54] = Math.floor(cfgTime / 2 ** 8) % 256;
   b[55] = cfgTime % 256;
 
+  // ExG register banks (ShimmerSDLog.java:253-254 / :323-324): bytes 56-65 / 66-75.
+  if (opts.exg1) opts.exg1.forEach((v, i) => (b[56 + i] = v & 0xff));
+  if (opts.exg2) opts.exg2.forEach((v, i) => (b[66 + i] = v & 0xff));
+
   // Calibration areas — recognizable default pattern.
   const fill = opts.calibFill ?? ((off: number) => off & 0xff);
   for (let off = 76; off < 182; off++) b[off] = fill(off);
   b[222] = fill(222);
   b[223] = fill(223);
+  b[224] = opts.pressureSensorId ?? 0xff;
 
   if (opts.expansionBoard) {
     b[214] = opts.expansionBoard[0];

@@ -1,6 +1,19 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { HandlerSet } from '../../core/handlerSet.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
+import { drainByteStream } from '../../core/framing.js';
+import {
+  FactoryTestCapture,
+  FactoryTestError,
+  type FactoryTestRunOptions,
+  type FactoryTestState,
+} from '../factoryTest/capture.js';
+import {
+  requireShimmer3FactoryTestType,
+  type Shimmer3FactoryTestTypeInfo,
+} from '../shimmer3r/factoryTest.js';
 import {
   UART_PACKET_CMD,
   UART_PROP,
@@ -19,24 +32,33 @@ import {
   wiredPacketLength,
   isBadResponse,
   badResponseReason,
+  classifyFactoryTestAckPacket,
   parseMacId,
   parseVersionInfo,
   parseBatteryStatus,
   parseExpansionBoard,
   msToRtcBytesLE,
   isSupportedRtcConfigViaUart,
-  NEED_MORE,
-  RESYNC,
   type UartRxPacket,
   type WiredVersionInfo,
   type WiredBatteryStatus,
   type ExpansionBoardInfo,
 } from './protocol.js';
 import {
+  buildShimmerSrIdPage,
+  formatShimmerSrCode,
+  isSameShimmerSrBoard,
+  parseBluetoothModuleVersion,
+  srReadBackError,
+  type BluetoothModuleVersion,
+  type ShimmerSrBoard,
+} from '../identity.js';
+import {
   resolveInfoMemLayout,
   parseInfoMem,
   generateInfoMem,
   deviceWriteDivergentRanges,
+  compareInfoMemExcluding,
   INFOMEM_SIZE,
   INFOMEM_PAGE_SIZE,
   type InfoMemContext,
@@ -115,7 +137,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private _disconnectUnsub: Unsubscribe | null = null;
 
   private _rxBuf: Uint8Array = new Uint8Array(0);
-  private _temps: Set<(pkt: UartRxPacket) => void> = new Set();
+  private readonly _temps = new HandlerSet<UartRxPacket>((e) => this._log('temp handler error', e));
 
   /**
    * Serialization queue. Every public command method chains onto this so that
@@ -129,6 +151,21 @@ export class WiredShimmerClient extends BaseShimmerClient {
    */
   private _queue: Promise<unknown> = Promise.resolve();
 
+  /**
+   * The in-flight factory-test capture, or null when none is running. Non-null
+   * for the whole time the report owns the link — including the drain after a
+   * cancelled or timed-out run, because the firmware has no abort command and
+   * keeps printing regardless.
+   */
+  private _factoryTest: FactoryTestCapture | null = null;
+
+  /**
+   * Invoked whenever {@link factoryTestState} changes, synchronously. A host
+   * uses it to hold its own "the link is busy" gate through the whole run,
+   * including the `draining` phase when the sensor is still printing.
+   */
+  onFactoryTestStateChange: ((state: FactoryTestState) => void) | null = null;
+
   // Cached device info
   identity: WiredIdentity | null = null;
 
@@ -141,8 +178,19 @@ export class WiredShimmerClient extends BaseShimmerClient {
     if (this.debug) console.log('[WiredDock]', ...args);
   }
 
-  private _deviceLabel(): string {
-    return this._transport?.deviceName ?? 'Shimmer(dock)';
+  /**
+   * The name the link reported, or `null` when it reported none. Never invented.
+   *
+   * This client builds no `ObjectCluster` — the dock protocol has no streaming —
+   * so there is no second caller needing a non-null identifier. The old
+   * `?? 'Shimmer(dock)'` fired on every real connect (the wired link is a
+   * `WebSerialTransport`, which reports no name), and it named a dock that need
+   * not be there: this client also drives a Shimmer3R over a direct USB-C
+   * cable, which is the same protocol and no dock at all.
+   */
+  private _reportedDeviceName(): string | null {
+    const name = this._transport?.deviceName?.trim();
+    return name ? name : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -166,16 +214,24 @@ export class WiredShimmerClient extends BaseShimmerClient {
       );
     }
     this._transport = t;
+    this._armDisconnectNotification();
     this._notifyUnsub = t.onNotify(this._handleNotify);
     this._disconnectUnsub = t.onDisconnect(this._handleTransportDisconnect);
 
     this._emitStatus('Opening dock UART connection…');
     await t.connect();
     this._rxBuf = new Uint8Array(0);
-    this._emitStatus(`Connected: ${this._deviceLabel()}`);
+    this._emitStatus(`Connected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
   }
 
   override async disconnect(): Promise<void> {
+    // Fail an in-flight capture BEFORE the transport goes: no further bytes are
+    // coming, so there is nothing to drain, and a caller awaiting the report
+    // must be told rather than left waiting out the whole budget.
+    this._failFactoryTest('Disconnected while the factory self-test was running.');
+    // Application-initiated teardown is not a fault, so `onDisconnect` stays
+    // silent — including when this call is the cleanup that follows a drop.
+    this._suppressDisconnectNotification();
     try {
       this._notifyUnsub?.();
       this._disconnectUnsub?.();
@@ -191,8 +247,11 @@ export class WiredShimmerClient extends BaseShimmerClient {
     }
   }
 
-  private _handleTransportDisconnect = (): void => {
+  /** Handle an unexpected transport disconnect (the dock UART went away). */
+  private _handleTransportDisconnect = (reason?: Error): void => {
+    this._failFactoryTest('The link dropped during the factory self-test.');
     this._emitStatus('Dock disconnected');
+    this._emitDisconnect(reason);
   };
 
   /**
@@ -205,6 +264,185 @@ export class WiredShimmerClient extends BaseShimmerClient {
    */
   resyncStream(): void {
     this._rxBuf = new Uint8Array(0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Factory self-test (component UART_COMPONENT.TEST)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What the factory-test runner is doing: `idle` when the link is free,
+   * `running` while a report is being captured, `draining` while a cancelled or
+   * timed-out report is still being swallowed.
+   */
+  get factoryTestState(): FactoryTestState {
+    return this._factoryTest?.state ?? 'idle';
+  }
+
+  /**
+   * Resolve when the link is free again. Never rejects — a failed run still
+   * releases the link, and this is the wait a host needs after cancelling one.
+   */
+  whenFactoryTestIdle(): Promise<void> {
+    return this._factoryTest?.idle ?? Promise.resolve();
+  }
+
+  /**
+   * Run the docked sensor's factory self-test and return its report.
+   *
+   * The dock protocol addresses the test as a WRITE to `UART_COMPONENT.TEST`
+   * whose PROPERTY byte is the test type, with no payload
+   * (`Comms/shimmer_dock_usart.c:473-486`). The firmware ACKs it and then prints
+   * the same report the Bluetooth command produces — as raw text on this link,
+   * with no packet framing and no CRC. A type the firmware does not know is
+   * answered BAD_CMD, which surfaces here as a `nack`.
+   *
+   * On a Shimmer3R the report goes to the USB CDC port when the sensor is
+   * plugged in by USB and to the dock UART otherwise (`hal_FactoryTest.c`), so
+   * this one method serves a docked sensor and a USB-C-connected one alike.
+   *
+   * Two caveats worth passing on to whoever reads the report:
+   * - The whole run holds this client's command queue. Nothing else reaches the
+   *   sensor until the report ends — which is the truth about the firmware, not
+   *   a limitation here: its main loop is blocked for the duration.
+   * - **On a Shimmer3, the ExG chip test cannot pass from the dock.** Shimmer3
+   *   (MSP430) firmware does not run it there: it prints
+   *   `- FAIL: ADS1292R test will not work from dock` instead, because on that
+   *   board the dock UART and the chip share pins (`hal_FactoryTest.c`,
+   *   `SPI_test()`). A FAIL on that line from this transport says nothing about
+   *   the board; run the test over Bluetooth to judge it. **This is Shimmer3
+   *   only.** A Shimmer3R runs its ExG test (S3R_TEST_0021) normally over USB-C
+   *   and over the dock alike — its ExG SPI3 (PB4/PB5/PG9) and dock USART1
+   *   (PB6/PB7) share no pins — so an ExG FAIL from a Shimmer3R is a real result.
+   *
+   * @param type 0 MAIN, 1 LEDS, 2 ICS, 3 LED_STATES (`Test/shimmer_test.h:21-27`).
+   * @param opts see {@link FactoryTestRunOptions}; `timeoutMs` defaults to the
+   *   type's own entry in `SHIMMER3_FACTORY_TEST_TYPES`. `preflight` is ignored:
+   *   the dock protocol has no equivalent status read.
+   * @returns the report text, CRLF line endings intact.
+   *
+   * HARDWARE-VERIFY: no docked Shimmer3 or USB-C Shimmer3R has run this path.
+   */
+  async runFactoryTest(type: number, opts: FactoryTestRunOptions = {}): Promise<string> {
+    const info = requireShimmer3FactoryTestType(type);
+    if (this._factoryTest) {
+      throw new FactoryTestError(
+        'busy',
+        'A factory test is already running, or its report is still draining — ' +
+          'await whenFactoryTestIdle() first.',
+      );
+    }
+    /*
+     * The queue is held until the capture is IDLE, not until the caller has
+     * its answer. Those are different moments: an aborted or timed-out run
+     * rejects at once while the sensor goes on printing, and a command that
+     * started in that window would have its response swallowed as report text
+     * and then hang until its own timeout. Holding the queue through the drain
+     * says the true thing — the link is not free yet — and makes the next
+     * command wait rather than fail.
+     *
+     * So the caller is handed the capture's own promise, while the serialized
+     * unit runs on to the drain's end.
+     */
+    let settle!: (value: Promise<string>) => void;
+    let fail!: (err: unknown) => void;
+    const started = new Promise<Promise<string>>((resolve, reject) => {
+      settle = resolve;
+      fail = reject;
+    });
+    const queued = this._serialize(async () => {
+      try {
+        await this._runFactoryTestImpl(info, opts, settle);
+      } catch (err) {
+        fail(err);
+        throw err;
+      }
+    });
+    // The queue's own promise is bookkeeping; the caller never sees it, and a
+    // rejection it carried would otherwise surface as unhandled.
+    void queued.catch(() => {});
+    return started.then((result) => result);
+  }
+
+  private async _runFactoryTestImpl(
+    info: Shimmer3FactoryTestTypeInfo,
+    opts: FactoryTestRunOptions,
+    settle: (value: Promise<string>) => void,
+  ): Promise<void> {
+    const transport = this._transport;
+    if (!transport) throw new Error('Not connected');
+    if (opts.signal?.aborted) throw new DOMException('Factory test aborted', 'AbortError');
+
+    // Nothing left over from before may be mistaken for the first report line.
+    this._rxBuf = new Uint8Array(0);
+
+    const capture = new FactoryTestCapture(classifyFactoryTestAckPacket, {
+      ...opts,
+      timeoutMs: opts.timeoutMs ?? info.defaultTimeoutMs,
+      onStateChange: (state) => {
+        /* Release before telling the host, so a host that issues its next
+           command straight out of this callback is not refused by the run it
+           was just told had ended. */
+        if (state === 'idle') this._releaseFactoryTest();
+        /* …and the host is told on a MICROTASK, not from inside `feed()`.
+         * The capture is called from the notify handler, which has not yet
+         * routed the tail bytes `feed()` just handed back — a late ACK, or a
+         * status push glued to the TEST END banner. A host that sent its next
+         * command straight out of a synchronous callback could have that
+         * command's acknowledgement satisfied by the test's own leftovers.
+         * Deferring by one microtask puts the callback after the routing and
+         * before anything else, which is also where `whenFactoryTestIdle()`
+         * already resolves. */
+        queueMicrotask(() => {
+          try {
+            this.onFactoryTestStateChange?.(state);
+          } catch (e) {
+            this._log('onFactoryTestStateChange handler error', e);
+          }
+        });
+      },
+    });
+
+    this._factoryTest = capture;
+    capture.start();
+    this._emitStatus(`Factory test ${info.name} requested — the sensor will print its report…`);
+    try {
+      await transport.write(buildWritePacket(UART_PROP.TEST[info.name], new Uint8Array(0)));
+    } catch (err) {
+      capture.fail(
+        new FactoryTestError(
+          'disconnected',
+          `Could not send the factory-test command: ${(err as Error).message}`,
+        ),
+      );
+    }
+    /* The caller's answer is the capture's own promise, so a cancelled run
+       rejects for them at once… */
+    settle(capture.result);
+    /* …while this serialized unit — and with it the command queue — runs on
+       until the sensor has really stopped printing. */
+    await capture.idle;
+  }
+
+  /**
+   * Let go of the link at the end of a run: clear the capture, then drop
+   * anything the report left in the accumulator. Called from the capture's own
+   * `idle` transition, so it happens before the tail bytes it hands back are
+   * routed through the packet parser.
+   */
+  private _releaseFactoryTest(): void {
+    this._factoryTest = null;
+    this._rxBuf = new Uint8Array(0);
+    this._emitStatus('Factory test finished — the link is free again');
+  }
+
+  /**
+   * Abandon an in-flight capture because the link has gone. No drain: draining
+   * exists to keep a still-arriving report out of the packet parser, and nothing
+   * is arriving on a link that is closed.
+   */
+  private _failFactoryTest(message: string): void {
+    this._factoryTest?.fail(new FactoryTestError('disconnected', message));
   }
 
   /** Streaming is not part of the dock UART protocol. */
@@ -310,6 +548,97 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _readExpansionBoardImpl(): Promise<ExpansionBoardInfo | null> {
     const payload = await this._readMem(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, 16);
     return parseExpansionBoard(payload);
+  }
+
+  /**
+   * Program the daughter-card (expansion board) ID — the SR identity — and
+   * read it back. This is exactly what Consensys's factory "Program Exp.
+   * Board ID" does: `DockManager.writeExpansionBoardId` →
+   * `CommsProtocolWiredShimmerViaDock.writeDaughterCardId`, a WRITE of
+   * `DAUGHTER_CARD.CARD_ID` at address 0 with the 16-byte page
+   * `[boardId, boardRev, specialRev, 0xFF × 13]` ({@link buildShimmerSrIdPage}).
+   *
+   * The page is then read back (READ `CARD_ID`, 16 bytes from 0), and a
+   * read-back that differs from what was written throws. On success
+   * {@link identity}, when it has been read, takes the new board.
+   *
+   * The sensor keeps what it decided from the old board at boot until it
+   * restarts, so have it rebooted (undocked and powered off and on) before it
+   * is used as the new board.
+   *
+   * HARDWARE-VERIFY: the WRITE is the Java driver's, which Consensys has used
+   * in production for years; this client has not yet sent it to a sensor.
+   */
+  async writeExpansionBoard(board: ShimmerSrBoard): Promise<ExpansionBoardInfo> {
+    const page = buildShimmerSrIdPage(board);
+    const code = formatShimmerSrCode(board);
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, page);
+      await this._writeRaw(UART_PROP.DAUGHTER_CARD.CARD_ID, payload);
+      const readBack = await this._readExpansionBoardImpl();
+      if (!readBack || !isSameShimmerSrBoard(readBack, board)) {
+        throw srReadBackError(board, readBack);
+      }
+      if (this.identity) this.identity = { ...this.identity, expansionBoard: readBack };
+      this._emitStatus(`SR number programmed: ${code}`);
+      return readBack;
+    });
+  }
+
+  /**
+   * Read what the Bluetooth module says its own version is
+   * (`BLUETOOTH.VER`, the dock protocol's equivalent of the Bluetooth
+   * link's GET_BT_VERSION_STR_COMMAND).
+   *
+   * Same reply, same parser, same caveat: a Shimmer3 forwards the RN module's
+   * banner and a Shimmer3R returns the line the Shimmer firmware composes from
+   * the CYW20820's version record, so the result is parsed rather than handed
+   * back as a string. See {@link parseBluetoothModuleVersion}.
+   *
+   * Worth knowing over this link in particular: the module has to have been
+   * powered and asked for the firmware to have anything cached, and a sensor
+   * sitting in a dock may have had its radio off since boot. An empty reply is
+   * reported as `family: 'unknown'` with the label `'not reported'` rather
+   * than as an error.
+   */
+  async readBtModuleVersion(): Promise<BluetoothModuleVersion> {
+    const payload = await this.getConfig(UART_PROP.BLUETOOTH.VER);
+    const parsed = parseBluetoothModuleVersion(payload);
+    this._emitStatus(`Bluetooth module: ${parsed.label}`);
+    return parsed;
+  }
+
+  /**
+   * Read from the daughter-card EEPROM memory (`DAUGHTER_CARD.CARD_MEM`).
+   * `address` is a HOST offset — firmware maps it past the first (HW details)
+   * EEPROM page, so host offsets 0..2031 cover absolute EEPROM bytes 16..2047.
+   */
+  async readDaughterCardMem(address: number, size: number): Promise<Uint8Array> {
+    if (!Number.isInteger(address) || address < 0 || address > 2031) {
+      throw new Error('Daughter-card mem address must be an integer in 0..2031.');
+    }
+    if (!Number.isInteger(size) || size < 1 || size > 128 || address + size > 2032) {
+      throw new Error('Daughter-card mem read must be 1..128 bytes within 0..2031.');
+    }
+    return this._serialize(() => this._readMem(UART_PROP.DAUGHTER_CARD.CARD_MEM, address, size));
+  }
+
+  /**
+   * Write to the daughter-card EEPROM memory (`DAUGHTER_CARD.CARD_MEM`).
+   * `address` is a HOST offset (see {@link readDaughterCardMem}).
+   */
+  async writeDaughterCardMem(address: number, data: Uint8Array): Promise<void> {
+    if (!Number.isInteger(address) || address < 0 || address > 2031) {
+      throw new Error('Daughter-card mem address must be an integer in 0..2031.');
+    }
+    if (data.length < 1 || data.length > 128 || address + data.length > 2032) {
+      throw new Error('Daughter-card mem write must be 1..128 bytes within 0..2031.');
+    }
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.DAUGHTER_CARD.CARD_MEM, address, data);
+      await this._writeRaw(UART_PROP.DAUGHTER_CARD.CARD_MEM, payload);
+      this._emitStatus(`Daughter-card mem write ACKed (${data.length}B @ ${address})`);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -431,13 +760,12 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * PC time. The payload is the 8-byte, LSB-first 32.768 kHz tick count
    * ({@link msToRtcBytesLE}).
    *
-   * NB the target property is `RTC_CFG_TIME` (0x04): the Java props table marks
-   * it READ_ONLY, yet the driver's SET issues a WRITE against it directly
-   * (line 150), which this mirrors by going through the low-level {@link _write}
-   * rather than the permission-checked {@link setConfig}.
-   *
-   * HARDWARE-VERIFY: the RTC payload format and RTC_CFG_TIME write have not been
-   * exercised against a real dock.
+   * NB the target property is `RTC_CFG_TIME` (0x04) — hardware-confirmed
+   * (DEV-866 drift tool bring-up): the firmware's UART_SET handler implements
+   * a time write ONLY for this property (RTC_setTimeFromTicksPtr), while a
+   * SET on CURR_LOCAL_TIME (0x05) is answered with BAD_CMD. The Java props
+   * table's READ_ONLY flag on 0x04 was wrong; the SDK table now says
+   * READ_WRITE, matching the firmware.
    */
   async writeRtcFromHostTime(nowMs?: number): Promise<void> {
     return this._serialize(() => this._writeRtcFromHostTimeImpl(nowMs ?? Date.now()));
@@ -583,7 +911,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   /** Send a READ and await the matching DATA_RESPONSE payload. */
   private async _read(
     arg: UartComponentProperty,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildReadPacket(arg));
@@ -595,7 +923,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
     arg: UartComponentProperty,
     address: number,
     size: number,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<Uint8Array> {
     if (!this._transport) throw new Error('Not connected');
     const payload = buildMemReadPayload(arg, address, size);
@@ -607,7 +935,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _write(
     arg: UartComponentProperty,
     value: Uint8Array,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildWritePacket(arg, value));
@@ -618,7 +946,7 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _writeRaw(
     arg: UartComponentProperty,
     payload: Uint8Array,
-    timeoutMs = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
+    timeoutMs: number = WIRED_DEFAULTS.RESPONSE_TIMEOUT_MS,
   ): Promise<void> {
     if (!this._transport) throw new Error('Not connected');
     await this._transport.write(buildUartPacket(UART_PACKET_CMD.WRITE, arg, payload));
@@ -682,45 +1010,51 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private _handleNotify = (chunk: Uint8Array): void => {
     if (!chunk || chunk.length === 0) return;
     this._log('Notify len=', chunk.length);
-    this._rxBuf = concatU8(this._rxBuf, chunk);
+    /* A running factory test is served FIRST. Its report is bare text with no
+       packet header, so the parser below would drop it a byte at a time; what
+       the capture hands back is whatever was NOT report traffic. */
+    let bytes = chunk;
+    if (this._factoryTest) {
+      const rest = this._factoryTest.feed(bytes);
+      if (!rest || rest.length === 0) return;
+      bytes = rest;
+    }
+    this._rxBuf = concatU8(this._rxBuf, bytes);
     this._drain();
   };
 
   /**
    * Extract every complete packet currently buffered and dispatch each to the
-   * temp handlers, keeping the incomplete tail for the next chunk. A packet
-   * whose CRC fails is dropped one byte at a time to resync (matching the Java
-   * `parseSinglePacket` CRC-fail path).
+   * temp handlers, keeping the incomplete tail for the next chunk.
+   *
+   * Runs on the shared {@link drainByteStream} loop, decoding straight to
+   * {@link UartRxPacket} so the temp handlers receive parsed packets. A packet
+   * that frames but fails its CRC (or will not parse) is refused, and the drain
+   * resyncs by ONE byte rather than skipping the whole supposed length —
+   * matching the Java `parseSinglePacket` CRC-fail path, on the reasoning that a
+   * bad CRC means the framing itself was probably wrong.
    */
   private _drain(): void {
-    let buf = this._rxBuf;
-    for (;;) {
-      if (buf.length === 0) break;
-      const len = wiredPacketLength(buf);
-      if (len === NEED_MORE) break;
-      if (len === RESYNC) {
-        this._log(`resync: dropping byte 0x${buf[0].toString(16)}`);
-        buf = buf.subarray(1);
-        continue;
-      }
-      if (buf.length < len) break; // full packet not here yet
-
-      let pkt: UartRxPacket;
-      try {
-        pkt = parseUartPacket(buf);
-      } catch {
-        buf = buf.subarray(1); // malformed — resync
-        continue;
-      }
-      if (!pkt.crcOk) {
-        this._log('bad CRC → dropping 1 byte to resync');
-        buf = buf.subarray(1);
-        continue;
-      }
-      this._emitTemp(pkt);
-      buf = buf.subarray(pkt.length);
-    }
-    this._rxBuf = buf.length ? new Uint8Array(buf) : new Uint8Array(0);
+    const { messages, rest } = drainByteStream<UartRxPacket>(this._rxBuf, {
+      messageLength: wiredPacketLength,
+      decode: (msg) => {
+        let pkt: UartRxPacket;
+        try {
+          pkt = parseUartPacket(msg);
+        } catch {
+          return null; // malformed
+        }
+        return pkt.crcOk ? pkt : null;
+      },
+      onDrop: (byte, reason) =>
+        this._log(
+          reason === 'rejected'
+            ? 'bad CRC or malformed packet → dropping 1 byte to resync'
+            : `resync: dropping byte 0x${byte.toString(16)}`,
+        ),
+    });
+    this._rxBuf = rest;
+    for (const pkt of messages) this._emitTemp(pkt);
   }
 
   private _onTemp(fn: (pkt: UartRxPacket) => void): void {
@@ -730,37 +1064,6 @@ export class WiredShimmerClient extends BaseShimmerClient {
     this._temps.delete(fn);
   }
   private _emitTemp(pkt: UartRxPacket): void {
-    this._temps.forEach((fn) => {
-      try {
-        fn(pkt);
-      } catch (e) {
-        this._log('temp handler error', e);
-      }
-    });
+    this._temps.emit(pkt);
   }
-}
-
-/**
- * Byte-compare `written` against `readback` over the full InfoMem, ignoring the
- * ranges that a device write intentionally leaves diverged (the MAC bytes,
- * forced to 0xFF, and the config-delay/flag byte the firmware may rewrite).
- */
-function compareInfoMemExcluding(
-  written: Uint8Array,
-  readback: Uint8Array,
-  ranges: {
-    mac: { start: number; length: number };
-    configDelayFlag: { start: number; length: number };
-  },
-): boolean {
-  if (written.length !== readback.length) return false;
-  const excluded = new Set<number>();
-  for (const r of [ranges.mac, ranges.configDelayFlag]) {
-    for (let i = 0; i < r.length; i++) excluded.add(r.start + i);
-  }
-  for (let i = 0; i < written.length; i++) {
-    if (excluded.has(i)) continue;
-    if (written[i] !== readback[i]) return false;
-  }
-  return true;
 }

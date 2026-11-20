@@ -16,7 +16,9 @@
  */
 
 import { calibrateU12AdcValue } from '../shimmer3r/calibration.js';
+import type { AckVerdict } from '../factoryTest/capture.js';
 import { shimmerUartCrcCalc, shimmerUartCrcCheck } from './crc.js';
+import { isShimmerSrBoardValid } from '../identity.js';
 import {
   UART_PACKET_HEADER,
   UART_PACKET_CMD,
@@ -492,17 +494,71 @@ export interface ExpansionBoardInfo {
 
 /**
  * Parse the first 3 bytes of a daughter-card CARD_ID read as
- * `[boardId, boardRev, specialRev]` (ExpansionBoardDetails.java:58-60). Returns
- * null when the board is absent (an unwritten card memory reads back all 0xFF).
+ * `[boardId, boardRev, specialRev]` (ExpansionBoardDetails.java:58-60).
+ *
+ * Returns null when the board is absent, which is BOTH blank patterns: all
+ * 0xFF for an erased page, and all zeroes for one that was never written.
+ * Only the 0xFF case was rejected until now, so an all-zero page came back as
+ * `{0, 0, 0}` and could be rendered as the board `SR0-0-0`. The Java driver's
+ * own `isExpansionBoardValid()` (`ExpansionBoardDetails.java:104-111`) treats
+ * the two the same way, and {@link isShimmerSrBoardValid} is the one
+ * definition of it here.
  */
 export function parseExpansionBoard(payload: Uint8Array): ExpansionBoardInfo | null {
   if (payload.length < 3) return null;
-  const boardId = payload[0] & 0xff;
-  const boardRev = payload[1] & 0xff;
-  const specialRev = payload[2] & 0xff;
-  if (boardId === 0xff && boardRev === 0xff && specialRev === 0xff) return null;
-  return { boardId, boardRev, specialRev };
+  const board = {
+    boardId: payload[0] & 0xff,
+    boardRev: payload[1] & 0xff,
+    specialRev: payload[2] & 0xff,
+  };
+  return isShimmerSrBoardValid(board) ? board : null;
 }
 
 /** Re-export for consumers building addresses. */
 export type { UartComponent, UartComponentProperty };
+
+/**
+ * Classify the head of a dock-UART RX buffer for a factory-test capture.
+ *
+ * The firmware answers the test command with an ordinary ACK packet and then
+ * prints its report as raw text on the same link (`shimmer_dock_usart.c:473-486`
+ * for the command, `hal_FactoryTest.c` for the printing) — so this has to tell
+ * "a framed packet" from "the report has started", on a stream that may deliver
+ * either a byte at a time.
+ *
+ * A CRC-bad packet is skipped one byte rather than treated as text: the report
+ * has not started yet, and a single corrupt byte must not turn the rest of a
+ * legitimate packet into report content.
+ */
+export function classifyFactoryTestAckPacket(buf: Uint8Array): AckVerdict {
+  if (buf.length === 0) return { kind: 'need-more' };
+  // Anything that is not a packet header is the report: it starts with "/".
+  if (buf[0] !== UART_PACKET_HEADER) return { kind: 'text' };
+  const total = wiredPacketLength(buf);
+  if (total === NEED_MORE) return { kind: 'need-more' };
+  /* A header byte followed by something that is not a command byte: line
+     noise, or the tail of a packet that was corrupted mid-flight. Drop one
+     byte and look again, which is what RESYNC means everywhere else in this
+     file — and the same treatment the CRC-bad packet below gets. Calling it
+     text instead would end the search for the ACK and fold whatever follows,
+     the real ACK packet included, into the report. */
+  if (total === RESYNC) return { kind: 'ignore', consumed: 1 };
+  if (buf.length < total) return { kind: 'need-more' };
+
+  let packet;
+  try {
+    packet = parseUartPacket(buf);
+  } catch {
+    return { kind: 'ignore', consumed: 1 };
+  }
+  if (!packet.crcOk) return { kind: 'ignore', consumed: 1 };
+  if (packet.command === UART_PACKET_CMD.ACK_RESPONSE) return { kind: 'ack', consumed: total };
+  if (isBadResponse(packet.command))
+    return {
+      kind: 'nack',
+      consumed: total,
+      detail: badResponseReason(packet.command),
+    };
+  // A packet for somebody else (a late DATA_RESPONSE): drop it and keep waiting.
+  return { kind: 'ignore', consumed: total };
+}

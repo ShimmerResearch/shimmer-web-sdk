@@ -54,6 +54,12 @@ export interface TransferLoggedDataResult {
 }
 
 export interface RunHardwareTestReportOptions {
+  /**
+   * How long the report may go without sending anything before it is given up
+   * (default 120000). The clock restarts with every chunk, so a long report
+   * that keeps streaming, such as a NAND health test printing its progress
+   * dots, is never cut off part-way.
+   */
   timeoutMs?: number;
   marker?: string;
   endMarker?: string;
@@ -84,7 +90,7 @@ export interface VerisenseClientOptions {
   transport?: ShimmerTransport;
 }
 
-export interface BleThroughputTestOptions {
+export interface ThroughputTestOptions {
   /** How long the device should saturate the link, in milliseconds. Clamped to [100, 60000]. Default 5000. */
   durationMs?: number;
   /**
@@ -97,13 +103,13 @@ export interface BleThroughputTestOptions {
   /** Abort the test early. */
   signal?: AbortSignal | null;
   /** Called on every received chunk with the running result so far. */
-  onProgress?: ((partial: BleThroughputTestResult) => void) | null;
+  onProgress?: ((partial: ThroughputTestResult) => void) | null;
 }
 
-export interface BleThroughputTestResult {
+export interface ThroughputTestResult {
   /** Total bytes received from the device during the measurement window. */
   bytesReceived: number;
-  /** Number of BLE notification chunks received. */
+  /** Number of chunks received — BLE notifications, or serial reads. */
   packetsReceived: number;
   /** Duration requested of the device, in milliseconds. */
   durationRequestedMs: number;
@@ -116,6 +122,12 @@ export interface BleThroughputTestResult {
   /** Received goodput in kilobits per second (bytes/sec × 8 ÷ 1000). */
   throughputKbps: number;
 }
+
+/** @deprecated Renamed to {@link ThroughputTestOptions}: the test is not BLE-specific. */
+export type BleThroughputTestOptions = ThroughputTestOptions;
+
+/** @deprecated Renamed to {@link ThroughputTestResult}: the test is not BLE-specific. */
+export type BleThroughputTestResult = ThroughputTestResult;
 
 export type VerisenseConnectRetryReason =
   'request-timeout' | 'gatt-disconnected' | 'unexpected-response-property';

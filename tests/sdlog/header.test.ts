@@ -5,6 +5,11 @@ import {
   SDLogHeaderBitmask as BM,
 } from '../../src/devices/sdlog/index.js';
 import { getDefaultCalibration } from '../../src/devices/calibration/index.js';
+import {
+  decodeExgRegisters,
+  detectExgPreset,
+  EXG_PRESET_ARRAYS,
+} from '../../src/devices/exg/index.js';
 import { buildSdLogHeader } from './fixtures.js';
 
 const expectCode = (fn: () => unknown, code: string): void => {
@@ -87,7 +92,7 @@ describe('parseSdLogHeader — modern Shimmer3 (256 B)', () => {
     expect(h.packetSizeBytes).toBe(25);
     const gsr = h.channels.find((c) => c.name === 'GSR')!;
     expect(gsr.calibrated).toBe(true);
-    expect(gsr.unit).toBe('uSiemens');
+    expect(gsr.unit).toBe('uS');
     const gyro = h.channels.find((c) => c.name === 'GYRO_X')!;
     expect(gyro.calibrated).toBe(false);
     expect(gyro.unit).toBeNull();
@@ -397,5 +402,218 @@ describe('parseSdLogHeader — rejection paths', () => {
         ),
       'BAD_HEADER',
     );
+  });
+});
+
+describe('parseSdLogHeader — ExG register banks (ShimmerSDLog.java:253-254/323-324)', () => {
+  it('extracts exg1/exg2 from bytes 56-65 / 66-75 and they decode to a preset', () => {
+    const ecg1 = [...EXG_PRESET_ARRAYS.ecg.exg1];
+    const ecg2 = [...EXG_PRESET_ARRAYS.ecg.exg2];
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        enabledSensors: BM.ACCEL_LN | BM.GSR,
+        exg1: ecg1,
+        exg2: ecg2,
+      }),
+    );
+    expect([...h.exg1]).toEqual(ecg1);
+    expect([...h.exg2]).toEqual(ecg2);
+    expect(detectExgPreset(h.exg1, h.exg2)).toBe('ecg');
+    expect(decodeExgRegisters(h.exg1).ch1.gain.gain).toBe(4);
+  });
+
+  it('yields all-zero banks on a non-ExG header', () => {
+    const h = parseSdLogHeader(buildSdLogHeader({ enabledSensors: BM.ACCEL_LN | BM.GSR }));
+    expect([...h.exg1]).toEqual(new Array(10).fill(0));
+    expect([...h.exg2]).toEqual(new Array(10).fill(0));
+  });
+
+  it('extracts ExG banks from a Shimmer3R (384 B) header at the same offsets', () => {
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion: [0, 1, 0],
+        signalIds: [0x1d],
+        exg1: [...EXG_PRESET_ARRAYS['test-signal'].exg1],
+        exg2: [...EXG_PRESET_ARRAYS['test-signal'].exg2],
+      }),
+    );
+    expect(detectExgPreset(h.exg1, h.exg2)).toBe('test-signal');
+  });
+});
+
+describe('parseSdLogHeader — header pressure sensor id, byte 224 (DEV-1123)', () => {
+  /*
+   * Shimmer3 LogAndStream writes the byte from v1.01.006, Shimmer3R from
+   * v1.01.018. The version numbers overlap, so the gate must check hardware.
+   */
+  const NEW_IMU: [number, number, number] = [31, 6, 0]; // SR31 rev >= 6 → BMP280 by board rule
+  const OLD_IMU: [number, number, number] = [31, 5, 0]; // SR31 rev < 6 → BMP180 by board rule
+  const s3 = (
+    pressureSensorId: number,
+    expansionBoard: [number, number, number],
+    fwVersion: [number, number, number] = [1, 1, 6],
+    enabledSensors: number = BM.BMPX80,
+  ) =>
+    parseSdLogHeader(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 3,
+        fwVersion,
+        enabledSensors,
+        expansionBoard,
+        pressureSensorId,
+      }),
+    );
+
+  it('Shimmer3 0x00 gives a BMP180, overriding a new-IMU board', () => {
+    const h = s3(0x00, NEW_IMU);
+    expect(h.pressureSensor).toBe('bmp180');
+    expect(h.pressureSensorId).toBe(0);
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP180', 'PRESSURE_BMP180']);
+    expect(h.channels.every((c) => !c.calibrated)).toBe(true);
+    expect(h.calibrationBytes.pressure.length).toBe(22);
+    expect(h.warnings).toHaveLength(1);
+    expect(h.warnings[0]).toMatch(/BMP180.*expansion board.*BMP280/);
+  });
+
+  it('Shimmer3 0x01 gives a BMP280, overriding an old-IMU board', () => {
+    const h = s3(0x01, OLD_IMU);
+    expect(h.pressureSensor).toBe('bmp280');
+    expect(h.pressureSensorId).toBe(1);
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP280', 'PRESSURE_BMP280']);
+    expect(h.calibrationBytes.pressure.length).toBe(24);
+    expect(h.warnings).toHaveLength(1);
+  });
+
+  it('Shimmer3 byte that agrees with the board rule adds no warning', () => {
+    const h = s3(0x01, NEW_IMU);
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP280', 'PRESSURE_BMP280']);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('Shimmer3 0xFE gives none: pressure channels, if enabled, are raw and part-neutral', () => {
+    const h = s3(0xfe, NEW_IMU);
+    expect(h.pressureSensor).toBe('none');
+    expect(h.pressureSensorId).toBeNull();
+    expect(h.channels).toEqual([
+      { name: 'TEMPERATURE', unit: null, calibrated: false, dataType: 'u16r', sizeBytes: 2 },
+      { name: 'PRESSURE', unit: null, calibrated: false, dataType: 'u24r', sizeBytes: 3 },
+    ]);
+    expect(h.warnings).toHaveLength(1);
+    expect(h.warnings[0]).toMatch(/no pressure sensor is fitted/);
+  });
+
+  it('Shimmer3 0xFE with no pressure channels enabled is not a warning', () => {
+    const h = s3(0xfe, NEW_IMU, [1, 1, 6], BM.GSR);
+    expect(h.pressureSensor).toBe('none');
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('Shimmer3 0x04 (unknown) is raw and part-neutral, not the board rule', () => {
+    const h = s3(0x04, NEW_IMU);
+    expect(h.pressureSensor).toBe('unknown');
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE', 'PRESSURE']);
+    expect(h.warnings).toHaveLength(1);
+  });
+
+  it('gates a Shimmer3 file on the Shimmer3 threshold: v1.01.018 passes (>= v1.01.006)', () => {
+    const h = s3(0x00, NEW_IMU, [1, 1, 18]);
+    expect(h.pressureSensor).toBe('bmp180');
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP180', 'PRESSURE_BMP180']);
+  });
+
+  it('ignores the byte on Shimmer3 firmware below v1.01.006: the board rule decides', () => {
+    const h = s3(0x00, NEW_IMU, [1, 1, 5]);
+    expect(h.pressureSensor).toBeNull();
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP280', 'PRESSURE_BMP280']);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('ignores the byte from SDLog firmware, whatever its version', () => {
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 2,
+        fwVersion: [1, 1, 18],
+        enabledSensors: BM.BMPX80,
+        expansionBoard: NEW_IMU,
+        pressureSensorId: 0x00,
+      }),
+    );
+    expect(h.pressureSensor).toBeNull();
+    expect(h.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP280', 'PRESSURE_BMP280']);
+  });
+
+  it.each<[number, number, number]>([
+    [1, 1, 6],
+    [1, 1, 17],
+  ])('does not pass a Shimmer3R file at v%i.%i.%i (the Shimmer3 threshold)', (...fw) => {
+    const h = parseSdLogHeader(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion: fw,
+        expansionBoard: [48, 8, 1],
+        signalIds: [0x1b, 0x1a],
+        pressureSensorId: 0x03,
+      }),
+    );
+    expect(h.pressureSensor).toBeNull();
+    expect(h.pressureSensorId).toBeNull();
+    expect(h.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP390', 'TEMPERATURE_BMP390']);
+  });
+
+  it('passes a Shimmer3R file at v1.01.018 and later', () => {
+    for (const fw of [
+      [1, 1, 18],
+      [1, 2, 0],
+      [2, 0, 0],
+    ] as [number, number, number][]) {
+      const h = parseSdLogHeader(
+        buildSdLogHeader({
+          hw: 10,
+          fwId: 3,
+          fwVersion: fw,
+          expansionBoard: [48, 8, 1],
+          signalIds: [0x1b, 0x1a],
+          pressureSensorId: 0x03,
+        }),
+      );
+      expect(h.pressureSensor).toBe('bmp581');
+    }
+  });
+
+  it('defaults to "not recorded" on a header from before the field', () => {
+    const h = parseSdLogHeader(buildSdLogHeader({ enabledSensors: BM.BMPX80 }));
+    expect(h.pressureSensor).toBeNull();
+    expect(h.pressureSensorId).toBeNull();
+    expect(h.pressureSensorInferred).toBe(false);
+    expect(h.warnings).toEqual([]);
+  });
+});
+
+describe('parseSdLogHeader — Shimmer3R audio mode, byte 226 (DEV-99)', () => {
+  const withByte226 = (hw: number, value: number): Uint8Array => {
+    const h = buildSdLogHeader({
+      hw,
+      fwId: 3,
+      fwVersion: [1, 1, 25],
+      enabledSensors: BM.ACCEL_LN,
+      signalIds: [0x00, 0x01, 0x02],
+    });
+    h[226] = value;
+    return h;
+  };
+
+  it('reads byte 233 as the firmware acted on it, raw, on a Shimmer3R', () => {
+    expect(parseSdLogHeader(withByte226(10, 0x02)).audioMode).toBe(0x02);
+    // Firmware before the field leaves 0xFF, which reads as off by the byte's rule.
+    expect(parseSdLogHeader(withByte226(10, 0xff)).audioMode).toBe(0xff);
+  });
+
+  it('is null on a Shimmer3, which has no microphone', () => {
+    expect(parseSdLogHeader(withByte226(3, 0x02)).audioMode).toBeNull();
   });
 });

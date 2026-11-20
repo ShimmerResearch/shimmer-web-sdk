@@ -18,6 +18,11 @@ import {
   type ImuFamily,
   type InertialGroup,
 } from '../calibration/index.js';
+import {
+  GyroOnTheFlyCal,
+  gyroOnTheFlyInfo,
+  isGyroOnTheFlyEnabled,
+} from '../calibration/gyroOnTheFly.js';
 import { isNewImuSensors } from './header.js';
 import type { SdLogChannelSpec } from './channels.js';
 import { SDLOG_HW_ID } from './constants.js';
@@ -25,6 +30,8 @@ import type { SdLogChannelCalibrationInfo, SdLogHeader } from './types.js';
 
 /** A group's calibration applied to a triple of channel indices. */
 export interface CalibPlanEntry {
+  /** The inertial group the triple belongs to. */
+  group: InertialGroup;
   /** Indices into the record `values` array for the X, Y, Z axes. */
   indices: [number, number, number];
   /** Calibration set to apply (device block or range-selected default). */
@@ -34,6 +41,12 @@ export interface CalibPlanEntry {
 export interface SdLogCalibPlan {
   entries: CalibPlanEntry[];
   info: SdLogChannelCalibrationInfo[];
+  /**
+   * The gyro on-the-fly offset estimator for this file, when the header sets
+   * derived-sensor bit 29 and the file carries gyro; otherwise `null`. Fresh
+   * per file.
+   */
+  gyroOnTheFly: GyroOnTheFlyCal | null;
 }
 
 interface GroupSpec {
@@ -118,6 +131,7 @@ export function buildSdLogCalibPlan(
 
   const entries: CalibPlanEntry[] = [];
   const info: SdLogChannelCalibrationInfo[] = [];
+  let gyroOnTheFly: GyroOnTheFlyCal | null = null;
 
   for (const spec of groupSpecsFor(header)) {
     const xi = nameToIndex.get(spec.axisNames[0]);
@@ -136,14 +150,27 @@ export function buildSdLogCalibPlan(
     const usingDefault = parsed === null;
     const calibration = parsed ?? def.calibration;
 
-    entries.push({ indices: [xi, yi, zi], calibration });
-    info.push({
+    entries.push({ group: spec.group, indices: [xi, yi, zi], calibration });
+    const entryInfo: SdLogChannelCalibrationInfo = {
       group: spec.group,
       unit: def.unit,
       usingDefaultCalibration: usingDefault,
       source: usingDefault ? 'default' : 'sd-header',
       range: spec.range,
-    });
+    };
+    if (spec.group === 'gyro') {
+      const enabled = isGyroOnTheFlyEnabled(header.derivedSensorsBig);
+      if (enabled) {
+        gyroOnTheFly = new GyroOnTheFlyCal();
+        gyroOnTheFly.setSamplingRate(header.samplingRateHz);
+      }
+      entryInfo.gyroOnTheFly = gyroOnTheFlyInfo(
+        gyroOnTheFly ?? new GyroOnTheFlyCal(),
+        enabled,
+        calibration,
+      );
+    }
+    info.push(entryInfo);
 
     for (const idx of [xi, yi, zi]) {
       channels[idx].calibrated = true;
@@ -151,18 +178,43 @@ export function buildSdLogCalibPlan(
     }
   }
 
-  return { entries, info };
+  return { entries, info, gyroOnTheFly };
 }
 
-/** Apply a calibration plan in place to one record's `values` array. */
-export function applyCalibPlan(values: number[], plan: CalibPlanEntry[]): void {
+/**
+ * Apply a calibration plan in place to one record's `values` array.
+ *
+ * With `gyroOnTheFly`, the gyro triple is calibrated against its latest
+ * estimated offset and then fed to the estimator, so an estimate takes effect
+ * from the next record - the order Java's `buildMsg` and `processData` give.
+ */
+export function applyCalibPlan(
+  values: number[],
+  plan: CalibPlanEntry[],
+  gyroOnTheFly: GyroOnTheFlyCal | null = null,
+): void {
   for (const e of plan) {
     const [xi, yi, zi] = e.indices;
-    const [cx, cy, cz] = calibrateTriple(values[xi], values[yi], values[zi], e.calibration);
-    values[xi] = cx;
-    values[yi] = cy;
-    values[zi] = cz;
+    const raw: [number, number, number] = [values[xi], values[yi], values[zi]];
+    const otf = e.group === 'gyro' ? gyroOnTheFly : null;
+    const cal = otf ? otf.calibrationFor(e.calibration) : e.calibration;
+    const c = calibrateTriple(raw[0], raw[1], raw[2], cal);
+    values[xi] = c[0];
+    values[yi] = c[1];
+    values[zi] = c[2];
+    otf?.update(e.calibration, c, raw);
   }
+}
+
+/** Refresh the gyro entry's on-the-fly summary once a file is decoded. */
+export function refreshGyroOnTheFlyInfo(
+  info: SdLogChannelCalibrationInfo[],
+  plan: SdLogCalibPlan,
+): void {
+  const gyro = info.find((i) => i.group === 'gyro');
+  const entry = plan.entries.find((e) => e.group === 'gyro');
+  if (!gyro || !entry || !plan.gyroOnTheFly) return;
+  gyro.gyroOnTheFly = gyroOnTheFlyInfo(plan.gyroOnTheFly, true, entry.calibration);
 }
 
 function calibrateTriple(
@@ -175,9 +227,13 @@ function calibrateTriple(
   const d1 = y - cal.offset[1];
   const d2 = z - cal.offset[2];
   const m = cal.m;
+  /* Each row is summed from 0, as UtilCalibration.matrixMultiplication's
+     `resultant[i][j] += ...` sums it. Bit-exact with Java only that way: when
+     the first product is -0 (an axis exactly at its offset, which the gyro
+     on-the-fly offset makes common), 0 + -0 is +0 where -0 + -0 stays -0. */
   return [
-    m[0] * d0 + m[1] * d1 + m[2] * d2,
-    m[3] * d0 + m[4] * d1 + m[5] * d2,
-    m[6] * d0 + m[7] * d1 + m[8] * d2,
+    0 + m[0] * d0 + m[1] * d1 + m[2] * d2,
+    0 + m[3] * d0 + m[4] * d1 + m[5] * d2,
+    0 + m[6] * d0 + m[7] * d1 + m[8] * d2,
   ];
 }

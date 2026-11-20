@@ -1,4 +1,5 @@
 import { OP_IDX, OP_CONFIG_VERSION_V9 } from './constants.js';
+import { compareVerisenseFirmwareVersion, type VerisenseFirmwareVersion } from './protocolUtils.js';
 import {
   getVerisenseHardwareRevision,
   getVerisenseHardwareSensorSupport,
@@ -1712,6 +1713,10 @@ const GEN_CFG_0_USB_EN_MASK = 1 << 3;
  * in the SDK means any consuming application is protected — a device can't be
  * stranded by a third-party tool writing 0/0.
  *
+ * On firmware older than {@link VERISENSE_BLUETOOTH_OFF_MIN_FW} this is not
+ * enough: there, Bluetooth off takes USB with it. See
+ * {@link enforceVerisenseBluetoothOffFirmwareGuard}.
+ *
  * Mutates `op` in place. Returns `true` if a correction was applied.
  */
 export function enforceVerisenseCommsChannelInterlock(op: Uint8Array): boolean {
@@ -1721,6 +1726,58 @@ export function enforceVerisenseCommsChannelInterlock(op: Uint8Array): boolean {
     (genCfg0 & GEN_CFG_0_BLUETOOTH_EN_MASK) === 0 && (genCfg0 & GEN_CFG_0_USB_EN_MASK) === 0;
   if (!bothDisabled) return false;
   op[OP_IDX.GEN_CFG_0] = genCfg0 | GEN_CFG_0_BLUETOOTH_EN_MASK | GEN_CFG_0_USB_EN_MASK;
+  return true;
+}
+
+/**
+ * The first firmware on which `BLUETOOTH_EN = 0` leaves USB working (DEV-1096).
+ *
+ * ASM_Production handles USB events only while its SoftDevice is on, and before
+ * this version it started the SoftDevice only for Bluetooth. With Bluetooth off,
+ * USB therefore never enumerated either, and a write that turned Bluetooth off
+ * over USB stopped USB at once. The sensor was left with no way back in but SWD.
+ * {@link enforceVerisenseCommsChannelInterlock} cannot catch that, because USB
+ * is still enabled in the config.
+ */
+export const VERISENSE_BLUETOOTH_OFF_MIN_FW: VerisenseFirmwareVersion = {
+  major: 2,
+  minor: 1,
+  internal: 3,
+};
+
+/** Whether the given firmware can run with Bluetooth disabled. Firmware whose
+ * version is unknown cannot be assumed to. */
+export function supportsVerisenseBluetoothOff(
+  fw: Partial<VerisenseFirmwareVersion> | null | undefined,
+): boolean {
+  if (!fw) return false;
+  return compareVerisenseFirmwareVersion(fw, VERISENSE_BLUETOOTH_OFF_MIN_FW) >= 0;
+}
+
+/** Whether an operational-config buffer has Bluetooth enabled (`BLUETOOTH_EN`). */
+export function isVerisenseBluetoothEnabled(op: Uint8Array | null | undefined): boolean {
+  if (!op || op.length <= OP_IDX.GEN_CFG_0) return false;
+  return (op[OP_IDX.GEN_CFG_0] & GEN_CFG_0_BLUETOOTH_EN_MASK) !== 0;
+}
+
+/**
+ * Keep Bluetooth enabled in an operational-config buffer bound for firmware that
+ * cannot run without it: older than {@link VERISENSE_BLUETOOTH_OFF_MIN_FW}, or of
+ * unknown version.
+ *
+ * That includes firmware older than V2.00.007, which ignores `BLUETOOTH_EN`. The
+ * bit still stays in the sensor's EEPROM, and an update to V2.00.007 - V2.01.002
+ * would then strand the sensor.
+ *
+ * Mutates `op` in place. Returns `true` if a correction was applied.
+ */
+export function enforceVerisenseBluetoothOffFirmwareGuard(
+  op: Uint8Array,
+  fw: Partial<VerisenseFirmwareVersion> | null | undefined,
+): boolean {
+  if (!op || op.length <= OP_IDX.GEN_CFG_0) return false;
+  if (isVerisenseBluetoothEnabled(op) || supportsVerisenseBluetoothOff(fw)) return false;
+  op[OP_IDX.GEN_CFG_0] |= GEN_CFG_0_BLUETOOTH_EN_MASK;
   return true;
 }
 

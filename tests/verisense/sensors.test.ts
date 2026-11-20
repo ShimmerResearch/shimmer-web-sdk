@@ -93,6 +93,18 @@ describe('SensorADC', () => {
     expect(gsr.nudgeGsrResistance(30)).toBe(30);
   });
 
+  // DEV-1068: auto-range is floored at 8 kΩ and nothing more, as in the Java
+  // driver and the C# API, while a fixed range still clamps both ends. 535606 kΩ
+  // is what an open circuit decodes to on gen-2 range 3.
+  it('nudgeGsrResistance floors auto-range at 8 kΩ only (DEV-1068)', () => {
+    gsr.setGsrRangeSetting(4);
+    expect(gsr.nudgeGsrResistance(1)).toBe(8.0);
+    expect(gsr.nudgeGsrResistance(535606)).toBe(535606);
+    gsr.setGsrRangeSetting(3);
+    expect(gsr.nudgeGsrResistance(1)).toBe(680.0);
+    expect(gsr.nudgeGsrResistance(535606)).toBe(4700.0);
+  });
+
   it('parsePayload returns one sample per 2 bytes (GSR-only mode)', () => {
     gsr.gsrEnabled = true;
     gsr.battEnabled = false;
@@ -239,14 +251,185 @@ describe('SensorADC', () => {
       expect(decodeGsr(gsrPlus, 1, adc12Sr62).uS).toBeCloseTo(10.0, 1);
     });
 
-    it('applies the gen-2 range-3 uncal clamp limit (1134) on SR61-5', () => {
+    it('applies the gen-2 range-3 uncal clamp limit (1138) on SR61-5', () => {
       const sensor = new SensorADC();
       sensor.setHardwareRevision(61, 5, 0);
-      // Below the gen-2 limit the ADC count is clamped to 1134 before calibration.
+      // Below the gen-2 limit the ADC count is clamped to 1138 before calibration.
       const clamped = decodeGsr(sensor, 3, 700);
-      const atLimit = decodeGsr(sensor, 3, 1134);
-      expect(clamped.adc12).toBe(1134);
+      const atLimit = decodeGsr(sensor, 3, 1138);
+      expect(clamped.adc12).toBe(1138);
       expect(clamped.kOhms).toBe(atLimit.kOhms);
+    });
+
+    // DEV-1067: with the electrodes open the amplifier output sits on its
+    // reference, so the ADC reads a few codes either side of it: an SR68-9
+    // open-circuit recording (DEV-793 B6) peaks at codes 1126-1136. The limit
+    // was 1134, itself below the 0.4986 V reference (code 1134.3), so every
+    // clamped sample decoded to a negative resistance and was nudged to 8 kΩ.
+    // An open circuit read 125 µS, the highest conductance there is.
+    it.each([
+      [61, 5],
+      [68, 9],
+    ])('decodes an open circuit on range 3 as open on SR%i-%i (DEV-1067)', (major, minor) => {
+      for (const rangeSetting of [4, 3]) {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, minor, 0);
+        sensor.setGsrRangeSetting(rangeSetting);
+        for (let adc12 = 1134; adc12 <= 1138; adc12++) {
+          const gsr = decodeGsr(sensor, 3, adc12);
+          const where = `range setting ${rangeSetting}, code ${adc12}`;
+          expect(gsr.kOhms, where).toBeGreaterThanOrEqual(4700);
+          expect(gsr.uS, where).toBeGreaterThan(0);
+          expect(gsr.uS, where).toBeLessThanOrEqual(1000 / 4700);
+        }
+      }
+    });
+
+    // The Java driver divides by 0.5 V where this decode uses 0.4986 V, so the
+    // limit is the first code above 0.5 V: correct under both references.
+    it('puts the gen-2 limit on the first code above 0.5 V (DEV-1067)', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(68, 9, 0);
+      const limit = sensor.GSR_UNCAL_LIMIT_RANGE3_SR68;
+      expect(sensor.calibrateAdcToVolts(limit)).toBeGreaterThan(0.5);
+      expect(sensor.calibrateAdcToVolts(limit - 1)).toBeLessThan(0.5);
+    });
+
+    // DEV-1068: connectivity says 'Disconnected' at or below 0.03 µS, which
+    // auto-range could not reach while the nudge capped it at 4.7 MΩ
+    // (0.213 µS). From the limit, an open circuit decodes to about 536 MΩ
+    // (0.0019 µS). The codes span the peak of the DEV-793 B6 open-circuit
+    // recording (SR68-9, auto-range) up to the limit.
+    it.each([
+      [61, 5],
+      [68, 9],
+    ])(
+      'reports an open circuit on range 3 in auto-range as Disconnected on SR%i-%i (DEV-1068)',
+      (major, minor) => {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, minor, 0);
+        sensor.setGsrRangeSetting(4);
+        for (let adc12 = 1126; adc12 <= 1138; adc12++) {
+          const gsr = decodeGsr(sensor, 3, adc12);
+          const where = `code ${adc12}`;
+          expect(gsr.connectivity, where).toBe('Disconnected');
+          expect(gsr.kOhms, where).toBeGreaterThan(4700);
+          expect(gsr.uS, where).toBeGreaterThan(0);
+          expect(gsr.uS, where).toBeLessThanOrEqual(sensor.LIMIT_MIN_VALID_USIEMENS);
+        }
+      },
+    );
+
+    // DEV-793 B4d (ASM_PC Test_051): an SR61-5 on range 3 bridged by a 2.7 MΩ
+    // resistor. The Java parser's reference output reads 0.336-0.366 µS, median
+    // 0.360, which is ADC code ~1850 at that parser's 0.5 V reference. Lifting
+    // the cap must leave a real load inside the range alone, in auto-range and
+    // on fixed range 3 alike. This decode's 0.4986 V reads the code as 2758 kΩ,
+    // 2% high, so 0.36 µS rather than the nominal 0.37.
+    it('still reports a real 2.7 MΩ load as Connected, at ~0.36 µS (DEV-793 B4d, DEV-1068)', () => {
+      for (const rangeSetting of [4, 3]) {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(61, 5, 0);
+        sensor.setGsrRangeSetting(rangeSetting);
+        const gsr = decodeGsr(sensor, 3, 1850);
+        const where = `range setting ${rangeSetting}`;
+        expect(gsr.connectivity, where).toBe('Connected');
+        expect(Math.abs(gsr.kOhms - 2700) / 2700, where).toBeLessThan(0.05);
+        expect(gsr.uS, where).toBeCloseTo(0.36, 2);
+      }
+    });
+
+    // DEV-1070: a code below the open-circuit limit means the electrodes are
+    // open on any range, and ranges 0-2 see such codes in auto-range: when the
+    // electrodes come off, the device climbs a range at a time and repeats the
+    // sample that triggered each switch for 80 ms. DEV-793 B6 (ASM_PC Test_056,
+    // an SR68-9) has them on range 0 at codes 0 and 1131, range 1 at 1131 and
+    // 1137, and range 2 at 1132. They decoded to a negative resistance, which
+    // the nudge floored at 8 kΩ: 125 µS and 'Connected'. 1135-1137 sit between
+    // this decode's 0.4986 V reference and the 1138 limit, as on range 3.
+    const GEN2_CODES_BELOW_LIMIT = [0, 1131, 1132, 1134, 1135, 1136, 1137];
+
+    it.each([
+      [61, 5],
+      [68, 9],
+    ])(
+      'decodes a code below the limit as open on every range in auto-range on SR%i-%i (DEV-1070)',
+      (major, minor) => {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, minor, 0);
+        sensor.setGsrRangeSetting(4);
+        const open = decodeGsr(sensor, 3, sensor.GSR_UNCAL_LIMIT_RANGE3_SR68);
+        for (const range of [0, 1, 2, 3]) {
+          for (const adc12 of GEN2_CODES_BELOW_LIMIT) {
+            const gsr = decodeGsr(sensor, range, adc12);
+            const where = `range ${range}, code ${adc12}`;
+            expect(gsr.kOhms, where).toBe(open.kOhms);
+            expect(gsr.connectivity, where).toBe('Disconnected');
+            // Only the resistance changes: the range is still the resistor in
+            // circuit, and ranges 0-2 report their own code.
+            expect(gsr.range, where).toBe(range);
+            if (range < 3) expect(gsr.adc12, where).toBe(adc12);
+          }
+        }
+      },
+    );
+
+    it('decodes a code below 683 as open on every range in auto-range on SR62 (DEV-1070)', () => {
+      const sensor = new SensorADC();
+      sensor.setHardwareRevision(62, 0, 0);
+      sensor.setGsrRangeSetting(4);
+      const open = decodeGsr(sensor, 3, sensor.GSR_UNCAL_LIMIT_RANGE3_SR62);
+      expect(open.kOhms).toBeCloseTo(4504500, 0);
+      for (const range of [0, 1, 2, 3]) {
+        for (const adc12 of [0, 500, 682]) {
+          const gsr = decodeGsr(sensor, range, adc12);
+          expect(gsr.kOhms, `range ${range}, code ${adc12}`).toBe(open.kOhms);
+          expect(gsr.connectivity, `range ${range}, code ${adc12}`).toBe('Disconnected');
+        }
+      }
+    });
+
+    // A fixed range still clamps to its own window (DEV-1068), but an open
+    // circuit now pins it to the top, as fixed range 3 already did.
+    it('pins an open circuit on a fixed range to the top of its window (DEV-1070)', () => {
+      const top = [63, 220, 680, 4700];
+      const boards = [
+        { major: 68, minor: 9, codes: GEN2_CODES_BELOW_LIMIT },
+        { major: 62, minor: 0, codes: [0, 682] },
+      ];
+      for (const { major, minor, codes } of boards) {
+        for (const range of [0, 1, 2, 3]) {
+          const sensor = new SensorADC();
+          sensor.setHardwareRevision(major, minor, 0);
+          sensor.setGsrRangeSetting(range);
+          for (const adc12 of codes) {
+            expect(decodeGsr(sensor, range, adc12).kOhms, `SR${major} range ${range}`).toBe(
+              top[range],
+            );
+          }
+        }
+      }
+    });
+
+    it('decodes every code from the limit up exactly as before (DEV-1070)', () => {
+      for (const major of [68, 62]) {
+        const sensor = new SensorADC();
+        sensor.setHardwareRevision(major, major === 62 ? 0 : 9, 0);
+        sensor.setGsrRangeSetting(4);
+        const limit =
+          major === 62 ? sensor.GSR_UNCAL_LIMIT_RANGE3_SR62 : sensor.GSR_UNCAL_LIMIT_RANGE3_SR68;
+        for (const range of [0, 1, 2, 3]) {
+          for (let adc12 = limit; adc12 <= 4095; adc12++) {
+            const equation = sensor.calibrateGsrToKOhmsUsingAmplifierEq(
+              sensor.calibrateAdcToVolts(adc12),
+              range,
+            );
+            // Range 0 at full scale is already above 8 kΩ, so the floor changes nothing.
+            expect(equation).toBeGreaterThan(8);
+            expect(decodeGsr(sensor, range, adc12).kOhms).toBe(equation);
+          }
+        }
+      }
     });
   });
 

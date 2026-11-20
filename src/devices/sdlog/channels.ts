@@ -12,8 +12,10 @@
  * `i12*>` = Shimmer3R high-g accel packing (MSB << 4 | LSB >> 4).
  */
 
+import { CHANNEL_UNITS } from '../../core/units.js';
+import { SOUND_LEVEL_CHANNEL_ID, SOUND_LEVEL_NAME, SOUND_LEVEL_UNIT } from '../audio/soundLevel.js';
 import { SDLogHeaderBitmask as BM, hasSensorBit } from './constants.js';
-import type { SdLogChannel } from './types.js';
+import type { SdLogChannel, SdLogPressureSensor } from './types.js';
 
 /** Raw encodings used by SD-log channels (subset of UtilParseData's set). */
 export type SdLogDataType =
@@ -111,11 +113,40 @@ const uncal = (name: string, dataType: SdLogDataType): SdLogChannelSpec => ({
  */
 const gsrChannel = (): SdLogChannelSpec => ({
   name: 'GSR',
-  unit: 'uSiemens',
+  unit: CHANNEL_UNITS.MICRO_SIEMENS,
   calibrated: true,
   dataType: 'u16',
   sizeBytes: 2,
 });
+
+/** `'TEMPERATURE_BMP581'` — emitted calibrated, in °C. */
+export const SDLOG_BMP581_TEMPERATURE_NAME = 'TEMPERATURE_BMP581';
+/** `'PRESSURE_BMP581'` — emitted calibrated, in kPa. */
+export const SDLOG_BMP581_PRESSURE_NAME = 'PRESSURE_BMP581';
+
+/**
+ * The BMP581 pair, on the wire exactly as the BMP390's (`0x1A`/`0x1B`, 3 bytes
+ * each, little-endian) but emitted calibrated: the part compensates on-chip,
+ * so a fixed scale is all that stands between its registers and kPa / °C, and
+ * there is no coefficient block to be missing. The BMP390 pair stays raw — its
+ * compensation needs the header's 21-byte trim block, which this decoder does
+ * not yet apply.
+ */
+const bmp581Channel = (name: string, unit: string): SdLogChannelSpec => ({
+  name,
+  unit,
+  calibrated: true,
+  dataType: 'u24',
+  sizeBytes: 3,
+});
+
+/**
+ * Suffix naming the pressure pair after its part (`_BMP280`), or none for an
+ * unrecognised part or one the header says is not fitted: those emit the
+ * part-neutral `PRESSURE`/`TEMPERATURE`, raw (DEV-1123).
+ */
+const pressureNameSuffix = (pressure: SdLogPressureSensor): string =>
+  pressure === 'unknown' || pressure === 'none' ? '' : `_${pressure.toUpperCase()}`;
 
 /**
  * Build the Shimmer3 (256-byte header) channel list from the enabled-sensors
@@ -127,10 +158,13 @@ const gsrChannel = (): SdLogChannelSpec => ({
  * @param newImuSensors  True when the expansion-board bytes identify a
  *   new-IMU board (LSM303AHTR/MPU9250/BMP280 generation) — flips the mag
  *   channels to little-endian X, Y, Z and renames the BMP channels.
+ * @param pressure The pressure part, when the header records one (byte 224);
+ *   it names the pair instead of `newImuSensors`. Either way the pair is raw.
  */
 export function buildShimmer3SdLogChannels(
   enabledSensors: number,
   newImuSensors: boolean,
+  pressure?: SdLogPressureSensor,
 ): SdLogChannelSpec[] {
   const has = (mask: number): boolean => hasSensorBit(enabledSensors, mask);
   const ch: SdLogChannelSpec[] = [];
@@ -179,9 +213,9 @@ export function buildShimmer3SdLogChannels(
     ch.push(uncal('MAG_MPU_X', 'i16'), uncal('MAG_MPU_Y', 'i16'), uncal('MAG_MPU_Z', 'i16'));
   }
   if (has(BM.BMPX80)) {
-    const suffix = newImuSensors ? 'BMP280' : 'BMP180';
-    ch.push(uncal(`TEMPERATURE_${suffix}`, 'u16r'));
-    ch.push(uncal(`PRESSURE_${suffix}`, 'u24r'));
+    const suffix = pressureNameSuffix(pressure ?? (newImuSensors ? 'bmp280' : 'bmp180'));
+    ch.push(uncal(`TEMPERATURE${suffix}`, 'u16r'));
+    ch.push(uncal(`PRESSURE${suffix}`, 'u24r'));
   }
   if (has(BM.EXG1_24BIT)) {
     ch.push(
@@ -317,6 +351,7 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
   0x17: uncal('ALT_MAG_X', 'i16'),
   0x18: uncal('ALT_MAG_Y', 'i16'),
   0x19: uncal('ALT_MAG_Z', 'i16'),
+  // BMP390. Any other part is named by buildShimmer3RSdLogChannels instead.
   0x1a: uncal('TEMPERATURE_BMP390', 'u24'),
   0x1b: uncal('PRESSURE_BMP390', 'u24'),
   0x1c: gsrChannel(),
@@ -332,6 +367,16 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
   0x26: uncal('Exg2_CH2_16Bit', 'i16r'),
   0x27: uncal('BRIDGE_AMP_HIGH', 'u12'),
   0x28: uncal('BRIDGE_AMP_LOW', 'u12'),
+  // The sound level (DEV-1413), emitted calibrated: nominal dB(A), NaN for
+  // the no-level value 0x8000. Without this entry the catch-all would read
+  // it as u12 and turn a negative count into a large positive one.
+  [SOUND_LEVEL_CHANNEL_ID]: {
+    name: SOUND_LEVEL_NAME,
+    unit: SOUND_LEVEL_UNIT,
+    calibrated: true,
+    dataType: 'i16',
+    sizeBytes: 2,
+  },
 });
 
 /**
@@ -339,11 +384,34 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
  * channel table stored in the header (byte 314 = nChannels, bytes 315.. =
  * signal IDs). Unknown IDs fall back to a `u12` channel named after the ID,
  * matching the Java catch-all (ShimmerObject.java:3579-3583).
+ *
+ * @param pressure The part behind `0x1A`/`0x1B`. Header byte 224 names it on
+ *   newer firmware (DEV-1123); otherwise the caller decides between a BMP390
+ *   and a BMP581 from the board's SR number (`isBmp581PresentPerSrNumber`), as
+ *   the Java driver does (ShimmerObject.java:3470-3497, `isSupportedBmp581()`).
+ *   Only a BMP581 pair is emitted calibrated; any other part's is raw, and an
+ *   unknown or absent part's is the part-neutral `PRESSURE`/`TEMPERATURE`.
  */
-export function buildShimmer3RSdLogChannels(signalIds: ArrayLike<number>): SdLogChannelSpec[] {
+export function buildShimmer3RSdLogChannels(
+  signalIds: ArrayLike<number>,
+  pressure: SdLogPressureSensor = 'bmp390',
+): SdLogChannelSpec[] {
   const ch: SdLogChannelSpec[] = [];
   for (let i = 0; i < signalIds.length; i++) {
     const id = signalIds[i];
+    if (pressure === 'bmp581' && id === 0x1a) {
+      ch.push(bmp581Channel(SDLOG_BMP581_TEMPERATURE_NAME, CHANNEL_UNITS.DEGREES_CELSIUS));
+      continue;
+    }
+    if (pressure === 'bmp581' && id === 0x1b) {
+      ch.push(bmp581Channel(SDLOG_BMP581_PRESSURE_NAME, CHANNEL_UNITS.KPASCAL));
+      continue;
+    }
+    if (pressure !== 'bmp390' && (id === 0x1a || id === 0x1b)) {
+      const kind = id === 0x1a ? 'TEMPERATURE' : 'PRESSURE';
+      ch.push(uncal(`${kind}${pressureNameSuffix(pressure)}`, 'u24'));
+      continue;
+    }
     const spec = SHIMMER3R_SIGNAL_ID_TABLE[id];
     ch.push(spec ? { ...spec } : uncal(String(id), 'u12'));
   }

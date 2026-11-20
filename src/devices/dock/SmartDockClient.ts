@@ -1,6 +1,8 @@
 import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
+import { HandlerSet } from '../../core/handlerSet.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
 import type { ShimmerTransport, Unsubscribe } from '../../core/transport/types.js';
+import { unnamedLink } from '../../core/transport/linkNoun.js';
 import { concatU8 } from './protocol.js';
 import { WiredShimmerClient, type WiredIdentity } from './WiredShimmerClient.js';
 import type { WiredBatteryStatus } from './protocol.js';
@@ -143,7 +145,7 @@ export class SmartDockClient extends BaseShimmerClient {
   private _disconnectUnsub: Unsubscribe | null = null;
 
   private _rxBuf: Uint8Array = new Uint8Array(0);
-  private _temps: Set<(line: string) => void> = new Set();
+  private readonly _temps = new HandlerSet<string>((e) => this._log('temp handler error', e));
 
   /**
    * Serialization queue: all public operations chain onto this so slot
@@ -183,8 +185,18 @@ export class SmartDockClient extends BaseShimmerClient {
     if (this.debug) console.log('[SmartDock]', ...args);
   }
 
-  private _deviceLabel(): string {
-    return this._transport?.deviceName ?? 'SmartDock';
+  /**
+   * The name the link reported, or `null` when it reported none. Never invented.
+   *
+   * This client builds no `ObjectCluster` — the dock protocol has no streaming —
+   * so unlike the Shimmer3/3R clients there is no second caller needing a
+   * non-null identifier, and nothing to trade off against saying so plainly.
+   * The old `?? 'SmartDock'` fired on every real connect, because the base UART
+   * arrives over a `WebSerialTransport` and Web Serial reports no name at all.
+   */
+  private _reportedDeviceName(): string | null {
+    const name = this._transport?.deviceName?.trim();
+    return name ? name : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -212,7 +224,7 @@ export class SmartDockClient extends BaseShimmerClient {
     this._emitStatus('Opening SmartDock base UART connection…');
     await t.connect();
     this._rxBuf = new Uint8Array(0);
-    this._emitStatus(`Connected: ${this._deviceLabel()}`);
+    this._emitStatus(`Connected: ${this._reportedDeviceName() ?? unnamedLink(t.kind)}`);
   }
 
   override async disconnect(): Promise<void> {
@@ -577,12 +589,6 @@ export class SmartDockClient extends BaseShimmerClient {
     this._temps.delete(fn);
   }
   private _emitTemp(line: string): void {
-    this._temps.forEach((fn) => {
-      try {
-        fn(line);
-      } catch (e) {
-        this._log('temp handler error', e);
-      }
-    });
+    this._temps.emit(line);
   }
 }

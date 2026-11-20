@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 import { Shimmer3Client } from '../../src/devices/shimmer3/Shimmer3Client.js';
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
@@ -15,6 +15,8 @@ const NACK = OPCODES.NACK_COMMAND_PROCESSED; // 0xFE
 const INQ_RSP = OPCODES.INQUIRY_RESPONSE; // 0x02
 const DEVVER = OPCODES.DEVICE_VERSION_RESPONSE; // 0x25
 const FWVER = OPCODES.FW_VERSION_RESPONSE; // 0x2F
+/** DAUGHTER_CARD_ID_RESPONSE for SR48-4-2, a new-IMU board. */
+const BOARD_ID = [ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2];
 
 // Classic-Shimmer3 inquiry response (opcode-inclusive), 51.2 Hz, gyro X/Y/Z,
 // gsrRange=2, expPower=1 — see protocol.test.ts for the byte-by-byte breakdown.
@@ -26,15 +28,27 @@ function replyHandshake(bytes: Uint8Array, tr: LoopbackTransport): void {
   if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
   else if (op === OPCODES.GET_FW_VERSION_COMMAND)
     setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+  else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) setTimeout(() => tr.notify(BOARD_ID), 0);
 }
 
-function newTransport(): LoopbackTransport {
-  return new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'Shimmer3-TEST' });
+/**
+ * `deviceName` is what the LINK reports; `null` means it reports none, which is
+ * the real Web Serial case (Chrome's `SerialPort` exposes no name at all).
+ * `null` rather than `undefined` because a default parameter cannot tell an
+ * explicit `undefined` from an omitted argument.
+ */
+function newTransport(deviceName: string | null = 'Shimmer3-TEST'): LoopbackTransport {
+  return new LoopbackTransport({
+    capabilities: { framed: false },
+    deviceName: deviceName ?? undefined,
+  });
 }
 
 /** Connect a client (running the handshake) and return both. */
-async function connected(): Promise<{ t: LoopbackTransport; client: Shimmer3Client }> {
-  const t = newTransport();
+async function connected(
+  deviceName: string | null = 'Shimmer3-TEST',
+): Promise<{ t: LoopbackTransport; client: Shimmer3Client }> {
+  const t = newTransport(deviceName);
   t.setOnWrite((bytes, tr) => replyHandshake(bytes, tr));
   const client = new Shimmer3Client({ debug: false, transport: t });
   await client.connect();
@@ -47,7 +61,7 @@ function dribble(tr: LoopbackTransport, bytes: number[]): void {
 }
 
 describe('Shimmer3Client connect handshake', () => {
-  it('throws without an injected transport (no browser classic BT)', async () => {
+  it('throws without an injected transport (no browser Classic BT)', async () => {
     const client = new Shimmer3Client({ debug: false });
     await expect(client.connect()).rejects.toThrow(/requires an injected transport/i);
   });
@@ -60,7 +74,9 @@ describe('Shimmer3Client connect handshake', () => {
       OPCODES.GET_SAMPLING_RATE_COMMAND, // 0x03 dummy read / buffer flush
       OPCODES.GET_DEVICE_VERSION_COMMAND, // 0x3F
       OPCODES.GET_FW_VERSION_COMMAND, // 0x2E
+      OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, // 0x66, on firmware code 5 and up
     ]);
+    expect(client.expansionBoard).toEqual({ boardId: 48, boardRev: 4, specialRev: 2 });
     expect(client.deviceVersion?.hardwareVersion).toBe(3);
     expect(client.firmwareVersion?.minor).toBe(15);
     expect(client.timestampFmt).toBe('u24'); // derived from firmware
@@ -169,6 +185,41 @@ describe('Shimmer3Client setters', () => {
   });
 });
 
+describe('Shimmer3Client setRebootOnDisconnect', () => {
+  /** Connect to LogAndStream `major.minor.internal`. */
+  async function connectedAt(major: number, minor: number, internal: number) {
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, 3, 0, major & 0xff, major >> 8, minor, internal]), 0);
+      else replyHandshake(bytes, tr);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    return { t, client };
+  }
+
+  it('arms the reboot on firmware with SET_FEATURE (LogAndStream 1.0.17 on)', async () => {
+    const { t, client } = await connectedAt(1, 0, 17);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_FEATURE) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.setRebootOnDisconnect(true);
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_FEATURE)!;
+    expect(Array.from(cmd.bytes)).toEqual([OPCODES.SET_FEATURE, 2, 1]);
+  });
+
+  it('sends nothing to older firmware, which would ACK the bytes as commands', async () => {
+    const { t, client } = await connectedAt(1, 0, 16);
+    t.setOnWrite((bytes, tr) => {
+      // 0xB7 and 0x02 are dropped; 0x01 is INQUIRY_COMMAND, which is ACKed.
+      if (bytes[0] === OPCODES.SET_FEATURE) setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+    });
+    await expect(client.setRebootOnDisconnect(true)).rejects.toThrow(/SET_FEATURE/);
+    expect(t.writes.some((w) => w.bytes[0] === OPCODES.SET_FEATURE)).toBe(false);
+  });
+});
+
 describe('Shimmer3Client error paths', () => {
   it('rejects on a NACK', async () => {
     const { t, client } = await connected();
@@ -188,17 +239,20 @@ describe('Shimmer3Client error paths', () => {
 });
 
 describe('Shimmer3Client streaming', () => {
-  /** Build a 10-byte gyro frame: [0x00 preamble][u24 ts][i16 x][i16 y][i16 z]. */
+  /**
+   * Build a 10-byte gyro frame: [0x00 preamble][u24 ts LE][i16 x][i16 y][i16 z],
+   * the gyro big-endian as a Shimmer3 sends it.
+   */
   function frame(ts: number, x: number, y: number, z: number): number[] {
-    const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
+    const be16 = (v: number) => [(v >> 8) & 0xff, v & 0xff];
     return [
       0x00,
       ts & 0xff,
       (ts >> 8) & 0xff,
       (ts >> 16) & 0xff,
-      ...le16(x),
-      ...le16(y),
-      ...le16(z),
+      ...be16(x),
+      ...be16(y),
+      ...be16(z),
     ];
   }
 
@@ -231,6 +285,52 @@ describe('Shimmer3Client streaming', () => {
     expect(frames[0].get('TIMESTAMP', 'raw')?.value).toBe(100);
     expect(frames[0].get('GYRO_X', 'raw')?.value).toBe(1);
     expect(frames[1].get('GYRO_Z', 'raw')?.value).toBe(6);
+    // The frame label is the other half of the connect-log split: it keeps the
+    // link's name when there is one, and needs a non-null value regardless.
+    expect(frames[0].deviceId).toBe('Shimmer3-TEST');
+  });
+
+  it('sizes the reorder window from the rate the inquiry reported', async () => {
+    /* The same wiring as `Shimmer3RClient`, and the same reason to pin it: the
+       two clients are parallel implementations of one wire format, so a
+       one-line omission in either is invisible until a recording is 512 s
+       long. 0x80 0x02 in INQUIRY_MSG is a divider of 640 — 51.2 Hz. */
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+      else if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.inquiry();
+    client.anchorStreamClock = false;
+    await client.startStreaming();
+
+    expect(client.samplingRateHz).toBeCloseTo(51.2, 5);
+    // Eight sample periods of 640 ticks — not the 2097152-tick fallback.
+    expect(client.timelineState.reorderWindowTicks).toBe(5120);
+  });
+
+  it('labels frames from an anonymous link with the generation name', async () => {
+    /* The fallback that must survive: an ObjectCluster needs an attributable
+       deviceId even when the link supplies no name, which is precisely why the
+       connect log must not print this same string as though it were a name. */
+    const { t, client } = await connected(null);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_MSG]), 0);
+    });
+    await client.inquiry();
+
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.startStreaming();
+    t.notify([...frame(100, 1, 2, 3), ...frame(200, 4, 5, 6), ...frame(300, 7, 8, 9)]);
+
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+    expect(frames[0].deviceId).toBe('Shimmer3');
   });
 
   it('stopStreaming is best-effort and clears state', async () => {
@@ -265,8 +365,9 @@ describe('Shimmer3Client disconnect', () => {
 
 /** 10-byte gyro frame [0x00 preamble][u24 ts][i16 x][i16 y][i16 z]. */
 function gyroFrame(ts: number, x: number, y: number, z: number): number[] {
-  const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
-  return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...le16(x), ...le16(y), ...le16(z)];
+  // A Shimmer3 sends its gyro big-endian (channelFormats.ts, DEV-1288).
+  const be16 = (v: number) => [(v >> 8) & 0xff, v & 0xff];
+  return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...be16(x), ...be16(y), ...be16(z)];
 }
 
 /** Bring a connected client to a live streaming state with the gyro/u24 schema. */
@@ -441,5 +542,448 @@ describe('Shimmer3Client drain quiescence timing (fake timers)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Each of these reads takes a timeout that defaults to
+// SHIMMER3_DEFAULTS.RESPONSE_TIMEOUT_MS. That object is frozen, so while the
+// parameter had no annotation it was inferred as the literal type 2000, and
+// passing any other value failed to compile (TS2345). `npm run typecheck`
+// covers tests/, so it fails if the literal type ever comes back.
+describe('Shimmer3Client read timeouts', () => {
+  it('readPressureCalibration honours a timeout other than the 2 s default', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite(() => {
+      /* never reply */
+    });
+    const sentBefore = t.writes.length;
+    vi.useFakeTimers();
+    try {
+      let resolved = false;
+      const p = client.readPressureCalibration(100).then((cal) => {
+        resolved = true;
+        return cal;
+      });
+      // Three commands are tried in turn, each waiting the 100 ms it was given,
+      // so the third is still waiting at 250 ms...
+      await vi.advanceTimersByTimeAsync(250);
+      expect(resolved).toBe(false);
+      // ...and has given up by 350 ms. At the default, the first alone waits 2 s.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolved).toBe(true);
+      expect(await p).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(t.writes.slice(sentBefore).map((w) => w.bytes[0])).toEqual([
+      OPCODES.GET_PRESSURE_CALIBRATION_COEFFICIENTS_COMMAND,
+      OPCODES.GET_BMP280_CALIBRATION_COEFFICIENTS_COMMAND,
+      OPCODES.GET_BMP180_CALIBRATION_COEFFICIENTS_COMMAND,
+    ]);
+  });
+
+  it('types every read timeout as a number, not the literal default', () => {
+    expectTypeOf<Shimmer3Client['readExgConfig']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['getRtcTime']>().parameter(0).toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['readPressureCalibration']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+    expectTypeOf<Shimmer3Client['readCalibration']>()
+      .parameter(0)
+      .toEqualTypeOf<number | undefined>();
+  });
+});
+
+describe('Shimmer3Client real-world clock over RFCOMM', () => {
+  // The firmware's tick count, as `[0x90][u64 LSB first]` sends it:
+  // 2026-10-02T12:00:00Z in 32768 Hz ticks.
+  const TICKS = (BigInt(Date.UTC(2026, 9, 2, 12)) * 32768n) / 1000n;
+  const RWC = [
+    OPCODES.RWC_RESPONSE,
+    ...Array.from({ length: 8 }, (_, i) => Number((TICKS >> BigInt(8 * i)) & 0xffn)),
+  ];
+
+  it.each([
+    { link: 'one read', perByte: false },
+    { link: 'a byte per read', perByte: true },
+  ])('reads the clock from $link', async ({ perByte }) => {
+    // The framer could not size RWC_RESPONSE, so this always timed out.
+    const t = newTransport();
+    t.setOnWrite((bytes, tr) => {
+      replyHandshake(bytes, tr);
+      if (bytes[0] !== OPCODES.GET_RWC_COMMAND) return;
+      if (perByte) dribble(tr, [ACK, ...RWC]);
+      else setTimeout(() => tr.notify([ACK, ...RWC]), 0);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+
+    const { ticks, unixMs } = await client.getRtcTime();
+
+    expect(ticks).toBe(TICKS);
+    expect(unixMs).toBeCloseTo(Date.UTC(2026, 9, 2, 12), -1);
+  });
+});
+
+describe('Shimmer3Client daughter-card memory', () => {
+  const DCMEM_RSP = OPCODES.DAUGHTER_CARD_MEM_RESPONSE;
+  // Brand record host offset 1936 = 0x0790 little-endian → offLSB 0x90, offMSB 0x07.
+  const OFFSET = 1936;
+
+  it('readDaughterCardMem sends [cmd, len, offLSB, offMSB] and parses the response', async () => {
+    const payload = [0x42, 0x53, 0x01, 0x02, 0x08, 0x05];
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        setTimeout(() => tr.notify([ACK, DCMEM_RSP, payload.length, ...payload]), 0);
+      }
+    });
+
+    const data = await client.readDaughterCardMem(OFFSET, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND,
+      payload.length,
+      0x90,
+      0x07,
+    ]);
+  });
+
+  it('readDaughterCardMem survives 1-byte RFCOMM dribble of the response', async () => {
+    const payload = [0x11, 0x22, 0x33, 0x44];
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_MEM_COMMAND) {
+        dribble(tr, [ACK, DCMEM_RSP, payload.length, ...payload]);
+      }
+    });
+
+    const data = await client.readDaughterCardMem(0, payload.length);
+    expect(Array.from(data)).toEqual(payload);
+  });
+
+  it('writeDaughterCardMem sends [cmd, len, offLSB, offMSB, data...] and resolves on ACK', async () => {
+    const data = [0xde, 0xad, 0xbe, 0xef];
+    const { t, client } = await connected();
+    t.setOnWrite((_bytes, tr) => {
+      setTimeout(() => tr.notify([ACK]), 0);
+    });
+
+    await client.writeDaughterCardMem(OFFSET, Uint8Array.from(data));
+
+    const cmd = t.writes.find((w) => w.bytes[0] === OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND);
+    expect(cmd).toBeTruthy();
+    expect(Array.from(cmd!.bytes)).toEqual([
+      OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND,
+      data.length,
+      0x90,
+      0x07,
+      ...data,
+    ]);
+  });
+
+  it('writeDaughterCardMem rejects on NACK', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.SET_DAUGHTER_CARD_MEM_COMMAND) {
+        setTimeout(() => tr.notify([NACK]), 0);
+      }
+    });
+
+    await expect(client.writeDaughterCardMem(0, Uint8Array.of(1, 2))).rejects.toThrow(/NACK/);
+  });
+
+  it('rejects out-of-range offsets/lengths before writing', async () => {
+    const { t, client } = await connected();
+    const writesBefore = t.writes.length;
+
+    await expect(client.readDaughterCardMem(-1, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(2032, 8)).rejects.toThrow(/offset/);
+    await expect(client.readDaughterCardMem(0, 129)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readDaughterCardMem(2000, 64)).rejects.toThrow(/1\.\.128/);
+    await expect(client.writeDaughterCardMem(0, new Uint8Array(0))).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(writesBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// InfoMem / MAC
+// ---------------------------------------------------------------------------
+
+// The MAC has no command of its own — it lives in InfoMem at image index 224,
+// which equals the WIRE address only on firmware using flat page addressing.
+// Older firmware addresses the C page at 0x1880, so the same field sits at
+// 0x18E0. These tests pin that mapping, because getting it wrong reads six
+// bytes of unrelated configuration and reports them as a MAC.
+describe('Shimmer3Client InfoMem + getMacAddress', () => {
+  const MAC_BYTES = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+
+  /** Handshake replying with `fwMinor`, then serving InfoMem reads. */
+  async function withFirmware(
+    fwId: number,
+    fwMinor: number,
+    macBytes: number[] = MAC_BYTES,
+  ): Promise<{ t: LoopbackTransport; client: Shimmer3Client; reads: number[] }> {
+    const t = newTransport();
+    const reads: number[] = [];
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+      else if (op === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, fwId, 0, 0, 0, fwMinor, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify(BOARD_ID), 0);
+      else if (op === OPCODES.GET_INFOMEM_COMMAND) {
+        const len = bytes[1];
+        const addr = bytes[2] | (bytes[3] << 8);
+        reads.push(addr);
+        setTimeout(() => tr.notify([OPCODES.INFOMEM_RESPONSE, len, ...macBytes.slice(0, len)]), 0);
+      }
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    return { t, client, reads };
+  }
+
+  it('reads the MAC at the FLAT address on modern LogAndStream', async () => {
+    const { client, reads } = await withFirmware(3, 16); // LogAndStream 0.16 >= 0.5.16
+    await expect(client.getMacAddress()).resolves.toBe('123456789ABC');
+    expect(reads).toEqual([224]); // flat C page (128) + 96
+  });
+
+  it('reads the MAC at the LEGACY address on pre-0.5.16 LogAndStream', async () => {
+    const { client, reads } = await withFirmware(3, 5); // 0.5.0 < 0.5.16
+    await expect(client.getMacAddress()).resolves.toBe('123456789ABC');
+    expect(reads).toEqual([0x1880 + 96]); // legacy C page base
+  });
+
+  it('rejects an unprovisioned MAC rather than reporting all-FF', async () => {
+    const { client } = await withFirmware(3, 16, [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    await expect(client.getMacAddress()).rejects.toThrow(/unprovisioned/i);
+  });
+
+  it('reassembles an InfoMem read dribbled one byte at a time', async () => {
+    const t = newTransport();
+    // 32B @224 keeps the read inside the C page (offset 96 + 32 = 128).
+    const payload = Array.from({ length: 32 }, (_, i) => i);
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+      else if (op === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 16, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify(BOARD_ID), 0);
+      else if (op === OPCODES.GET_INFOMEM_COMMAND)
+        dribble(tr, [OPCODES.INFOMEM_RESPONSE, payload.length, ...payload]);
+    });
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    await client.connect();
+    const got = await client.readInfoMem(224, payload.length);
+    expect(Array.from(got)).toEqual(payload);
+  });
+
+  it('rejects out-of-range InfoMem reads before writing', async () => {
+    const { t, client } = await withFirmware(3, 16);
+    const before = t.writes.length;
+    await expect(client.readInfoMem(-1, 8)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0x10000, 8)).rejects.toThrow(/address/);
+    await expect(client.readInfoMem(0, 129)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readInfoMem(0, 0)).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(before);
+  });
+
+  // A read that straddles a page boundary would get boundary-dependent junk for
+  // the overhang, so it is refused rather than half-served. Page bases are
+  // 128-aligned in both addressing modes, so address % 128 is the in-page offset
+  // whichever mode the firmware uses.
+  it('rejects an InfoMem read that crosses a page boundary', async () => {
+    const { t, client } = await withFirmware(3, 16);
+    const before = t.writes.length;
+    await expect(client.readInfoMem(127, 8)).rejects.toThrow(/page boundary/);
+    await expect(client.readInfoMem(0x1880 + 124, 8)).rejects.toThrow(/page boundary/);
+    expect(t.writes.length).toBe(before);
+    // Right up to the boundary is fine, on both flat and legacy page bases.
+    await expect(client.readInfoMem(122, 6)).resolves.toBeInstanceOf(Uint8Array);
+    await expect(client.readInfoMem(0x1880 + 96, 6)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it('refuses to guess the layout before the handshake has run', async () => {
+    const client = new Shimmer3Client({ debug: false });
+    await expect(client.getMacAddress()).rejects.toThrow(/handshake/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The BMPX80 pressure pair, end to end over the unframed classic path
+// ---------------------------------------------------------------------------
+//
+// A Shimmer3 packs BMP_TEMPERATURE as 2 big-endian bytes and BMP_PRESSURE as 3
+// (bmpX80.h:103-105; i2c.c:389-394 emits them in that order). The schema
+// builder used to describe neither, assumed 2 little-endian bytes for both, and
+// so computed a frame one byte shorter than the firmware sends — which put
+// every channel after pressure at the wrong offset and, on a byte stream with
+// no message boundaries, stopped the parser resynchronising at all. Pressure is
+// a stock sensor: any host that enabled it got this.
+describe('Shimmer3Client streaming with pressure enabled', () => {
+  /** Inquiry with LN accel X, temperature, pressure, GSR — Shimmer3 layout. */
+  const INQUIRY_PRESSURE = [
+    INQ_RSP,
+    0x80,
+    0x02,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x04, // numChannels
+    0x01, // bufferSize
+    0x00,
+    0x1a,
+    0x1b,
+    0x1c,
+  ];
+
+  const ACCEL_X = 1234;
+  const TEMPERATURE = 0xabcd;
+  const PRESSURE = 0x123456;
+  const GSR = 3054;
+
+  /** 13-byte frame: preamble + u24 ts + i16 accel + u16be temp + u24be press + u16 gsr. */
+  function pressureFrame(ts: number): number[] {
+    return [
+      0x00,
+      ts & 0xff,
+      (ts >> 8) & 0xff,
+      (ts >> 16) & 0xff,
+      ACCEL_X & 0xff,
+      (ACCEL_X >> 8) & 0xff,
+      (TEMPERATURE >> 8) & 0xff,
+      TEMPERATURE & 0xff,
+      (PRESSURE >> 16) & 0xff,
+      (PRESSURE >> 8) & 0xff,
+      PRESSURE & 0xff,
+      GSR & 0xff,
+      (GSR >> 8) & 0xff,
+    ];
+  }
+
+  it('sizes the frame as the firmware packs it and decodes the channel after pressure', async () => {
+    const { t, client } = await connected();
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND)
+        setTimeout(() => tr.notify([ACK, ...INQUIRY_PRESSURE]), 0);
+    });
+    const info = await client.inquiry();
+
+    // 1 preamble + 3 ts + 2 accel + 2 temperature + 3 pressure + 2 gsr = 13.
+    expect(info.schema.frameBytes).toBe(13);
+    expect(info.schema.frameBytes).toBe(pressureFrame(0).length);
+    expect(info.schema.trusted).toBe(true);
+
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    await client.startStreaming();
+
+    t.notify([...pressureFrame(100), ...pressureFrame(200), ...pressureFrame(300)]);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+    const oc = frames[0];
+    expect(oc.get('LN_ACCEL_X', 'raw')!.value).toBe(ACCEL_X);
+    expect(oc.get('TEMPERATURE', 'raw')!.value).toBe(TEMPERATURE);
+    expect(oc.get('PRESSURE', 'raw')!.value).toBe(PRESSURE);
+    // The trailing channel: 2748 (0x0ABC) under the old assumption, which is a
+    // perfectly plausible GSR reading and a completely wrong one.
+    expect(oc.get('GSR', 'raw')!.value).toBe(GSR);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate interleaving (Copilot review on the shared-drain PR)
+// ---------------------------------------------------------------------------
+
+// The `_awaitInq` gate is decremented synchronously inside the waiter handler, so
+// the drain has to dispatch each message before inspecting the next head byte.
+// If it collected everything first, a stray 0x02 sharing a read with a genuine
+// INQUIRY_RESPONSE would still look "awaited", get framed as an inquiry, and
+// swallow the bytes behind it — including a following ACK.
+describe('Shimmer3Client stray 0x02 after a real inquiry', () => {
+  it('drops the stray and still delivers the ACK behind it', async () => {
+    const { t, client } = await connected();
+
+    // A stray 0x02 crafted so that, if framed, it would consume 9 + 3 = 12 bytes
+    // and eat the trailing ACK exactly.
+    const stray = [INQ_RSP, 0, 0, 0, 0, 0, 0, 3, 0, 0xaa, 0xbb, ACK];
+
+    const seen: number[][] = [];
+    const internals = client as unknown as { _temps: Set<(c: Uint8Array) => void> };
+    const spy = (c: Uint8Array): void => void seen.push(Array.from(c));
+
+    t.setOnWrite((bytes, tr) => {
+      if (bytes[0] === OPCODES.INQUIRY_COMMAND) {
+        internals._temps.add(spy);
+        setTimeout(() => tr.notify([...INQUIRY_MSG, ...stray]), 0);
+      }
+    });
+
+    const inq = await client.inquiry();
+    expect(inq.numChannels).toBe(3);
+
+    internals._temps.delete(spy);
+
+    // The ACK behind the stray survived rather than being swallowed by it.
+    expect(seen.some((m) => m.length === 1 && m[0] === ACK)).toBe(true);
+    // And the stray was never delivered as a second inquiry.
+    expect(seen.filter((m) => m[0] === INQ_RSP)).toHaveLength(1);
+  });
+});
+
+describe('Shimmer3Client connect log does not invent a device name', () => {
+  /*
+   * The Shimmer3 half of the same defect. This client's only working browser
+   * transport is a WebSerialTransport over the COM port a Classic-Bluetooth
+   * pairing creates, and Web Serial reports no device name at all — so the
+   * fallback fired on every real connect and `Connected: Shimmer3` was a
+   * constant that read as the name from the chooser.
+   */
+  async function statusesFor(deviceName: string | null, kind?: 'serial' | 'rfcomm') {
+    const t = newTransport(deviceName);
+    // LoopbackTransport hardcodes kind 'loopback'; stand in for the real ones.
+    if (kind) Object.defineProperty(t, 'kind', { value: kind, configurable: true });
+    t.setOnWrite((bytes, tr) => replyHandshake(bytes, tr));
+    const client = new Shimmer3Client({ debug: false, transport: t });
+    const seen: string[] = [];
+    client.onStatus = (m) => seen.push(m);
+    await client.connect();
+    return seen;
+  }
+
+  it('echoes the name the transport supplied, verbatim', async () => {
+    const seen = await statusesFor('Shimmer3-TEST');
+    expect(seen).toContain('Connected: Shimmer3-TEST');
+  });
+
+  it('says the RFCOMM port is unnamed rather than naming it Shimmer3', async () => {
+    // The documented browser path: a virtual COM port over Classic Bluetooth.
+    const seen = await statusesFor(null, 'rfcomm');
+    expect(seen).toContain('Connected: an unnamed RFCOMM port');
+    expect(seen.join('\n')).not.toContain('Connected: Shimmer3');
+  });
+
+  it('reports the kind it was actually given, not a hardcoded serial', async () => {
+    const seen = await statusesFor(null, 'serial');
+    expect(seen).toContain('Connected: an unnamed serial port');
+  });
+
+  it('treats a blank reported name as no name', async () => {
+    const seen = await statusesFor('', 'serial');
+    expect(seen).toContain('Connected: an unnamed serial port');
   });
 });

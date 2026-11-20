@@ -6,8 +6,11 @@
  *     accounting (the 9-byte timestamp-offset field before the first packet
  *     of each 512-byte block is consumed and DISCARDED; porting the sync
  *     algorithm itself is out of scope)
- *   ShimmerObject#unwrapTimeStamp / #parseTimestampShimmer3 — rollover
- *     unwrapping and tick→ms conversion
+ *   TimestampUnwrap (ShimmerObject#unwrapTimeStamp / #isLastTimestampRejected)
+ *     — rollover unwrapping with the DEV-1023 reorder window and invalid-zero
+ *     rejection, through the SDK's shared StreamTimeline; a record the firmware
+ *     never stamped is dropped, as the Java file reader drops it
+ *   ShimmerObject#parseTimestampShimmer3 — tick→ms conversion
  *   ParserLoggedDataToDatabase#createMapOfFiles / #parseDataToDB /
  *   #compareSDHeader — numeric file ordering + cross-file consistency
  *     (modern files are self-contained: each restarts its own unwrap state
@@ -15,16 +18,26 @@
  *     scope — carried rollover state across files)
  */
 
+import { firstTsOffsetFromInitialTsTicks } from './anchor.js';
 import { SDLOG_CLOCK_FREQ, SDLOG_SYNC_OFFSET_LENGTH } from './constants.js';
-import { decodeSdLogValue } from './channels.js';
-import { parseSdLog, type ParsedSdLog } from './header.js';
-import { SdLogFormatError, type SdLogHeader, type SdLogRecord } from './types.js';
 import {
-  calibrateGsrDataToResistanceFromAmplifierEq,
-  nudgeGsrResistance,
-} from '../shimmer3r/calibration.js';
-import { GSR_UNCAL_LIMIT_RANGE3 } from '../shimmer3r/constants.js';
-import { buildSdLogCalibPlan, applyCalibPlan } from './calibrate.js';
+  decodeSdLogValue,
+  SDLOG_BMP581_PRESSURE_NAME,
+  SDLOG_BMP581_TEMPERATURE_NAME,
+  type SdLogChannelSpec,
+} from './channels.js';
+import { parseSdLog, type ParsedSdLog } from './header.js';
+import {
+  SdLogFormatError,
+  type SdLogChannelCalibrationInfo,
+  type SdLogHeader,
+  type SdLogRecord,
+} from './types.js';
+import { calibrateGsrSample } from '../calibration/gsr.js';
+import { buildSdLogCalibPlan, applyCalibPlan, refreshGyroOnTheFlyInfo } from './calibrate.js';
+import { compensateBmp581 } from '../pressure/bmp581.js';
+import { SOUND_LEVEL_NAME, soundLevelDbA } from '../audio/soundLevel.js';
+import { StreamTimeline } from '../../core/StreamTimeline.js';
 
 /** Options accepted by {@link decodeSdLogFile} and {@link decodeSdSession}. */
 export interface SdLogDecodeOptions {
@@ -38,33 +51,67 @@ export interface SdLogDecodeResult {
   records: SdLogRecord[];
   /** True when decoding stopped early because `maxRecords` was reached. */
   truncated: boolean;
+  /**
+   * Records dropped because their timestamp field was an invalid `0x000000` —
+   * a record the firmware never stamped (LogAndStream v1.00.x–v1.01.003 could
+   * write one under SD back-pressure). Read as a counter wrap it would put
+   * every later record 512 s late, so it is left out of {@link records}, as the
+   * Java driver's file reader leaves it out. See `INVALID_ZERO_WINDOW_TICKS`.
+   */
+  droppedUnstampedRecords: number;
 }
 
 /**
- * Convert a raw GSR sample to conductance in µS, reusing the streaming
- * clients' amplifier-equation path (Shimmer3Client/Shimmer3RClient
- * #_calibrateData) seeded with the header's GSR range setting.
+ * Convert a raw GSR sample to conductance in µS, through the one shared
+ * amplifier-equation path (`devices/calibration/gsr.ts`) that the streaming
+ * clients also use, seeded with the header's GSR range setting.
  */
 // HARDWARE-VERIFY: GSR amplifier-equation calibration is shared by the SDK's
 // Shimmer3 and Shimmer3R streaming clients; confirm it holds for SD-logged
 // GSR data on older (pre-GSR+) Shimmer3 expansion boards.
 function calibrateGsr(raw: number, gsrRangeSetting: number): number {
-  let adc12 = raw & 0x0fff;
-  let range = gsrRangeSetting;
-  if (range === 4) {
-    range = (raw >> 14) & 0x03; // auto-range: range travels in bits 14-15
-  }
-  if (range === 3 && adc12 < GSR_UNCAL_LIMIT_RANGE3) {
-    adc12 = GSR_UNCAL_LIMIT_RANGE3;
-  }
-  let gsrkOhm = calibrateGsrDataToResistanceFromAmplifierEq(adc12, range);
-  gsrkOhm = nudgeGsrResistance(gsrkOhm, gsrRangeSetting);
-  return (1.0 / gsrkOhm) * 1000;
+  return calibrateGsrSample(raw, gsrRangeSetting).conductanceUSiemens;
+}
+
+/** Where a file's BMP581 pair sits in each record, -1 for a channel it lacks. */
+interface Bmp581Indices {
+  pressure: number;
+  temperature: number;
+}
+
+/**
+ * Locate the calibrated BMP581 pair, or null when the file has neither channel
+ * — which is every file not decided as a Shimmer3R BMP581, because only
+ * `buildShimmer3RSdLogChannels` emits these calibrated. Every other pressure
+ * pair, including an unknown part's or one the header says is not fitted
+ * (DEV-1123), stays raw.
+ */
+function findBmp581(channels: SdLogChannelSpec[]): Bmp581Indices | null {
+  const find = (name: string): number => channels.findIndex((c) => c.name === name && c.calibrated);
+  const pressure = find(SDLOG_BMP581_PRESSURE_NAME);
+  const temperature = find(SDLOG_BMP581_TEMPERATURE_NAME);
+  return pressure < 0 && temperature < 0 ? null : { pressure, temperature };
+}
+
+/**
+ * Replace the BMP581 pair's raw values in place with kPa and °C, through the
+ * same `compensateBmp581` the streaming path dispatches to. Each output is a
+ * fixed scale of its own register, so a file that somehow carries only one of
+ * the two still converts it correctly.
+ */
+function applyBmp581(values: number[], idx: Bmp581Indices): void {
+  const out = compensateBmp581(
+    idx.pressure < 0 ? 0 : values[idx.pressure],
+    idx.temperature < 0 ? 0 : values[idx.temperature],
+  );
+  if (idx.pressure >= 0) values[idx.pressure] = out.pressureKPa;
+  if (idx.temperature >= 0) values[idx.temperature] = out.temperatureC;
 }
 
 interface DecodeBudget {
   remaining: number;
   truncated: boolean;
+  droppedUnstamped: number;
 }
 
 function decodeRecordsFromFile(
@@ -80,6 +127,7 @@ function decodeRecordsFromFile(
   // calibrated. LN accel, WR accel, gyro, mag (+ Shimmer3R alt accel/mag).
   const calibPlan = buildSdLogCalibPlan(header, channels);
   header.calibration = calibPlan.info;
+  const bmp581 = findBmp581(channels);
   const packetSize = header.packetSizeBytes;
   const tsBytes = header.timestampBytes;
   const maxTicks = 2 ** (8 * tsBytes);
@@ -87,17 +135,21 @@ function decodeRecordsFromFile(
   const rtcTicks = Number(header.rtcDifferenceTicks);
   const hasRtc = header.rtcDifferenceTicks !== 0n;
 
-  // Per-file rollover state (ShimmerObject#unwrapTimeStamp): modern files
-  // restart from cycle 0 with their own header initial timestamp.
-  let cycle = 0;
-  let lastUnwrapped = 0;
-  // ShimmerObject#parseTimestampShimmer3 subtracts the FIRST packet's raw
-  // timestamp before adding the header's initial timestamp: on modern
-  // firmware the 5-byte initial timestamp is the full clock at the first
-  // packet, whose low bytes are that packet's raw timestamp — without the
-  // subtraction those low bytes would be double-counted
-  // (mFirstTsOffsetFromInitialTsTicks in the Java driver).
-  let firstRawTicks: number | null = null;
+  // Per-file rollover state (Java TimestampUnwrap): modern files restart from
+  // cycle 0 with their own header initial timestamp. The same unwrap the
+  // streaming clients use, with the reorder window sized from the file's own
+  // sampling rate. No host clock is passed, so its missed-wrap recovery — a
+  // live-link feature — never runs.
+  const timeline = new StreamTimeline({
+    timestampBits: tsBytes === 3 ? 24 : 16,
+    samplingRateHz: header.samplingRateHz,
+  });
+  // Subtracted, with the header's initial timestamp added, from each unwrapped
+  // timestamp (mFirstTsOffsetFromInitialTsTicks in the Java driver). The header
+  // holds the RTC when the file was created, not the first packet's time, so
+  // the offset re-anchors the file on the first packet's own counter value —
+  // see ./anchor.ts (DEV-1095).
+  let firstTsOffsetTicks: number | null = null;
 
   let pos = header.headerLengthBytes;
   let samplesInBlock = 0;
@@ -120,27 +172,40 @@ function decodeRecordsFromFile(
     let rawTs = bytes[p] | (bytes[p + 1] << 8);
     if (tsBytes === 3) rawTs |= bytes[p + 2] << 16;
     p += tsBytes;
-    let unwrapped = rawTs + maxTicks * cycle;
-    if (unwrapped < lastUnwrapped) {
-      cycle += 1;
-      unwrapped = rawTs + maxTicks * cycle;
+    const stamp = timeline.stamp(rawTs);
+    if (stamp.invalid) {
+      // A record the firmware never stamped: skip it whole, leaving the unwrap
+      // and the file's anchor where they were (Java's file reader drops it).
+      budget.droppedUnstamped += 1;
+      samplesInBlock += 1;
+      pos += need;
+      continue;
     }
-    lastUnwrapped = unwrapped;
-    if (firstRawTicks === null) firstRawTicks = rawTs;
+    const unwrapped = stamp.unwrappedTicks;
+    if (firstTsOffsetTicks === null) {
+      firstTsOffsetTicks = firstTsOffsetFromInitialTsTicks(initialTicks, rawTs, maxTicks);
+    }
 
     const values = new Array<number>(channels.length);
     for (let c = 0; c < channels.length; c++) {
       const spec = channels[c];
       const raw = decodeSdLogValue(bytes, p, spec.dataType);
-      // GSR is calibrated inline (amplifier equation). Inertial channels are
-      // marked calibrated by the plan but keep their raw value here and are
-      // calibrated together (per triple) by applyCalibPlan below.
-      values[c] = spec.name === 'GSR' && spec.calibrated ? calibrateGsr(raw, header.gsrRange) : raw;
+      // GSR is calibrated inline (amplifier equation), and so is the sound
+      // level (0.01 dB(A), NaN for no level). Inertial channels are marked
+      // calibrated by the plan but keep their raw value here and are
+      // calibrated together (per triple) by applyCalibPlan below, and the
+      // BMP581 pair likewise by applyBmp581.
+      if (spec.calibrated && spec.name === 'GSR') values[c] = calibrateGsr(raw, header.gsrRange);
+      else if (spec.calibrated && spec.name === SOUND_LEVEL_NAME) values[c] = soundLevelDbA(raw);
+      else values[c] = raw;
       p += spec.sizeBytes;
     }
-    if (calibPlan.entries.length) applyCalibPlan(values, calibPlan.entries);
+    if (calibPlan.entries.length) {
+      applyCalibPlan(values, calibPlan.entries, calibPlan.gyroOnTheFly);
+    }
+    if (bmp581) applyBmp581(values, bmp581);
 
-    const absoluteTicks = initialTicks + unwrapped - firstRawTicks;
+    const absoluteTicks = initialTicks + unwrapped - firstTsOffsetTicks;
     out.push({
       // Device-clock timestamp always divides by the 32768 Hz RTC clock
       // (ShimmerObject#getRtcClockFreq); only the wall-clock (RTC) conversion
@@ -163,6 +228,7 @@ function decodeRecordsFromFile(
       budget.truncated = true;
     }
   }
+  refreshGyroOnTheFlyInfo(header.calibration, calibPlan);
 }
 
 /**
@@ -182,9 +248,15 @@ export function decodeSdLogFile(bytes: Uint8Array, opts?: SdLogDecodeOptions): S
   const budget: DecodeBudget = {
     remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
     truncated: false,
+    droppedUnstamped: 0,
   };
   decodeRecordsFromFile(bytes, parsed, records, budget);
-  return { header: parsed.header, records, truncated: budget.truncated };
+  return {
+    header: parsed.header,
+    records,
+    truncated: budget.truncated,
+    droppedUnstampedRecords: budget.droppedUnstamped,
+  };
 }
 
 const isDataFileName = (name: string): boolean => !name.includes('.');
@@ -265,13 +337,29 @@ export function decodeSdSession(
   const budget: DecodeBudget = {
     remaining: opts?.maxRecords ?? Number.POSITIVE_INFINITY,
     truncated: false,
+    droppedUnstamped: 0,
   };
+  let otfUpdates = 0;
+  let lastGyroInfo: SdLogChannelCalibrationInfo | undefined;
   for (const f of withData) {
     if (budget.remaining <= 0) {
       budget.truncated = true;
       break;
     }
     decodeRecordsFromFile(f.bytes, f.parsed, records, budget);
+    lastGyroInfo = f.parsed.header.calibration.find((i) => i.group === 'gyro');
+    otfUpdates += lastGyroInfo?.gyroOnTheFly?.updates ?? 0;
   }
-  return { header: first, records, truncated: budget.truncated };
+  // The returned header is the first file's; its on-the-fly summary describes
+  // the session - the state the last file left, and every update.
+  const firstGyro = first.calibration.find((i) => i.group === 'gyro');
+  if (firstGyro?.gyroOnTheFly && lastGyroInfo?.gyroOnTheFly) {
+    firstGyro.gyroOnTheFly = { ...lastGyroInfo.gyroOnTheFly, updates: otfUpdates };
+  }
+  return {
+    header: first,
+    records,
+    truncated: budget.truncated,
+    droppedUnstampedRecords: budget.droppedUnstamped,
+  };
 }

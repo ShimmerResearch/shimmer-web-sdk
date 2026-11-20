@@ -340,6 +340,14 @@ export interface VerisenseStatusPayload {
     | 'CHARGER_STATUS_NOT_READ'
     | 'CHARGER_STATUS_UNKNOWN'
     | null;
+  /**
+   * Byte 65 bit0 (second status-flags byte — byte 26's flags are full): the
+   * installed bootloader's DFU mode has the USB CDC transport (settings page
+   * reports bootloader version >= 3), so USB DFU is available on this unit.
+   * Null when the firmware predates the field (payload < 66 bytes) — treat
+   * as unknown, not as unsupported.
+   */
+  usbDfuBootloader: boolean | null;
 }
 
 export interface VerisenseUnixAndHumanTimestamp {
@@ -1023,6 +1031,11 @@ export function parseStatusPayload(
                   : 'CHARGER_STATUS_UNKNOWN';
   }
 
+  // Second status-flags byte (byte 65; the byte-26 flags are full). Null
+  // (unknown) when the firmware predates it — never defaulted to false, which
+  // would wrongly steer users away from USB DFU on a capable unit.
+  const usbDfuBootloader = response.length >= 66 ? (response[65] & 0x01) !== 0 : null;
+
   return {
     uniqueIdentifier,
     sourceStatusProperty,
@@ -1042,6 +1055,7 @@ export function parseStatusPayload(
     chargerPresent,
     chargerStatusCode,
     chargerStatusName,
+    usbDfuBootloader,
   };
 }
 

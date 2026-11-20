@@ -30,10 +30,33 @@ export class ObjectCluster {
    */
   raw: Uint8Array | null;
 
+  /**
+   * Whether this frame's appended CRC verified.
+   *
+   * `null` when the link carries no CRC — the firmware appends one only after
+   * SET_CRC_COMMAND, and `null` rather than `true` because "not checked" and
+   * "checked and good" must not look alike to anything counting failures.
+   */
+  crcOk: boolean | null;
+
+  /**
+   * Whether this frame carried a usable timestamp.
+   *
+   * False when the counter field was an invalid `0x000000` — a packet the
+   * firmware published without stamping, which LogAndStream v1.00.x–1.01.003
+   * could do under SD write back-pressure. The frame's sensor values are real;
+   * its `TIMESTAMP` fields repeat the previous frame's and mean nothing. Like
+   * `crcOk`, the frame is still emitted: dropping it silently would hide the
+   * fault from anything counting it.
+   */
+  timestampValid: boolean;
+
   constructor(deviceId: string) {
     this.deviceId = deviceId;
     this.fields = [];
     this.raw = null;
+    this.crcOk = null;
+    this.timestampValid = true;
   }
 
   /**

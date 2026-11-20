@@ -12,6 +12,8 @@ import {
   nudgeGsrResistance,
 } from '../../src/devices/shimmer3r/calibration.js';
 import { buildFile, buildPacket, buildSdLogHeader, encodeValue } from './fixtures.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const ticksToMs = (ticks: number): number => (ticks / SDLOG_CLOCK_FREQ) * 1000;
 
@@ -79,7 +81,10 @@ describe('decodeSdLogValue — every datatype', () => {
 
 describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
   const enabled = BM.ACCEL_LN | BM.GSR;
+  // The header's initial timestamp is the RTC when the file was created: here
+  // 900 ticks after the first packet (raw 100) was sampled (DEV-1095).
   const initialTs = 1000;
+  const firstTs = 100;
 
   const makeFile = (rtc: bigint): Uint8Array => {
     const header = buildSdLogHeader({
@@ -139,21 +144,22 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
     expect(records[0].values[3]).toBeCloseTo(expectedGsr, 10);
   });
 
-  it('computes timestampMs as initialTs + (unwrapped - first raw ts), Java-style', () => {
+  it('places the first packet at its own counter time, not the header time', () => {
     const { records } = decodeSdLogFile(makeFile(0n));
-    // First packet lands exactly on the header's initial timestamp; later
-    // packets advance by the elapsed ticks since the first packet.
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(initialTs), 10);
-    expect(records[1].timestampMs).toBeCloseTo(ticksToMs(initialTs + 512), 10);
-    expect(records[2].timestampMs).toBeCloseTo(ticksToMs(initialTs + 1024), 10);
+    // The first packet's full counter value is rebuilt from the header's high
+    // bits and its own 24-bit timestamp; later packets advance by the elapsed
+    // ticks since the first packet.
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(firstTs), 10);
+    expect(records[1].timestampMs).toBeCloseTo(ticksToMs(firstTs + 512), 10);
+    expect(records[2].timestampMs).toBeCloseTo(ticksToMs(firstTs + 1024), 10);
     expect(records[0].wallClockMs).toBeNull(); // RTC difference unset
   });
 
   it('emits wallClockMs when the RTC difference is set', () => {
     const rtc = 55605813443136n; // ~2023 in ticks
     const { records } = decodeSdLogFile(makeFile(rtc));
-    expect(records[0].wallClockMs).toBeCloseTo(ticksToMs(initialTs + Number(rtc)), 6);
-    expect(records[1].wallClockMs).toBeCloseTo(ticksToMs(initialTs + 512 + Number(rtc)), 6);
+    expect(records[0].wallClockMs).toBeCloseTo(ticksToMs(firstTs + Number(rtc)), 6);
+    expect(records[1].wallClockMs).toBeCloseTo(ticksToMs(firstTs + 512 + Number(rtc)), 6);
   });
 
   it('uses the TCXO sampling clock for wallClockMs but 32768 for timestampMs', () => {
@@ -182,11 +188,11 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
     const { header: h, records } = decodeSdLogFile(file);
     expect(h.tcxo).toBe(true);
     // Device clock still divides by 32768 (getRtcClockFreq).
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(initialTs), 10);
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(firstTs), 10);
     // Wall clock divides by the TCXO frequency.
-    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / tcxoFreq) * 1000, 3);
+    expect(records[0].wallClockMs).toBeCloseTo(((firstTs + Number(rtc)) / tcxoFreq) * 1000, 3);
     expect(records[1].wallClockMs).toBeCloseTo(
-      ((initialTs + 512 + Number(rtc)) / tcxoFreq) * 1000,
+      ((firstTs + 512 + Number(rtc)) / tcxoFreq) * 1000,
       3,
     );
   });
@@ -214,7 +220,7 @@ describe('decodeSdLogFile — Shimmer3 basic decoding', () => {
       ]),
     );
     const { records } = decodeSdLogFile(file);
-    expect(records[0].wallClockMs).toBeCloseTo(((initialTs + Number(rtc)) / 312500.0) * 1000, 3);
+    expect(records[0].wallClockMs).toBeCloseTo(((firstTs + Number(rtc)) / 312500.0) * 1000, 3);
   });
 
   it('drops a trailing partial packet', () => {
@@ -247,7 +253,7 @@ describe('decodeSdLogFile — timestamp rollover unwrapping', () => {
       initialTimestampTicks: 0,
     });
     const pkt = (ts: number): number[] => buildPacket(ts, 2, encodeValue('u16', 0));
-    const file = buildFile(header, pkt(65530), pkt(65535), pkt(4), pkt(9), pkt(2));
+    const file = buildFile(header, pkt(65530), pkt(65535), pkt(4), pkt(40000), pkt(2));
     const { header: h, records } = decodeSdLogFile(file);
     expect(h.timestampBytes).toBe(2);
     // Elapsed ticks relative to the first packet (raw 65530).
@@ -255,8 +261,60 @@ describe('decodeSdLogFile — timestamp rollover unwrapping', () => {
     expect(ticks[0]).toBeCloseTo(0, 6);
     expect(ticks[1]).toBeCloseTo(5, 6);
     expect(ticks[2]).toBeCloseTo(65536 + 4 - 65530, 6); // first rollover
-    expect(ticks[3]).toBeCloseTo(65536 + 9 - 65530, 6);
+    expect(ticks[3]).toBeCloseTo(65536 + 40000 - 65530, 6);
     expect(ticks[4]).toBeCloseTo(2 * 65536 + 2 - 65530, 6); // second rollover
+  });
+
+  it('places a record a few ticks behind its predecessor as reordered, not as a rollover', () => {
+    // DEV-1023 reorder window (Java TimestampUnwrap): a backward step of a few
+    // sample periods is a reordered record. The naive "smaller means rollover"
+    // rule added a whole modulo to it and to every record after it.
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 9, 0],
+      enabledSensors: BM.GSR,
+      initialTimestampTicks: 0,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 2, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(1000), pkt(1009), pkt(1002), pkt(1020));
+    const ticks = decodeSdLogFile(file).records.map(
+      (r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ,
+    );
+    expect(ticks).toHaveLength(4);
+    expect(ticks[2]).toBeCloseTo(2, 6);
+    expect(ticks[3]).toBeCloseTo(20, 6);
+  });
+
+  it('drops a mid-range zero (a record never stamped) and keeps later records on time', () => {
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 11, 5],
+      enabledSensors: BM.GSR,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 3, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(500000), pkt(500640), pkt(0), pkt(501920));
+    const { records, droppedUnstampedRecords } = decodeSdLogFile(file);
+    expect(droppedUnstampedRecords).toBe(1);
+    const ticks = records.map((r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ);
+    expect(ticks).toHaveLength(3);
+    expect(ticks[0]).toBeCloseTo(0, 6);
+    expect(ticks[1]).toBeCloseTo(640, 6);
+    expect(ticks[2]).toBeCloseTo(1920, 6); // not 1920 + 2^24
+  });
+
+  it('still reads a zero just after the top of the 24-bit range as a rollover', () => {
+    const header = buildSdLogHeader({
+      fwId: 2,
+      fwVersion: [0, 11, 5],
+      enabledSensors: BM.GSR,
+    });
+    const pkt = (ts: number): number[] => buildPacket(ts, 3, encodeValue('u16', 0));
+    const file = buildFile(header, pkt(16777216 - 640), pkt(0), pkt(640));
+    const { records, droppedUnstampedRecords } = decodeSdLogFile(file);
+    expect(droppedUnstampedRecords).toBe(0);
+    const ticks = records.map((r) => (r.timestampMs / 1000) * SDLOG_CLOCK_FREQ);
+    expect(ticks[1]).toBeCloseTo(640, 6);
+    expect(ticks[2]).toBeCloseTo(1280, 6);
   });
 
   it('unwraps across a 24-bit rollover (u24 timestamps)', () => {
@@ -400,8 +458,279 @@ describe('decodeSdLogFile — Shimmer3R end-to-end', () => {
     const expectedGsr =
       (1.0 / nudgeGsrResistance(calibrateGsrDataToResistanceFromAmplifierEq(1500, 2), 4)) * 1000;
     expect(records[0].values[4]).toBeCloseTo(expectedGsr, 10);
-    // First packet lands on the header's initial timestamp (Java-exact math).
-    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(42), 10);
+    // Header written at tick 42, first packet sampled at tick 7: the packet
+    // keeps its own counter time (DEV-1095).
+    expect(records[0].timestampMs).toBeCloseTo(ticksToMs(7), 10);
+  });
+});
+
+describe('decodeSdLogFile — Shimmer3R pressure part (DEV-1111)', () => {
+  /*
+   * The header names no pressure part, so the board's SR number decides. The
+   * firmware writes the channel table in its own order; pressure-first is the
+   * order the shared vectors use (`[0x1B, 0x1A]`). The trim region is all 0xFF,
+   * as a BMP581 unit leaves it (SDCard/shimmer_sd_header.c:209-215).
+   */
+  const pressureFile = (
+    expansionBoard: [number, number, number],
+    fwVersion: [number, number, number] = [1, 1, 6],
+  ): Uint8Array =>
+    buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion,
+        expansionBoard,
+        signalIds: [0x1b, 0x1a],
+        calibFill: () => 0xff,
+      }),
+      // Shared frame `00 A8 61 00 00 19`: P 6400000, T 1638400.
+      buildPacket(1, 3, [0x00, 0xa8, 0x61, 0x00, 0x00, 0x19]),
+      // P 0xFFFFFF; T wire `56 55 FE`, the DEV-1102 sub-zero regression.
+      buildPacket(2, 3, [0xff, 0xff, 0xff, 0x56, 0x55, 0xfe]),
+    );
+
+  it('labels and calibrates a BMP581 board (SR48-8-2)', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 2]));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE_BMP581', unit: 'kPa', calibrated: true, dataType: 'u24', sizeBytes: 3 },
+      {
+        name: 'TEMPERATURE_BMP581',
+        unit: 'Degrees Celsius',
+        calibrated: true,
+        dataType: 'u24',
+        sizeBytes: 3,
+      },
+    ]);
+    expect(header.packetSizeBytes).toBe(3 + 3 + 3);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(records[1].values[0]).toBeCloseTo(262.143984375, 9);
+    expect(records[1].values[1]).toBeCloseTo(-1.6666565, 7);
+  });
+
+  it('keeps the channel table order the header gives', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        expansionBoard: [38, 4, 2], // SR38, the board the Java rule misses
+        signalIds: [0x1a, 0x1b],
+      }),
+      buildPacket(1, 3, [0x00, 0x00, 0x19, 0x00, 0xa8, 0x61]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.channels.map((c) => c.name)).toEqual(['TEMPERATURE_BMP581', 'PRESSURE_BMP581']);
+    expect(records[0].values).toEqual([25, 100]);
+  });
+
+  it('decodes a BMP390 board (SR48-8-1) exactly as before: labelled BMP390, raw', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 1]));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE_BMP390', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+      { name: 'TEMPERATURE_BMP390', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(records[1].values).toEqual([0xffffff, 0xfe5556]);
+  });
+
+  it('treats a BMP581 board on pre-BMP581 firmware (v1.01.005) as a BMP390', () => {
+    const { header, records } = decodeSdLogFile(pressureFile([48, 8, 2], [1, 1, 5]));
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP390', 'TEMPERATURE_BMP390']);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+});
+
+describe('decodeSdLogFile — Shimmer3R header pressure sensor id (DEV-1123)', () => {
+  /*
+   * Header byte 224 names the pressure part from LogAndStream_Shimmer3R
+   * v1.01.018. The same pressure-first table and frames as DEV-1111 above:
+   * frame 1 is P 6400000 / T 1638400 raw, 100 kPa / 25 °C as a BMP581.
+   */
+  const NEW_FW: [number, number, number] = [1, 1, 18];
+  const idFile = (
+    pressureSensorId: number,
+    expansionBoard: [number, number, number],
+    fwVersion: [number, number, number] = NEW_FW,
+  ): Uint8Array =>
+    buildFile(
+      buildSdLogHeader({
+        hw: 10,
+        fwId: 3,
+        fwVersion,
+        expansionBoard,
+        signalIds: [0x1b, 0x1a],
+        calibFill: () => 0xff,
+        pressureSensorId,
+      }),
+      buildPacket(1, 3, [0x00, 0xa8, 0x61, 0x00, 0x00, 0x19]),
+    );
+  const BMP390_BOARD: [number, number, number] = [48, 8, 1];
+  const BMP581_BOARD: [number, number, number] = [48, 8, 2];
+
+  it('0x03 on a board the SR rule gives a BMP390: the byte wins, BMP581 calibrated', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x03, BMP390_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE_BMP581', true],
+      ['TEMPERATURE_BMP581', true],
+    ]);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.pressureSensorId).toBe(3);
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/BMP581.*SR48-8-1.*BMP390/);
+  });
+
+  it('0x02 on a board the SR rule gives a BMP581: the byte wins, BMP390 raw', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x02, BMP581_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE_BMP390', false],
+      ['TEMPERATURE_BMP390', false],
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('bmp390');
+    expect(header.pressureSensorId).toBe(2);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/BMP390.*SR48-8-2.*BMP581/);
+  });
+
+  it('a byte that agrees with the SR rule decodes without a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x03, BMP581_BOARD));
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.warnings).toEqual([]);
+  });
+
+  it.each<[string, [number, number, number]]>([
+    ['v1.01.006', [1, 1, 6]],
+    ['v1.01.017', [1, 1, 17]],
+  ])(
+    'ignores the byte on Shimmer3R firmware below v1.01.018 (%s): the SR rule decides',
+    (_, fw) => {
+      const { header, records } = decodeSdLogFile(idFile(0x03, BMP390_BOARD, fw));
+      expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP390', 'TEMPERATURE_BMP390']);
+      expect(records[0].values).toEqual([6400000, 1638400]);
+      expect(header.pressureSensor).toBeNull();
+      expect(header.pressureSensorId).toBeNull();
+      expect(header.warnings).toEqual([]);
+    },
+  );
+
+  it('falls back to the SR rule when new firmware leaves the byte at 0xFF', () => {
+    const bmp581 = decodeSdLogFile(idFile(0xff, BMP581_BOARD));
+    expect(bmp581.header.channels.map((c) => c.name)).toEqual([
+      'PRESSURE_BMP581',
+      'TEMPERATURE_BMP581',
+    ]);
+    expect(bmp581.records[0].values).toEqual([100, 25]);
+    expect(bmp581.header.pressureSensor).toBeNull();
+    expect(bmp581.header.warnings).toEqual([]);
+
+    const bmp390 = decodeSdLogFile(idFile(0xff, BMP390_BOARD));
+    expect(bmp390.header.channels.map((c) => c.name)).toEqual([
+      'PRESSURE_BMP390',
+      'TEMPERATURE_BMP390',
+    ]);
+    expect(bmp390.records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0x83: BMP581, flagged as inferred from the SR number, with a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x83, BMP581_BOARD));
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE_BMP581', 'TEMPERATURE_BMP581']);
+    expect(records[0].values).toEqual([100, 25]);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.pressureSensorId).toBe(3);
+    expect(header.pressureSensorInferred).toBe(true);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/not confirmed by chip id/);
+  });
+
+  it('0x04 (unknown): raw part-neutral channels and a warning, with no SR fallback', () => {
+    // SR48-8-2 would give a BMP581 under the SR rule; an unknown id must not.
+    const { header, records } = decodeSdLogFile(idFile(0x04, BMP581_BOARD));
+    expect(header.channels).toEqual([
+      { name: 'PRESSURE', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+      { name: 'TEMPERATURE', unit: null, calibrated: false, dataType: 'u24', sizeBytes: 3 },
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(4);
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/unrecognised pressure sensor \(id 0x04\)/);
+  });
+
+  it.each([0x7d, 0x7e, 0x7f])('treats reserved or unallocated id %i as unknown', (byte) => {
+    const { header, records } = decodeSdLogFile(idFile(byte, BMP581_BOARD));
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(byte);
+    expect(header.channels.map((c) => c.name)).toEqual(['PRESSURE', 'TEMPERATURE']);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0x84 (unknown, inferred): raw, with both warnings', () => {
+    const { header, records } = decodeSdLogFile(idFile(0x84, BMP581_BOARD));
+    expect(header.pressureSensor).toBe('unknown');
+    expect(header.pressureSensorId).toBe(4);
+    expect(header.pressureSensorInferred).toBe(true);
+    expect(header.warnings).toHaveLength(2);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+  });
+
+  it('0xFE (none) with pressure channels enabled: raw part-neutral channels and a warning', () => {
+    const { header, records } = decodeSdLogFile(idFile(0xfe, BMP581_BOARD));
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['PRESSURE', false],
+      ['TEMPERATURE', false],
+    ]);
+    expect(records[0].values).toEqual([6400000, 1638400]);
+    expect(header.pressureSensor).toBe('none');
+    expect(header.pressureSensorId).toBeNull();
+    expect(header.pressureSensorInferred).toBe(false);
+    expect(header.warnings).toHaveLength(1);
+    expect(header.warnings[0]).toMatch(/no pressure sensor is fitted/);
+  });
+});
+
+describe('decodeSdLogFile — Shimmer3 header pressure sensor id (DEV-1123)', () => {
+  it('a Shimmer3 header naming a BMP581 keeps the pair raw: no BMP581 conversion on that layout', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        enabledSensors: BM.BMPX80,
+        expansionBoard: [31, 6, 0],
+        pressureSensorId: 0x03,
+      }),
+      buildPacket(1, 3, [...encodeValue('u16r', 0x1900), ...encodeValue('u24r', 0x61a800)]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.pressureSensor).toBe('bmp581');
+    expect(header.channels.map((c) => [c.name, c.calibrated])).toEqual([
+      ['TEMPERATURE_BMP581', false],
+      ['PRESSURE_BMP581', false],
+    ]);
+    expect(records[0].values).toEqual([0x1900, 0x61a800]);
+  });
+
+  it('0xFE with pressure enabled decodes the pair raw', () => {
+    const file = buildFile(
+      buildSdLogHeader({
+        hw: 3,
+        fwId: 3,
+        fwVersion: [1, 1, 6],
+        enabledSensors: BM.BMPX80,
+        expansionBoard: [31, 6, 0],
+        pressureSensorId: 0xfe,
+      }),
+      buildPacket(1, 3, [...encodeValue('u16r', 0x1234), ...encodeValue('u24r', 0x56789a)]),
+    );
+    const { header, records } = decodeSdLogFile(file);
+    expect(header.channels.map((c) => c.name)).toEqual(['TEMPERATURE', 'PRESSURE']);
+    expect(records[0].values).toEqual([0x1234, 0x56789a]);
+    expect(header.warnings).toHaveLength(1);
   });
 });
 
@@ -423,9 +752,9 @@ describe('decodeSdSession — multi-file continuation', () => {
   };
 
   it('concatenates files in numeric order with per-file absolute time', () => {
-    // Modern firmware writes each file's full clock at its first packet into
-    // that file's header (initialTs), so absolute time is continuous across
-    // the boundary: file 000 covers ticks 100..1124, file 001 starts at 1636.
+    // Each file is self-contained: its header's initial timestamp and its
+    // records' own counter give absolute time, so it is continuous across the
+    // boundary: file 000 covers ticks 100..1124, file 001 starts at 1636.
     const f0 = sessionFile(100, 100, 3);
     const f1 = sessionFile(1636, 1636, 2);
     const { records, truncated } = decodeSdSession([
@@ -438,6 +767,23 @@ describe('decodeSdSession — multi-file continuation', () => {
     expect(ticks).toEqual([100, 612, 1124, 1636, 2148]);
     // Strictly increasing across the file boundary.
     for (let i = 1; i < ticks.length; i++) expect(ticks[i]).toBeGreaterThan(ticks[i - 1]);
+  });
+
+  it('does not step at a split when each header is written after its first packet (DEV-1095)', () => {
+    // The firmware writes the RTC at file creation. File 000 is created after
+    // sampling starts, so its header is 5800 ticks (177 ms) after its first
+    // packet; file 001's is only 577 ticks (17.6 ms) after the split's first
+    // buffered packet. Pinning each file to its header stepped back 5223 ticks.
+    const base = 0x12_3456_7000;
+    const low = (t: number): number => t % 2 ** 24;
+    const f0 = sessionFile(base + 5800, low(base), 3);
+    const f1 = sessionFile(base + 3 * 512 + 577, low(base + 3 * 512), 2);
+    const { records } = decodeSdSession([
+      { name: '000', bytes: f0 },
+      { name: '001', bytes: f1 },
+    ]);
+    const ticks = records.map((r) => Math.round((r.timestampMs / 1000) * SDLOG_CLOCK_FREQ) - base);
+    expect(ticks).toEqual([0, 512, 1024, 1536, 2048]);
   });
 
   it('ignores files whose names contain a dot', () => {
@@ -542,5 +888,40 @@ describe('decodeSdSession — multi-file continuation', () => {
       { name: '001', bytes: f1 },
     ]);
     expect(records).toHaveLength(2);
+  });
+});
+
+describe('decodeSdLogFile — a recorded file with a record the firmware never stamped', () => {
+  // A Shimmer3 LogAndStream v1.01.004 recording at 51.2 Hz whose 11th record
+  // carries timestamp 0x000000 and which ends with 5 bytes that are not a
+  // whole record. Expected values are the Java driver's SD file reader's, as
+  // float64 bits, so the comparison is exact.
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('../fixtures/sd_record_never_stamped.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as {
+    fileHex: string;
+    unstampedRecordIndex: number;
+    expected: { recordHex: string; timestampMsBits: string; realTimeMsBits: string }[];
+  };
+  const hex = (h: string): Uint8Array =>
+    Uint8Array.from(h.match(/../g)!.map((b) => parseInt(b, 16)));
+  const f64 = (bits: string): number => new DataView(hex(bits).buffer).getFloat64(0, false);
+
+  const { header, records, droppedUnstampedRecords } = decodeSdLogFile(hex(fixture.fileHex));
+
+  it('keeps 39 records and drops the unstamped one', () => {
+    expect(fixture.unstampedRecordIndex).toBe(10);
+    expect(records).toHaveLength(39);
+    expect(droppedUnstampedRecords).toBe(1);
+    expect(header.packetSizeBytes).toBe(13);
+  });
+
+  it("matches the Java driver's Timestamp and RealTime bit for bit", () => {
+    const expected = fixture.expected;
+    expect(records.map((r) => r.timestampMs)).toEqual(expected.map((e) => f64(e.timestampMsBits)));
+    expect(records.map((r) => r.wallClockMs)).toEqual(expected.map((e) => f64(e.realTimeMsBits)));
   });
 });

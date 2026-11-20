@@ -23,6 +23,7 @@ export type { ImuFamily, InertialGroup, GroupDefaults } from './defaults.js';
 export {
   parseCalibDump,
   generateCalibDump,
+  MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
 } from './dump.js';
@@ -30,3 +31,15 @@ export type { CalibDump, CalibDumpRecord, CalibDumpVersion, CalibReadSource } fr
 
 export { applyStreamingCalibration } from './streaming.js';
 export type { StreamingCalibrationState, StreamingImuRanges } from './streaming.js';
+
+export {
+  DERIVED_GYRO_ON_THE_FLY_CAL,
+  GYRO_ON_THE_FLY_THRESHOLD_DPS,
+  GyroOnTheFlyCal,
+  commonsMean,
+  commonsStandardDeviation,
+  gyroOnTheFlyInfo,
+  gyroOnTheFlyWindow,
+  isGyroOnTheFlyEnabled,
+} from './gyroOnTheFly.js';
+export type { GyroOnTheFlyInfo } from './gyroOnTheFly.js';

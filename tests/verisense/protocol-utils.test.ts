@@ -305,6 +305,19 @@ describe('Status payload parser', () => {
     expect(parsed.chargerPresent).toBe(true);
     expect(parsed.chargerStatusCode).toBe(4);
     expect(parsed.chargerStatusName).toBe('CHARGER_STATUS_TRICKLE_CHARGING');
+    // 65-byte payload predates the second status-flags byte: unknown, never false.
+    expect(parsed.usbDfuBootloader).toBeNull();
+  });
+
+  it('parses the second status-flags byte (USB-DFU-capable bootloader)', () => {
+    const base = new Uint8Array(66);
+    base.set([0x29, 0xef, 0x01, 0x14, 0x01, 0x26], 0);
+
+    base[65] = 0x01;
+    expect(parseStatusPayload(base, 'status1').usbDfuBootloader).toBe(true);
+
+    base[65] = 0x00;
+    expect(parseStatusPayload(base, 'status1').usbDfuBootloader).toBe(false);
   });
 
   it('formats charger status text for UI summaries', () => {

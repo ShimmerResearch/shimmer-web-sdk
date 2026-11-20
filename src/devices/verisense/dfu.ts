@@ -58,13 +58,22 @@ export const VERISENSE_DFU_RELIABLE_PACKET_DELAY_MS = 10;
 export const VERISENSE_DFU_FAST_PACKET_DELAY_MS = 0;
 
 /**
- * The Verisense bootloader advertises as "Verisense-BL..."; app-mode sensors
- * ("Verisense-..." without the -BL) are deliberately excluded from DFU device
- * pickers to keep them unambiguous. The DFU service UUID is not advertised in
- * app mode, so it cannot be used to widen the filter; it still needs to be
- * granted via `optionalServices` for the GATT connection.
+ * The Verisense bootloader advertises with a MAC-suffixed name; app-mode
+ * sensors ("Verisense-..." without the marker) are deliberately excluded from
+ * DFU device pickers to keep them unambiguous. The DFU service UUID is not
+ * advertised in app mode, so it cannot be used to widen the filter; it still
+ * needs to be granted via `optionalServices` for the GATT connection.
+ *
+ * Two prefixes exist across the fleet: v3 (BLE+USB) bootloaders advertise
+ * "Verisense-DFU-XXXX" — harmonised with their USB product string so the same
+ * name identifies a unit on either transport — while fielded v2 (BLE-only)
+ * bootloaders advertise "Verisense-BL-XXXX" forever. Pickers must match both.
  */
 export const VERISENSE_DFU_BOOTLOADER_NAME_PREFIX = 'Verisense-BL';
+export const VERISENSE_DFU_BOOTLOADER_NAME_PREFIXES: readonly string[] = Object.freeze([
+  'Verisense-DFU',
+  'Verisense-BL',
+]);
 
 /**
  * The library's routine object-retransmission notices (e.g. "object failed to
@@ -257,15 +266,15 @@ export function isSafeFirmwareArchiveName(name: unknown): name is string {
 /**
  * `navigator.bluetooth.requestDevice()` options for picking a Verisense
  * bootloader (replaces the DFU library's `acceptAllDevices`; see
- * {@link VERISENSE_DFU_BOOTLOADER_NAME_PREFIX} for why name-prefix only).
- * Pass the vendored library's `SecureDfu.SERVICE_UUID`.
+ * {@link VERISENSE_DFU_BOOTLOADER_NAME_PREFIXES} for why name-prefix only and
+ * why there are two). Pass the vendored library's `SecureDfu.SERVICE_UUID`.
  */
 export function buildVerisenseDfuRequestDeviceOptions(dfuServiceUuid: string | number): {
   filters: { namePrefix: string }[];
   optionalServices: (string | number)[];
 } {
   return {
-    filters: [{ namePrefix: VERISENSE_DFU_BOOTLOADER_NAME_PREFIX }],
+    filters: VERISENSE_DFU_BOOTLOADER_NAME_PREFIXES.map((namePrefix) => ({ namePrefix })),
     optionalServices: [dfuServiceUuid],
   };
 }

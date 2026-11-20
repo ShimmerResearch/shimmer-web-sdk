@@ -20,6 +20,7 @@
  * generateKinematicCalibBlock — but keeps the real values in these constants).
  */
 
+import { CHANNEL_UNITS } from '../../core/units.js';
 import { makeKinematicCalibration, type KinematicCalibration } from './kinematic.js';
 
 /** IMU sensor family selected from HW version + new-IMU detection. */
@@ -28,11 +29,16 @@ export type ImuFamily = 'shimmer3-old' | 'shimmer3-new' | 'shimmer3r';
 /** Inertial channel group. */
 export type InertialGroup = 'lnAccel' | 'wrAccel' | 'gyro' | 'mag' | 'altAccel' | 'altMag';
 
-/** Emitted unit strings — exact Java strings (Configuration.java :162-164). */
+/**
+ * Emitted unit strings — exact Java strings (Configuration.java :162-164).
+ *
+ * Kept as its own name because callers index it by channel group; the strings
+ * themselves come from {@link CHANNEL_UNITS}, which is the whole vocabulary.
+ */
 export const INERTIAL_UNITS = Object.freeze({
-  accel: 'm/(s^2)',
-  gyro: 'deg/s',
-  mag: 'local_flux',
+  accel: CHANNEL_UNITS.ACCEL,
+  gyro: CHANNEL_UNITS.GYRO,
+  mag: CHANNEL_UNITS.MAG,
 } as const);
 
 interface RawCal {

@@ -2,6 +2,32 @@
  * Shimmer3R BLE protocol opcodes.
  * Values taken directly from the Shimmer3 firmware header.
  */
+/**
+ * Feature ids for the SET_FEATURE (0xB7) command: `[0xB7][featureId][value]`.
+ * Mirrors the FEATURE_* enum in log-and-stream-common
+ * `Comms/shimmer_bt_uart.h`.
+ */
+export const BT_FEATURE = Object.freeze({
+  NONE: 0,
+  /** Shimmer3 RN4678 error LEDs. */
+  RN4678_ERROR_LEDS: 1,
+  /**
+   * Arm a one-shot soft reboot that fires when the host disconnects. Lets a
+   * host apply settings only read at boot (e.g. the EEPROM brand record's
+   * advertising names) without the user power-cycling the device. Firmware
+   * skips the reboot while sensing, so an armed request can never truncate an
+   * active SD recording.
+   */
+  REBOOT_ON_DISCONNECT: 2,
+  /**
+   * Stream the event channel's records to this host, as
+   * `[0x8A][0xBB][len][record][CRC-16]` frames (DEV-971; log-and-stream-common
+   * `docs/SHIMMER3_BT_COMMUNICATION_PROTOCOL.md` §7.15). Per connection: cleared
+   * on connect and disconnect. Firmware without the event channel NACKs it.
+   */
+  EVENT_STREAM: 3,
+} as const);
+
 export const OPCODES = Object.freeze({
   DATA_PACKET: 0x00,
   INQUIRY_COMMAND: 0x01,
@@ -165,6 +191,17 @@ export const OPCODES = Object.freeze({
   DUMMY_COMMAND: 0xb5,
   RESET_BT_ERROR_COUNTS: 0xb6,
   SET_FEATURE: 0xb7,
+  /** Event channel (DEV-971): `[0xB9]` → `[ACK][0xBA][status × 9]`. */
+  GET_EVENT_CHANNEL_STATUS_COMMAND: 0xb9,
+  EVENT_CHANNEL_STATUS_RESPONSE: 0xba,
+  /** Event channel record frame, under the `0x8A` in-stream prefix. */
+  EVENT_RECORD_RESPONSE: 0xbb,
+  /**
+   * Audio recording (DEV-99): `[0xBC]` → `[ACK][0xBD][status × 32]`. Firmware
+   * before DEV-99 has no command 0xBC and drops it unanswered.
+   */
+  GET_AUDIO_STATUS_COMMAND: 0xbc,
+  AUDIO_STATUS_RESPONSE: 0xbd,
   SET_SD_SYNC_COMMAND: 0xe0,
   SD_SYNC_RESPONSE: 0xe1,
   NACK_COMMAND_PROCESSED: 0xfe,
@@ -173,13 +210,83 @@ export const OPCODES = Object.freeze({
 
 export type Opcode = (typeof OPCODES)[keyof typeof OPCODES];
 
-/** Default BLE service / characteristic UUIDs for Shimmer3R. */
+/**
+ * Timing for a byte-stream link: Web Serial, over a Bluetooth Classic COM port
+ * or over USB.
+ *
+ * A Bluetooth Classic link that has carried nothing for a while answers its
+ * next command late. shimmer-host-core measured about 1.8 s after 10-20 s of
+ * quiet, on Windows, with a Shimmer3 and a Shimmer3R alike. On a Shimmer3
+ * (RN4678) over Web Serial on 20 Nov 2026 (DEV-1516), the first battery read
+ * after a minute's quiet took 1.1 s to over 1.5 s. BLE does not slow down this
+ * way. The rule here is the one shimmer-host-core and the Java driver follow.
+ */
+export const BYTE_STREAM_LINK = Object.freeze({
+  /**
+   * How long the link may carry nothing before the client sends a command to
+   * keep it awake. The Java driver's `TIMER_READ_STATUS_PERIOD` and
+   * shimmer-host-core's `STATUS_READ_PERIOD_MS`. This is the default for
+   * `Shimmer3RClient.idleKeepAliveMs`.
+   */
+  KEEP_ALIVE_IDLE_MS: 5000,
+  /**
+   * The shortest ACK wait a command gets on this link, whatever its caller
+   * asked for. shimmer-host-core's `DEFAULT_TIMEOUT_MS`. It covers the first
+   * command after a quiet the keep-alive did not prevent: one sent while the
+   * keep-alive was off, paused, or still waiting out its idle period.
+   */
+  MIN_ACK_WAIT_MS: 2000,
+  /**
+   * When a keep-alive is due but the link is busy, how long before it looks
+   * again: shimmer-host-core's `BATTERY_RETRY_MS`.
+   */
+  KEEP_ALIVE_RETRY_MS: 1000,
+} as const);
+
+/**
+ * Default BLE service / characteristic UUIDs for Shimmer3R.
+ *
+ * The Shimmer3R's BLE transport is the CYW20820 module's CYSPP profile. Per the
+ * EZ-Serial firmware platform user guide the service exposes three
+ * characteristics, and which one you subscribe to decides the throughput:
+ *
+ * - `…ca101` Acknowledged Data (Write, **Indicate**) — "guaranteed
+ *   reliability". Every payload costs an application-level confirmation round
+ *   trip, so at a 7.5 ms connection interval one PDU takes two intervals.
+ * - `…ca102` Unacknowledged Data (Write without response, **Notify**) — the
+ *   guide's "faster potential throughput" path. One characteristic serves both
+ *   directions. Loss of the ATT-level confirmation only: the BLE link layer
+ *   still retransmits and preserves ordering, and LiteProtocol frames carry
+ *   their own integrity checks on top.
+ * - `…ca103` RX Flow (Indicate) — the server indicates when it can no longer
+ *   safely receive new data.
+ */
 export const SHIMMER3R_DEFAULTS = Object.freeze({
   SERVICE_UUID: '65333333-a115-11e2-9e9a-0800200ca100',
-  /** Write characteristic (host → device). */
+  /** Unacknowledged Data — host → device writes (write without response). */
   CHAR_RX_UUID: '65333333-a115-11e2-9e9a-0800200ca102',
-  /** Notify characteristic (device → host). */
-  CHAR_TX_UUID: '65333333-a115-11e2-9e9a-0800200ca101',
+  /**
+   * Device → host subscription. The Unacknowledged Data characteristic, which
+   * is notify-capable and therefore does not pay a confirmation round trip per
+   * payload — the same characteristic {@link CHAR_RX_UUID} writes to, which is
+   * the documented CYSPP client pattern.
+   *
+   * This was `…ca101` (Acknowledged Data) up to SDK 0.2.1. That characteristic
+   * is Indicate-only, so `startNotifications()` subscribed for indications and
+   * device → host throughput was capped at one PDU per two connection
+   * intervals — measured ~32 KB/s against a Windows 11 host, with an HCI
+   * capture confirming ATT indications (opcode 0x1D) and one confirmation per
+   * PDU. {@link WebBluetoothTransportOptions.notifyCharUUIDFallback} keeps the
+   * old characteristic reachable if a device does not offer this one.
+   */
+  CHAR_TX_UUID: '65333333-a115-11e2-9e9a-0800200ca102',
+  /** Acknowledged Data — the pre-0.2.2 device → host subscription. */
+  CHAR_TX_ACKED_UUID: '65333333-a115-11e2-9e9a-0800200ca101',
+  /**
+   * RX Flow. Indicates that the device can no longer safely receive new data;
+   * see {@link WebBluetoothTransportOptions.rxFlowCharUUID}.
+   */
+  CHAR_RX_FLOW_UUID: '65333333-a115-11e2-9e9a-0800200ca103',
 } as const);
 
 /**

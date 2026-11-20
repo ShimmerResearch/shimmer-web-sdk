@@ -55,6 +55,13 @@ export interface IShimmerClient {
 
   /** Called whenever the client emits a human-readable status message. */
   onStatus: ((msg: string) => void) | null;
+
+  /**
+   * Called when the link drops without the application asking for it. NOT
+   * called by {@link IShimmerClient.disconnect} — see
+   * `BaseShimmerClient.onDisconnect` for why.
+   */
+  onDisconnect: ((reason?: Error) => void) | null;
 }
 
 /**

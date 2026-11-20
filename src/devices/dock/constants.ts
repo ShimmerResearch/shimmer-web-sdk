@@ -90,8 +90,8 @@ const cp = (
 /**
  * The component/property table (`UART_COMPONENT_AND_PROPERTY`,
  * UartPacketDetails.java:98-160). Only the groups relevant to a docked
- * Shimmer3/3R identify + status + config path are surfaced; the GQ-only
- * 802.15.4 radio and device-self-test entries are omitted from D1 (see README).
+ * Shimmer3/3R identify + status + config path are surfaced, plus the factory
+ * self-test; the GQ-only 802.15.4 radio entries are omitted (see README).
  */
 export const UART_PROP = Object.freeze({
   MAIN_PROCESSOR: Object.freeze({
@@ -99,12 +99,37 @@ export const UART_PROP = Object.freeze({
     SAMPLE_RATE: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x01, 'READ_WRITE', 'SAMPLE_RATE'),
     MAC: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x02, 'READ_WRITE', 'MAC'),
     VER: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x03, 'READ_ONLY', 'VER'),
-    RTC_CFG_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x04, 'READ_ONLY', 'RTC_CFG_TIME'),
-    CURR_LOCAL_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x05, 'READ_WRITE', 'CURR_LOCAL_TIME'),
+    /* Access flags verified against the firmware handler (log-and-stream-common
+     * Comms/shimmer_dock_usart.c): UART_SET is implemented ONLY for
+     * RWC_CFG_TIME (0x04) — writing it calls RTC_setTimeFromTicksPtr(), i.e.
+     * this is the property that SETS the clock (payload from msToRtcBytesLE);
+     * reading it returns the time at which the RTC was last configured.
+     * CURR_LOCAL_TIME (0x05) is GET-only (current RTC value) — a SET is
+     * answered with BAD_CMD. */
+    RTC_CFG_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x04, 'READ_WRITE', 'RTC_CFG_TIME'),
+    CURR_LOCAL_TIME: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x05, 'READ_ONLY', 'CURR_LOCAL_TIME'),
     INFOMEM: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x06, 'READ_WRITE', 'INFOMEM'),
     LED0_STATE: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x07, 'READ_WRITE', 'LED_TOGGLE'),
     DEVICE_BOOT: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x08, 'READ_ONLY', 'DEVICE_BOOT'),
     ENTER_BOOTLOADER: cp(UART_COMPONENT.MAIN_PROCESSOR, 0x09, 'WRITE_ONLY', 'ENTER_BOOTLOADER'),
+  }),
+  /**
+   * The factory self-test, addressed as a component whose PROPERTY byte is the
+   * test type — there is no payload
+   * (log-and-stream-common `Comms/shimmer_dock_usart.c:473-486`, which checks
+   * the property against `FACTORY_TEST_COUNT` and answers BAD_CMD above it).
+   * The same `factory_test_t` values the Bluetooth command takes
+   * (`Test/shimmer_test.h:21-27`).
+   *
+   * Write-only, and unlike every other entry here the ACK is not the end of it:
+   * the firmware then prints its report as raw text on this link. See
+   * `WiredShimmerClient.runFactoryTest`.
+   */
+  TEST: Object.freeze({
+    MAIN: cp(UART_COMPONENT.TEST, 0x00, 'WRITE_ONLY', 'FACTORY_TEST_MAIN'),
+    LEDS: cp(UART_COMPONENT.TEST, 0x01, 'WRITE_ONLY', 'FACTORY_TEST_LEDS'),
+    ICS: cp(UART_COMPONENT.TEST, 0x02, 'WRITE_ONLY', 'FACTORY_TEST_ICS'),
+    LED_STATES: cp(UART_COMPONENT.TEST, 0x03, 'WRITE_ONLY', 'FACTORY_TEST_LED_STATES'),
   }),
   BAT: Object.freeze({
     ENABLE: cp(UART_COMPONENT.BAT, 0x00, 'READ_WRITE', 'ENABLE'),
@@ -184,6 +209,10 @@ export const PACKET_OVERHEAD_RESPONSE_OTHER = 4;
  * SERIAL_PORT_TIMEOUT = 500 ms (line 69), polled at 100 ms intervals in
  * `waitForResponse` (line 507). Retry is a dock-layer concern
  * (`AbstractDock.READ_MAC_RETRY_ATTEMPTS = 2`), not the comms layer.
+ *
+ * `Object.freeze` keeps each value's literal type (`RESPONSE_TIMEOUT_MS` is
+ * `500`, not `number`), so a parameter that defaults to one of these needs an
+ * explicit `: number`. Without it, no caller can pass any other value.
  */
 export const WIRED_DEFAULTS = Object.freeze({
   /** Per-request response timeout (ms). Matches Java SERIAL_PORT_TIMEOUT. */

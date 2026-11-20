@@ -7,6 +7,7 @@ import {
 } from '../../src/devices/dock/protocol.js';
 import { UART_PACKET_CMD, UART_PROP } from '../../src/devices/dock/constants.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
+import { uartArg } from './uartArg.js';
 
 // Drive WiredShimmerClient against a scripted in-memory dock over a transport
 // marked `framed: false` (dock UART is an unframed serial byte stream). These
@@ -38,7 +39,7 @@ function scriptDock(t: LoopbackTransport, opts: { corruptCrc?: boolean } = {}): 
       else if (c === 0x02 && p === 0x02) payload = BAT_PAYLOAD;
       else if (c === 0x03 && p === 0x02) payload = CARDID_PAYLOAD;
       if (payload) {
-        const arg = { component: c!, property: p!, permission: 'READ_ONLY' as const, name: 'x' };
+        const arg = uartArg(c!, p!, 'READ_ONLY');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, payload);
         if (opts.corruptCrc) rsp[rsp.length - 1] ^= 0xff;
         setTimeout(() => tr.notify(rsp), 0);
@@ -144,12 +145,7 @@ describe('WiredShimmerClient config', () => {
       if (req.command === UART_PACKET_CMD.READ && req.component === 0x01 && req.property === 0x06) {
         // Echo the requested size worth of bytes.
         const size = req.payload[0];
-        const arg = {
-          component: 0x01,
-          property: 0x06,
-          permission: 'READ_WRITE' as const,
-          name: 'INFOMEM',
-        };
+        const arg = uartArg(0x01, 0x06, 'READ_WRITE', 'INFOMEM');
         const data = Uint8Array.from({ length: size }, (_, i) => i);
         setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, data)), 0);
       }
@@ -174,12 +170,7 @@ describe('WiredShimmerClient robustness (unframed stream)', () => {
     t.setOnWrite((bytes, tr) => {
       const req = parseUartPacket(bytes);
       if (req.command === UART_PACKET_CMD.READ) {
-        const arg = {
-          component: 0x01,
-          property: 0x02,
-          permission: 'READ_ONLY' as const,
-          name: 'MAC',
-        };
+        const arg = uartArg(0x01, 0x02, 'READ_ONLY', 'MAC');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, MAC_PAYLOAD);
         dribble(tr, [...rsp]);
       }
@@ -212,12 +203,7 @@ describe('WiredShimmerClient robustness (unframed stream)', () => {
     t.setOnWrite((bytes, tr) => {
       const req = parseUartPacket(bytes);
       if (req.command === UART_PACKET_CMD.READ) {
-        const arg = {
-          component: 0x02,
-          property: 0x02,
-          permission: 'READ_ONLY' as const,
-          name: 'BAT',
-        };
+        const arg = uartArg(0x02, 0x02, 'READ_ONLY', 'BAT');
         const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, arg, BAT_PAYLOAD);
         // Prepend non-header noise; the client should resync on the '$'.
         setTimeout(() => tr.notify(Uint8Array.from([0x11, 0x22, ...rsp])), 0);
@@ -302,4 +288,74 @@ describe('WiredShimmerClient command serialization (ACK correlation)', () => {
     expect((rSilent as PromiseRejectedResult).reason.message).toMatch(/timeout/i);
     expect(rAcked.status).toBe('fulfilled'); // good write still succeeds with its own ACK
   }, 3000);
+});
+
+describe('WiredShimmerClient daughter-card memory (CARD_MEM)', () => {
+  // Brand record host offset 1936 = 0x0790 → addr bytes [0x90, 0x07] (little-endian).
+  const OFFSET = 1936;
+  const CARD_MEM = UART_PROP.DAUGHTER_CARD.CARD_MEM;
+
+  /** Script a dock that answers CARD_MEM READs with `stored` and ACKs WRITEs. */
+  function scriptCardMem(t: LoopbackTransport, stored: Uint8Array): { writes: Uint8Array[] } {
+    const seen: { writes: Uint8Array[] } = { writes: [] };
+    t.setOnWrite((bytes, tr) => {
+      const req = parseUartPacket(bytes);
+      if (req.component !== CARD_MEM.component || req.property !== CARD_MEM.property) return;
+      if (req.command === UART_PACKET_CMD.READ) {
+        // READ payload is [size][addrLo][addrHi]
+        const size = req.payload![0];
+        const rsp = buildUartPacket(UART_PACKET_CMD.DATA_RESPONSE, CARD_MEM, stored.slice(0, size));
+        setTimeout(() => tr.notify(rsp), 0);
+      } else if (req.command === UART_PACKET_CMD.WRITE) {
+        seen.writes.push(req.payload!.slice());
+        setTimeout(() => tr.notify(buildUartPacket(UART_PACKET_CMD.ACK_RESPONSE, null)), 0);
+      }
+    });
+    return seen;
+  }
+
+  it('readDaughterCardMem sends READ [size, addrLo, addrHi] and returns the DATA_RESPONSE payload', async () => {
+    const stored = Uint8Array.from([0x42, 0x53, 0x01, 0x00, 0x08, 0x05, 0x07]);
+    const { t, client } = await connected();
+    scriptCardMem(t, stored);
+
+    const data = await client.readDaughterCardMem(OFFSET, stored.length);
+    expect(Array.from(data)).toEqual(Array.from(stored));
+
+    // Pin the READ request payload layout.
+    const readPkt = t.writes
+      .map((w) => parseUartPacket(w.bytes))
+      .find(
+        (p) =>
+          p.command === UART_PACKET_CMD.READ &&
+          p.component === CARD_MEM.component &&
+          p.property === CARD_MEM.property,
+      );
+    expect(readPkt).toBeTruthy();
+    expect(Array.from(readPkt!.payload!)).toEqual([stored.length, 0x90, 0x07]);
+  });
+
+  it('writeDaughterCardMem sends WRITE [size, addrLo, addrHi, data...] and resolves on ACK', async () => {
+    const data = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+    const { t, client } = await connected();
+    const seen = scriptCardMem(t, new Uint8Array(0));
+
+    await client.writeDaughterCardMem(OFFSET, data);
+
+    expect(seen.writes.length).toBe(1);
+    expect(Array.from(seen.writes[0])).toEqual([data.length, 0x90, 0x07, ...Array.from(data)]);
+  });
+
+  it('rejects out-of-range addresses/sizes before writing', async () => {
+    const { t, client } = await connected();
+    const writesBefore = t.writes.length;
+
+    await expect(client.readDaughterCardMem(-1, 8)).rejects.toThrow(/address/);
+    await expect(client.readDaughterCardMem(2032, 8)).rejects.toThrow(/address/);
+    await expect(client.readDaughterCardMem(0, 0)).rejects.toThrow(/1\.\.128/);
+    await expect(client.readDaughterCardMem(2000, 64)).rejects.toThrow(/1\.\.128/);
+    await expect(client.writeDaughterCardMem(0, new Uint8Array(0))).rejects.toThrow(/1\.\.128/);
+    await expect(client.writeDaughterCardMem(2000, new Uint8Array(64))).rejects.toThrow(/1\.\.128/);
+    expect(t.writes.length).toBe(writesBefore);
+  });
 });

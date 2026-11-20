@@ -11,6 +11,7 @@
 // module (these are identical across the two device families).
 export {
   OPCODES,
+  BT_FEATURE,
   TIMESTAMP_FIELD,
   GSR_NAME,
   GSR_UNCAL_LIMIT_RANGE3,
@@ -22,10 +23,49 @@ export { SensorBitmapShimmer3 } from '../shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from '../shimmer3r/SensorBitmap.js';
 
 export { SHIMMER3_SPP_UUID, SHIMMER3_SAMPLING_CLOCK_FREQ } from './protocol.js';
+// Imported as well as re-exported: SHIMMER3_SPP_SERIAL_OPTIONS below needs the
+// value in scope, and a re-export alone does not bind it locally.
+import { SHIMMER3_SPP_UUID as SPP_UUID } from './protocol.js';
+
+/**
+ * The `WebSerialTransport` options that reach a Shimmer over Classic Bluetooth.
+ *
+ * Both Bluetooth fields are required and they do different jobs, which is the
+ * whole reason this is a constant rather than something each caller assembles:
+ * `allowedBluetoothServiceClassIds` only *permits* Bluetooth ports to appear at
+ * all, while `filters` is what *narrows* the picker to Shimmers. Supply the
+ * permission alone and the picker lists every serial port and every paired
+ * Bluetooth device, which is unusable — a mistake that has been made once
+ * already, in the demos this constant replaces.
+ *
+ * Spread it and add whatever the call site needs on top:
+ *
+ * ```ts
+ * new WebSerialTransport({ ...SHIMMER3_SPP_SERIAL_OPTIONS, bufferSize: 64 * 1024 })
+ * ```
+ *
+ * Works on desktop Chrome/Edge 117+ and — because Android's Web Serial serves
+ * RFCOMM and nothing else — on Android Chrome 138+, where the sensor must be
+ * paired in system settings first. See `describePlatformSupport`.
+ */
+export const SHIMMER3_SPP_SERIAL_OPTIONS = Object.freeze({
+  /*
+   * Frozen at every level, not just the outer object. Object.freeze is shallow,
+   * so freezing only the wrapper would still let a JavaScript caller push into
+   * the arrays of a default that every other caller shares.
+   */
+  filters: Object.freeze([Object.freeze({ bluetoothServiceClassId: SPP_UUID })]),
+  allowedBluetoothServiceClassIds: Object.freeze([SPP_UUID]),
+  kind: 'rfcomm',
+} as const);
 
 /**
  * Connect-handshake defaults, ported from the timings/sequence in
  * com.shimmerresearch.bluetooth.ShimmerBluetooth.
+ *
+ * `Object.freeze` keeps each value's literal type (`RESPONSE_TIMEOUT_MS` is
+ * `2000`, not `number`), so a parameter that defaults to one of these needs an
+ * explicit `: number`. Without it, TypeScript callers can pass no other value.
  */
 export const SHIMMER3_DEFAULTS = Object.freeze({
   /**
@@ -35,8 +75,13 @@ export const SHIMMER3_DEFAULTS = Object.freeze({
    * classic-BT latencies.
    */
   DUMMY_READ_DRAIN_MS: 250,
-  /** Per-command ACK timeout (ms). */
-  ACK_TIMEOUT_MS: 1500,
+  /**
+   * Per-command ACK timeout (ms). 2000, shimmer-host-core's `DEFAULT_TIMEOUT_MS`:
+   * a Bluetooth Classic link left quiet for a while answers its next command
+   * only after about 1.8 s, and this client has no keep-alive to stop it going
+   * quiet (DEV-1516). It was 1500, which that first command usually missed.
+   */
+  ACK_TIMEOUT_MS: 2000,
   /** Response (post-ACK) timeout (ms). */
   RESPONSE_TIMEOUT_MS: 2000,
   /**

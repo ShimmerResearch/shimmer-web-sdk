@@ -1,5 +1,5 @@
 /**
- * Pure protocol helpers for the classic Bluetooth (RFCOMM/SPP) Shimmer3.
+ * Pure protocol helpers for the Classic Bluetooth (RFCOMM/SPP) Shimmer3.
  *
  * Classic Shimmer3 speaks the same LiteProtocol command set as the Shimmer3R
  * (see `../shimmer3r/constants.ts`), but over an **unframed RFCOMM byte stream**
@@ -13,10 +13,17 @@
  *   com.shimmerresearch.bluetooth.ShimmerBluetooth (response byte layouts + handshake)
  */
 
-import { OPCODES, TIMESTAMP_FIELD, type TimestampFmt } from '../shimmer3r/constants.js';
-import { CHANNEL_FORMATS } from '../shimmer3r/channelFormats.js';
-import { SensorBitmapShimmer3 } from '../shimmer3r/SensorBitmap.js';
-import { u16le, hex2 } from '../shimmer3r/protocol.js';
+import { PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD } from '../pressure/types.js';
+import { OPCODES, type TimestampFmt } from '../shimmer3r/constants.js';
+import {
+  buildStreamSchema,
+  type StreamSchemaBase,
+  type StreamSchemaField,
+} from '../shimmer3r/streamSchema.js';
+import { u16le } from '../shimmer3r/protocol.js';
+import { SHIMMER3_OLD_IMU_MAG_FORMATS } from '../shimmer3r/channelFormats.js';
+import { EXG_BANK_LENGTH } from '../exg/registers.js';
+import type { StreamingImuRanges } from '../calibration/streaming.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -82,24 +89,24 @@ export const SHIMMER3_SAMPLING_CLOCK_FREQ = 32768;
 // Stream schema
 // ---------------------------------------------------------------------------
 
-/** One decoded channel within a streaming data frame. */
-export interface Shimmer3ChannelField {
-  id: number;
-  name: string;
-  fmt: string;
-  endian: string;
-  sizeBytes: number;
-}
+/**
+ * One decoded channel within a streaming data frame.
+ *
+ * Structurally identical to the Shimmer3R client's field type — the two
+ * families share the channel vocabulary — and kept as its own name because it
+ * is exported. See {@link StreamSchemaField} for what `assumed` and
+ * `offsetTrusted` mean.
+ */
+export type Shimmer3ChannelField = StreamSchemaField;
 
-/** Describes how to slice a streaming data frame, built from an inquiry. */
-export interface Shimmer3StreamSchema {
-  timestampFmt: TimestampFmt;
-  fields: Shimmer3ChannelField[];
-  /** Total bytes per frame, including the 0x00 DATA_PACKET preamble byte. */
-  frameBytes: number;
-  enabledSensors: number;
-  dataPreambleByte: number;
-}
+/**
+ * Describes how to slice a streaming data frame, built from an inquiry.
+ *
+ * `dataPreambleByte` is 0x00 (DATA_PACKET) and `frameBytes` includes it.
+ * `trusted` is the field to check before believing the numbers — see
+ * {@link StreamSchemaBase.trusted}.
+ */
+export type Shimmer3StreamSchema = StreamSchemaBase;
 
 /** Typed result of decoding an INQUIRY_RESPONSE. */
 export interface Shimmer3InquiryResult {
@@ -114,6 +121,12 @@ export interface Shimmer3InquiryResult {
   accelRange: number;
   gyroRange: number;
   magRange: number;
+  /**
+   * BMP180/BMP280 oversampling, 0-3 — ConfigSetupByte3 bits 4-5, i.e. bits
+   * 28-29 of the config word. Part of the pressure compensation rather than a
+   * scale applied to its result, so a host converting PRESSURE needs it.
+   */
+  pressureResolution: number;
   numChannels: number;
   bufferSize: number;
   channelIds: number[];
@@ -125,78 +138,69 @@ export interface Shimmer3InquiryResult {
 /**
  * Build a stream schema from the channel-ID list reported by the inquiry.
  *
- * Mirrors ShimmerObject#interpretDataPacketFormat (the channel→format mapping is
- * identical for Shimmer3 and Shimmer3R, so `CHANNEL_FORMATS` and
- * `SensorBitmapShimmer3` are reused verbatim). The only Shimmer3-relevant knob is
- * the timestamp width (u24 for firmware code ≥ 6, else u16 — see
- * ShimmerObject#updateTimestampByteLength).
+ * Mirrors ShimmerObject#interpretDataPacketFormat. The generation is fixed at
+ * `'shimmer3'`: this file is the Classic-Bluetooth Shimmer3 path, so unlike
+ * `Shimmer3RClient` — which the same firmware answers on both platforms — there
+ * is nothing to determine and nothing to assume. That matters for the BMP
+ * channels, which are 2-byte big-endian temperature + 3-byte big-endian
+ * pressure here and 3 little-endian bytes each on a Shimmer3R
+ * (see `CHANNEL_FORMAT_OVERRIDES`).
+ *
+ * Two Shimmer3-relevant knobs remain: the timestamp width (u24 for firmware
+ * code ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength), and the
+ * IMU generation, which sets the mag byte order.
+ *
+ * @param onProblem optional sink for the message an unrecognised channel ID
+ *   produces; `Shimmer3Client` wires it to `onStatus`. The schema's `trusted`
+ *   and `unknownChannelIds` say the same thing to code rather than to a log.
+ * @param imuGeneration `'old'` decodes mag `0x07`-`0x09` big-endian, as an
+ *   LSM303DLHC board sends it (`SHIMMER3_OLD_IMU_MAG_FORMATS`). `'new'` or
+ *   unknown (`null`, the default) keeps little-endian, which is right for every
+ *   new-IMU board. The Java driver falls back to old when it has no board id;
+ *   this does not, so that a failed or skipped board read never flips the byte
+ *   order of the boards made since.
  */
 export function buildShimmer3Schema(
   channelIds: number[],
   timestampFmt: TimestampFmt,
+  onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3StreamSchema {
-  const fields: Shimmer3ChannelField[] = [];
-  const ts = timestampFmt === 'u24' ? TIMESTAMP_FIELD.u24 : TIMESTAMP_FIELD.u16;
-  let frameBytes = 1 + ts.sizeBytes; // 1 = DATA_PACKET (0x00) preamble
-  let enabledSensors = 0;
-
-  for (const id of channelIds) {
-    const fmt = CHANNEL_FORMATS[id];
-    if (!fmt) {
-      fields.push({ id, name: `CH_${hex2(id)}`, fmt: 'i16', endian: 'le', sizeBytes: 2 });
-      frameBytes += 2;
-      continue;
-    }
-    fields.push({ id, ...fmt });
-    frameBytes += fmt.sizeBytes ?? 2;
-    enabledSensors |= channelIdToSensorBit(id);
-  }
-
-  return { timestampFmt, fields, frameBytes, enabledSensors, dataPreambleByte: 0x00 };
+  return buildStreamSchema(channelIds, timestampFmt, {
+    generation: 'shimmer3',
+    dataPreambleByte: 0x00,
+    onProblem,
+    formatOverrides: imuGeneration === 'old' ? SHIMMER3_OLD_IMU_MAG_FORMATS : undefined,
+  });
 }
 
-/** Map a channel/signal ID to its SensorBitmapShimmer3 enable bit (0 if none). */
-function channelIdToSensorBit(id: number): number {
-  switch (id) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-      return SensorBitmapShimmer3.SENSOR_A_ACCEL;
-    case 0x04:
-    case 0x05:
-    case 0x06:
-      return SensorBitmapShimmer3.SENSOR_D_ACCEL;
-    case 0x14:
-    case 0x15:
-    case 0x16:
-      return SensorBitmapShimmer3.SENSOR_ACCEL_ALT;
-    case 0x07:
-    case 0x08:
-    case 0x09:
-      return SensorBitmapShimmer3.SENSOR_MAG;
-    case 0x0a:
-    case 0x0b:
-    case 0x0c:
-      return SensorBitmapShimmer3.SENSOR_GYRO;
-    case 0x12:
-      return SensorBitmapShimmer3.SENSOR_INT_A1;
-    case 0x1c:
-      return SensorBitmapShimmer3.SENSOR_GSR;
-    case 0x23:
-    case 0x24:
-      return SensorBitmapShimmer3.SENSOR_EXG1_16BIT;
-    case 0x25:
-    case 0x26:
-      return SensorBitmapShimmer3.SENSOR_EXG2_16BIT;
-    case 0x1e:
-    case 0x1f:
-      return SensorBitmapShimmer3.SENSOR_EXG1_24BIT;
-    case 0x21:
-    case 0x22:
-      return SensorBitmapShimmer3.SENSOR_EXG2_24BIT;
-    default:
-      return 0;
-  }
+/**
+ * A Shimmer3's inertial ranges, by calibration group, from the inquiry's
+ * config word (`configByte0`, ConfigSetupBytes 0-3 little-endian).
+ *
+ * - `wrAccel`: the LSM303 accel range, ConfigSetupByte0 bits 2-3 (config bits 2-3).
+ * - `gyro`: the MPU9x50 gyro range, ConfigSetupByte2 bits 0-1 (config bits 16-17).
+ * - `mag`: the LSM303 mag range, ConfigSetupByte2 bits 5-7 (config bits 21-23).
+ * - `lnAccel` is 0: the Kionix low-noise accel has one fixed range.
+ * - `altAccel` and `altMag` are 0: a Shimmer3 has neither part.
+ *
+ * Bit names as in the Shimmer3 InfoMem schema (`devices/infomem/schema.ts`).
+ * ConfigSetupByte3 bits 6-7 hold the MPU9x50 accel range, which no streamed
+ * channel is calibrated against, so it has no group here.
+ *
+ * Both `Shimmer3Client` and `Shimmer3RClient` take a Shimmer3's ranges from
+ * here. The second also drives a Shimmer3, and the Shimmer3R gives some of
+ * these bits other meanings (DEV-1515).
+ */
+export function shimmer3ImuRanges(configByte0: number): StreamingImuRanges {
+  return {
+    lnAccel: 0,
+    wrAccel: (configByte0 & 0xc) >>> 2,
+    gyro: (configByte0 & 0x30000) >>> 16,
+    mag: (configByte0 & 0xe00000) >>> 21,
+    altAccel: 0,
+    altMag: 0,
+  };
 }
 
 /**
@@ -207,13 +211,48 @@ function channelIdToSensorBit(id: number): number {
  * works, matching Shimmer3RClient's `base` handling).
  *
  * Ported from ShimmerObject#interpretInqResponse, HW_ID.SHIMMER_3 branch.
+ *
+ * @param onProblem optional sink for schema problems (an unrecognised channel
+ *   ID); see {@link buildShimmer3Schema}.
+ * @param imuGeneration the board's IMU generation when known; see
+ *   {@link buildShimmer3Schema}.
+ * @throws if the buffer is shorter than the header, or shorter than the channel
+ *   count it declares. Rejecting is deliberate — see the body — and callers can
+ *   let it propagate: nothing is assigned from the result until it returns.
  */
 export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
+  onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3InquiryResult {
-  let base = 0;
-  if (u8[0] === OPCODES.INQUIRY_RESPONSE) base = 1;
+  const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
+
+  /* Refuse a short buffer instead of degrading into a plausible-looking
+   * configuration. The channel count and channel ids used to fall back to
+   * zero/empty on a truncated response, and an empty channel list parses all
+   * the way through to `enabledSensors = 0` and a timestamp-only frame — which
+   * the device then contradicts with every real frame it sends. The only
+   * visible symptom is 100% packet loss at a believable data rate, with nothing
+   * pointing at the inquiry. Fixed for Shimmer3R first; this is the same class
+   * of fault on the classic layout, which differs only in the width of the
+   * config word (4 bytes here, 7 there) and hence where the count sits.
+   *
+   * The response carries no length byte of its own — it is
+   * `9 + numChannels` bytes opcode-inclusive — so the declared count is the
+   * only thing that says how much more to expect, and it has to be read before
+   * it can be trusted. Hence the two checks. */
+  const headerEnd = base + 8;
+  if (u8.length < headerEnd) {
+    throw new Error(`Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`);
+  }
+  const declaredChannels = u8[base + 6];
+  if (u8.length < headerEnd + declaredChannels) {
+    throw new Error(
+      `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + declaredChannels} ` +
+        `for the ${declaredChannels} channels it declares.`,
+    );
+  }
 
   const adcRaw = u16le(u8, base + 0);
   const samplingRateHz = SHIMMER3_SAMPLING_CLOCK_FREQ / adcRaw;
@@ -223,21 +262,29 @@ export function interpretShimmer3InquiryResponse(
     ((u8[base + 2] | (u8[base + 3] << 8) | (u8[base + 4] << 16) | (u8[base + 5] << 24)) >>> 0) >>>
     0;
 
-  const accelRange = (configByte0 & 0xc) >>> 2;
-  const gyroRange = (configByte0 & 0x30000) >>> 16;
-  const magRange = (configByte0 & 0xe00000) >>> 21;
+  const { wrAccel: accelRange, gyro: gyroRange, mag: magRange } = shimmer3ImuRanges(configByte0);
   const gsrRange = (configByte0 >>> 25) & 0x7;
   const internalExpPower = (configByte0 >>> 24) & 0x1;
+  const pressureResolution = (configByte0 >>> 28) & 0x3;
 
-  const numChannels = u8[base + 6] ?? 0;
-  const bufferSize = u8[base + 7] ?? 0;
-  const chStart = base + 8;
+  const numChannels = declaredChannels;
+  const bufferSize = u8[base + 7];
+  const chStart = headerEnd;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
-  const schema = buildShimmer3Schema(channelIds, timestampFmt);
+  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem, imuGeneration);
+
+  /* Normalised to the opcode-inclusive form whichever way the bytes arrived.
+   * `opcode` is by definition INQUIRY_RESPONSE here - `base` is 1 only when
+   * u8[0] already is - and `bytes` is documented as the opcode-inclusive
+   * slice, so a headerless input has it prepended rather than reporting the
+   * sampling divisor's low byte as an opcode and a `bytes` the interface says
+   * it is not. Callers comparing the two forms, or re-parsing `bytes`, see one
+   * shape. */
+  const bytes = base === 1 ? u8.slice(0) : Uint8Array.of(OPCODES.INQUIRY_RESPONSE, ...u8);
 
   return {
-    opcode: u8[0],
+    opcode: OPCODES.INQUIRY_RESPONSE,
     adcRaw,
     samplingRateHz,
     configByte0,
@@ -246,11 +293,12 @@ export function interpretShimmer3InquiryResponse(
     accelRange,
     gyroRange,
     magRange,
+    pressureResolution,
     numChannels,
     bufferSize,
     channelIds,
     schema,
-    bytes: u8.slice(0),
+    bytes,
   };
 }
 
@@ -333,6 +381,196 @@ export function shimmer3UsesThreeByteTimestamp(v: Shimmer3FwVersion): boolean {
   }
 }
 
+/**
+ * Hardware-version codes the firmware-version-code ladder below keys off
+ * (`ShimmerVerDetails.HW_ID`).
+ */
+const HW_ID = Object.freeze({
+  SHIMMER_2R: 2,
+  SHIMMER_3: 3,
+  SHIMMER_3R: 10,
+} as const);
+
+/**
+ * Derive the `ShimmerVerObject` "firmware version code" from a parsed FW version
+ * plus a hardware id — a port of the ladder at ShimmerVerObject.java:266-311.
+ *
+ * The code is a single monotonically-increasing capability number derived from
+ * the (HW id, FW id, major.minor.internal) tuple; the Java driver gates several
+ * protocol features on it rather than on the raw version. Returns `-1` when no
+ * rung matches (firmware older than every known threshold), exactly as Java
+ * initialises it.
+ *
+ * Only the rungs reachable by the hardware this SDK talks to are ported.
+ * Java also awards code 7 on a bare hardware-id match for Shimmer4-SDK and
+ * Arduino, code 6 for the two ShimmerGQ 802.15.4 boards and code 5 for SWEATCH,
+ * none of which these clients connect to; and code 7 on `mFirmwareIdentifier ==
+ * FW_ID.STROKARE`, a bespoke firmware build this SDK has no FW_ID for. A device
+ * running one of those would land one rung lower here than in Java — still
+ * above the ExG gate below in every case, so the difference is inert.
+ *
+ * `compareVersions` semantics (UtilShimmer.java:620-629, via :536-543): same HW
+ * id AND same FW id AND `this` version >= the target, comparing major, then
+ * minor, then internal with `>=`.
+ */
+export function deriveShimmer3FirmwareVersionCode(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): number {
+  const { firmwareIdentifier: id, major, minor, internal } = fw;
+  const ge = (tHw: number, tId: number, tMaj: number, tMin: number, tInt: number): boolean => {
+    if (hardwareVersion !== tHw || id !== tId) return false;
+    return (
+      major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)))
+    );
+  };
+  const L = FW_ID.LOGANDSTREAM;
+  const B = FW_ID.BTSTREAM;
+  const S = FW_ID.SDLOG;
+  if (ge(HW_ID.SHIMMER_3, L, 0, 16, 6)) return 9;
+  if (
+    ge(HW_ID.SHIMMER_3R, L, 0, 0, 1) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 13, 7) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 20, 1)
+  ) {
+    return 8;
+  }
+  if (ge(HW_ID.SHIMMER_3, L, 0, 6, 5)) return 7;
+  if (
+    ge(HW_ID.SHIMMER_3, B, 0, 7, 3) ||
+    ge(HW_ID.SHIMMER_3, L, 0, 5, 4) ||
+    ge(HW_ID.SHIMMER_3, S, 0, 11, 5)
+  ) {
+    return 6;
+  }
+  if (ge(HW_ID.SHIMMER_3, B, 0, 5, 0) || ge(HW_ID.SHIMMER_3, L, 0, 3, 0)) return 5;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 4, 0) || ge(HW_ID.SHIMMER_3, L, 0, 2, 0)) return 4;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 3, 0) || ge(HW_ID.SHIMMER_3, L, 0, 1, 0)) return 3;
+  if (ge(HW_ID.SHIMMER_3, B, 0, 2, 0)) return 2;
+  if (ge(HW_ID.SHIMMER_2R, B, 1, 2, 0) || ge(HW_ID.SHIMMER_3, B, 0, 1, 0)) return 1;
+  return -1;
+}
+
+/**
+ * Whether this firmware carries the live ExG GET/SET register commands — the
+ * gate the Java driver applies before every ExG read and write:
+ * `(getFirmwareVersionInternal() >= 8 && getFirmwareVersionCode() == 2) ||
+ * getFirmwareVersionCode() > 2` (ShimmerBluetooth.java:4015,4026,4205,4223).
+ *
+ * `firmwareVersionCode == 2` is exactly classic-Shimmer3 BtStream in
+ * [0.2.0, 0.3.0), which only gained the ExG commands at internal 8 — hence the
+ * extra `internal >= 8` leg. Everything newer (code > 2: all LogAndStream,
+ * BtStream >= 0.3.0, SDLog, and every Shimmer3R) has them unconditionally.
+ * BtStream 0.1.x (code 1) and anything below every rung (code -1) are rejected.
+ */
+export function shimmer3SupportsExg(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  const code = deriveShimmer3FirmwareVersionCode(fw, hardwareVersion);
+  return (fw.internal >= 8 && code === 2) || code > 2;
+}
+
+/**
+ * `compareVersions` against one target, with the semantics described at
+ * {@link deriveShimmer3FirmwareVersionCode}: the same hardware id and firmware
+ * type, at the target version or later.
+ */
+function isVersionAtLeast(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+  tHw: number,
+  tId: number,
+  tMaj: number,
+  tMin: number,
+  tInt: number,
+): boolean {
+  if (hardwareVersion !== tHw || fw.firmwareIdentifier !== tId) return false;
+  const { major, minor, internal } = fw;
+  return major > tMaj || (major === tMaj && (minor > tMin || (minor === tMin && internal >= tInt)));
+}
+
+/**
+ * Whether this firmware answers GET_STATUS. This is the gate the Java driver
+ * applies before asking (`ShimmerVerObject.isSupportedBtStatusRequest`,
+ * `ShimmerVerObject.java:734-738`): LogAndStream 0.5.2 or later, or BtStream
+ * 0.8.1 or later, on a Shimmer3, and any Shimmer3R.
+ *
+ * Firmware without the command does not answer it, so asking would cost a
+ * timeout rather than fail at once.
+ */
+export function shimmer3SupportsStatusRequest(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    hardwareVersion === HW_ID.SHIMMER_3R ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 0, 5, 2) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.BTSTREAM, 0, 8, 1)
+  );
+}
+
+/**
+ * Whether this firmware answers GET_VBATT, by the Java driver's gate
+ * (`ShimmerVerObject.isSupportedBtBatteryRequest`, `ShimmerVerObject.java:740-744`).
+ * It is the same as {@link shimmer3SupportsStatusRequest} except that
+ * LogAndStream needs 0.5.9.
+ */
+export function shimmer3SupportsBatteryRequest(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    hardwareVersion === HW_ID.SHIMMER_3R ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 0, 5, 9) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.BTSTREAM, 0, 8, 1)
+  );
+}
+
+/**
+ * Whether this firmware has SET_FEATURE (0xB7) and NACKs a feature it does not
+ * know: LogAndStream 1.0.52 on a Shimmer3R and 1.0.17 on a Shimmer3, where it
+ * came with log-and-stream-common (the Java driver's
+ * `ShimmerVerObject.isSupportedSetFeature`).
+ *
+ * Older firmware must not be sent it. It drops the 0xB7 byte unanswered and
+ * runs each byte after it as a command - feature 3 is GET_SAMPLING_RATE_COMMAND,
+ * and a value of 1 is INQUIRY_COMMAND - which it ACKs, so the request would
+ * read as accepted.
+ */
+export function shimmer3SupportsSetFeature(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 0, 52) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 1, 0, 17)
+  );
+}
+
+/**
+ * Whether this firmware might record audio (DEV-99), and so is worth asking:
+ * Shimmer3R LogAndStream v1.01.025 or later. False rules it out without
+ * sending anything. True from v1.01.026 means yes
+ * ({@link shimmer3RRecordsAudio}); on v1.01.025 it means ask the device
+ * (`Shimmer3RClient.supportsAudio`).
+ *
+ * LogAndStream_Shimmer3R v1.01.026 is the first release with audio. The
+ * development builds before it that have audio report the release they were
+ * cut from, v1.01.025, so for that version only the device can say.
+ * A Shimmer3 has no microphone.
+ */
+export function shimmer3RMayRecordAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 25);
+}
+
+/**
+ * Whether this firmware records audio (DEV-99) by its version alone:
+ * Shimmer3R LogAndStream v1.01.026, the first release with audio, or later.
+ * Every build from that release on has it, so a host need not ask. False
+ * does not rule audio out on v1.01.025 ({@link shimmer3RMayRecordAudio}).
+ */
+export function shimmer3RRecordsAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 26);
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -352,7 +590,37 @@ export const SHIMMER3_RESPONSE_PAYLOAD_LENGTHS: Readonly<Record<number, number>>
   [OPCODES.DEVICE_VERSION_RESPONSE]: 1, // 0x25
   [OPCODES.GSR_RANGE_RESPONSE]: 1, // 0x22
   [OPCODES.INTERNAL_EXP_POWER_ENABLE_RESPONSE]: 1, // 0x5F
+  /* The two legacy pressure-coefficient replies are a bare fixed-length block
+     with no length byte: 22 bytes for a BMP180 and 24 for a BMP280
+     (`Shimmer_Driver/BMP280_driver/bmp280.h:693,740`). Older LogAndStream
+     firmware serves only these, and serves them without a NACK for the wrong
+     one, so a host tries both — see `Shimmer3Client.readPressureCalibration`. */
+  [OPCODES.BMP180_CALIBRATION_COEFFICIENTS_RESPONSE]: 22, // 0x58
+  [OPCODES.BMP280_CALIBRATION_COEFFICIENTS_RESPONSE]: 24, // 0x9F
+  /* Without these, `getRtcTime` and every `readCalibration` group timed out:
+     this client reframes everything, and a reply the table cannot size is
+     resynced through a byte at a time. The calibration replies are the opcode
+     and a 21-byte kinematic block (SC_DATA_LEN_STD_IMU_CALIB, copied by
+     `ShimBt_replySingleSensorCalibCmd` in `Comms/shimmer_bt_uart.c`). */
+  [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x12
+  [OPCODES.GYRO_CALIBRATION_RESPONSE]: 21, // 0x15
+  [OPCODES.MAG_CALIBRATION_RESPONSE]: 21, // 0x18
+  [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE]: 21, // 0x1B
+  [OPCODES.RWC_RESPONSE]: 8, // 0x90 64-bit ticks, LSB first
 });
+
+/**
+ * How many status bytes follow `[0x8A][0x71]` in a Shimmer3's STATUS_RESPONSE:
+ * always one.
+ *
+ * The firmware's `STATUS_BYTE_COUNT` is 1 under `SHIMMER3`, and 2 only under
+ * `SHIMMER3R`, whose second byte is `usbPluggedIn` (log-and-stream-common
+ * `Comms/shimmer_bt_uart.h:275-279`). LogAndStream releases older than that
+ * shared code built the one byte inline, back to v0.8.0. So unlike
+ * `shimmer3rControlMessageLength`, this framer needs no hardware or firmware
+ * version to size a status.
+ */
+export const SHIMMER3_STATUS_PAYLOAD_BYTES = 1;
 
 /** Sentinel: need more bytes before the message length can be determined. */
 export const NEED_MORE = -1;
@@ -376,13 +644,46 @@ export const RESYNC = 0;
  *
  * ACK (0xFF) and NACK (0xFE) are 1-byte messages. INQUIRY_RESPONSE (0x02) is
  * `9 + numChannels` bytes, and numChannels lives at index 7, so at least 8 bytes
- * are needed to compute the length.
+ * are needed to compute the length. A message behind the 0x8A prefix is sized
+ * by the byte after the prefix, so it needs two.
  */
 export function shimmer3ControlMessageLength(buf: Uint8Array): number {
   if (buf.length === 0) return NEED_MORE;
   const opcode = buf[0];
 
   if (opcode === ACK || opcode === NACK) return 1;
+
+  /*
+   * 0x8A (INSTREAM_CMD_RESPONSE) is a shared prefix, not an opcode: the byte
+   * after it selects the message. Two of the messages under it reach this
+   * client, the status and the battery reading. The status also arrives
+   * unasked. The firmware pushes `[ACK][0x8A][0x71][status0]` when the sensor
+   * is docked or undocked (`log_and_stream_common.c:514,533`), and when sensing
+   * starts or stops for any reason other than a host command, such as the
+   * button, the end of a trial, or a low battery
+   * (`TaskList/shimmer_taskList.c:130,134`). Line numbers here are
+   * log-and-stream-common at the commit LogAndStream_Shimmer3_v1.01.005 pins.
+   *
+   * Before this branch existed, a push resynced past 0x8A and 0x71, and the
+   * status byte was then framed as whichever opcode it equalled. Status 0x25
+   * (docked, RTC set, SD card in) is DEVICE_VERSION_RESPONSE, whose payload
+   * byte swallowed the next command's ACK.
+   */
+  if (opcode === OPCODES.INSTREAM_CMD_RESPONSE) {
+    if (buf.length < 2) return NEED_MORE;
+    // [0x8A][0x71][status0]: GET_STATUS's reply and the push alike
+    // (`Comms/shimmer_bt_uart.c:1915-1921,2526-2551`).
+    if (buf[1] === OPCODES.STATUS_RESPONSE) return 2 + SHIMMER3_STATUS_PAYLOAD_BYTES;
+    // [0x8A][0x94][BattStatusRaw x3]: GET_VBATT's reply, the 12-bit battery
+    // reading little-endian and then the charger's STAT bits (`:1922-1934`).
+    if (buf[1] === OPCODES.VBATT_RESPONSE) return 5;
+    /* Nothing else under the prefix reaches this client. The firmware also
+       answers GET_DIR_COMMAND here, which this client never sends. The
+       SD-transfer frames that share the prefix are built for the Shimmer3R
+       only, because every SD-transfer command sits under
+       `#if defined(SHIMMER3R)`. */
+    return RESYNC;
+  }
 
   if (opcode === OPCODES.INQUIRY_RESPONSE) {
     if (buf.length <= SHIMMER3_INQ_NUM_CHANNELS_OFFSET) return NEED_MORE; // need index 7 present
@@ -394,6 +695,44 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     // resync instead.
     if (numChannels > 32) return RESYNC;
     return SHIMMER3_INQ_CHANNELS_OFFSET + numChannels; // 9 + numChannels
+  }
+
+  if (opcode === OPCODES.EXG_REGS_RESPONSE) {
+    // Variable length: [opcode][count][reg0..reg(count-1)]. The count byte is
+    // the number of registers the firmware is returning, echoed from the request
+    // (`*(resPacket + packet_length++) = exgLength`,
+    // `log-and-stream-common/Comms/shimmer_bt_uart.c:2223-2225`). One ADS1292R
+    // bank is `EXG_BANK_LENGTH` registers and the SDK never asks for more, so a
+    // larger "count" is garbage — resync rather than swallow up to 257 bytes of
+    // real control traffic, the same policy as the memory reads below.
+    if (buf.length < 2) return NEED_MORE;
+    if (buf[1] > EXG_BANK_LENGTH) return RESYNC;
+    return 2 + buf[1];
+  }
+
+  if (
+    opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE ||
+    opcode === OPCODES.DAUGHTER_CARD_ID_RESPONSE ||
+    opcode === OPCODES.INFOMEM_RESPONSE
+  ) {
+    // Variable length: [opcode][length][data...]. Firmware caps a daughter-card
+    // memory read and an InfoMem read at 128 bytes, and the id page is 16 —
+    // treat larger "lengths" as garbage and resync.
+    if (buf.length < 2) return NEED_MORE;
+    const memLen = buf[1];
+    if (memLen > 128) return RESYNC;
+    return 2 + memLen;
+  }
+
+  if (opcode === OPCODES.PRESSURE_CALIBRATION_COEFFICIENTS_RESPONSE) {
+    // Variable length: [opcode][1 + n][sensorId][coeffs...]. The length byte
+    // counts the sensor id, and the largest block any part sends is the
+    // BMP280's 24 bytes, so anything beyond that is garbage rather than a
+    // giant response. A BMP581 answers length 1 — the id alone.
+    if (buf.length < 2) return NEED_MORE;
+    const declared = buf[1];
+    if (declared < 1 || declared > PRESSURE_CALIBRATION_RESPONSE_MAX_PAYLOAD) return RESYNC;
+    return 2 + declared;
   }
 
   const payload = SHIMMER3_RESPONSE_PAYLOAD_LENGTHS[opcode];

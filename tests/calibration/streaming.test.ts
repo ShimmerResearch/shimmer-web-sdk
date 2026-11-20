@@ -41,7 +41,9 @@ describe('Shimmer3RClient streaming inertial calibration', () => {
     await client.inquiry();
     expect(client.imuRanges.gyro).toBe(0);
     await client.startStreaming();
-    t.notify([...frame3R(100), ...frame3R(200), ...frame3R(300)]);
+    // 640 ticks apart: one sampling interval at the 51.2 Hz the inquiry declares,
+    // which is what the stream parser confirms its frame alignment against.
+    t.notify([...frame3R(640), ...frame3R(1280), ...frame3R(1920)]);
     await tick();
     return frames;
   }
@@ -112,7 +114,9 @@ describe('Shimmer3RClient streaming inertial calibration', () => {
     const got = await client.readCalibration(200);
     expect(got).toContain('gyro');
     await client.startStreaming();
-    t.notify([...frame3R(100), ...frame3R(200), ...frame3R(300)]);
+    // 640 ticks apart: one sampling interval at the 51.2 Hz the inquiry declares,
+    // which is what the stream parser confirms its frame alignment against.
+    t.notify([...frame3R(640), ...frame3R(1280), ...frame3R(1920)]);
     await tick();
     // Device block: sens 100 (÷100 = 1) identity → gyro / 1 = raw value.
     expect(frames[0].get('GYRO_X', 'cal')!.value).toBeCloseTo(229 / 100, 6);
@@ -126,8 +130,8 @@ const FWVER = OPCODES.FW_VERSION_RESPONSE;
 // Classic inquiry: 51.2 Hz, gyro X/Y/Z, config bytes all 0 → all ranges 0.
 const INQUIRY_MSG_S3 = [INQ_RSP, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x0a, 0x0b, 0x0c];
 // Raw gyro [0,131,262] → default MPU (sens 131, align [[0,-1,0],[-1,0,0],[0,0,-1]])
-// gives [-1, 0, -2] deg/s.
-const GYRO_S3 = [0x00, 0x00, 0x83, 0x00, 0x06, 0x01];
+// gives [-1, 0, -2] deg/s. Big-endian, as a Shimmer3 sends its gyro.
+const GYRO_S3 = [0x00, 0x00, 0x00, 0x83, 0x01, 0x06];
 const frameS3 = (ts: number): number[] => [
   0x00,
   ts & 0xff,
@@ -144,6 +148,8 @@ describe('Shimmer3Client streaming inertial calibration', () => {
       if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
       else if (op === OPCODES.GET_FW_VERSION_COMMAND)
         setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+      else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+        setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
       else if (op === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify(INQUIRY_MSG_S3), 0);
       else if (op === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
     });
@@ -165,5 +171,117 @@ describe('Shimmer3Client streaming inertial calibration', () => {
     expect(cx.value).toBeCloseTo(-1, 9);
     expect(oc.get('GYRO_Y', 'cal')!.value).toBeCloseTo(0, 9);
     expect(oc.get('GYRO_Z', 'cal')!.value).toBeCloseTo(-2, 9);
+  });
+});
+
+// --- Gyro on-the-fly offset calibration ----------------------------------------
+
+/*
+ * A sensor lying perfectly still: the same raw gyro in every frame. At 51.2 Hz
+ * the window is round(51.2) = 51 samples, so frames 0-50 are calibrated against
+ * the stored offset, and from frame 51 on the offset is the window's raw mean —
+ * the sample itself — and every axis reads exactly 0 deg/s.
+ *
+ * The raw bytes are 0x0101 on every axis, which decodes to 257 in either byte
+ * order, so these cases do not depend on how a Shimmer3's gyro is decoded.
+ */
+const STILL = [0x01, 0x01, 0x01, 0x01, 0x01, 0x01];
+const stillFrames = (n: number, ticks: number): number[] =>
+  Array.from({ length: n }, (_, i) => {
+    const ts = ticks * (i + 1);
+    return [0x00, ts & 0xff, (ts >> 8) & 0xff, (ts >> 16) & 0xff, ...STILL];
+  }).flat();
+
+const gyroCal = (oc: ObjectCluster): number[] =>
+  ['GYRO_X', 'GYRO_Y', 'GYRO_Z'].map((n) => oc.get(n, 'cal')!.value);
+
+describe('gyro on-the-fly offset calibration, end to end', () => {
+  async function streamStill3R(enable: boolean) {
+    const t = new LoopbackTransport();
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify([ACK, ...INQUIRY_BODY_3R]), 0);
+      else if (op === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    const client = new Shimmer3RClient({ transport: t });
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    await client.connect();
+    await client.inquiry();
+    client.gyroOnTheFlyCal = enable;
+    await client.startStreaming();
+    t.notify(stillFrames(60, 640));
+    await tick();
+    return { client, frames };
+  }
+
+  it('Shimmer3RClient: re-estimates the offset once a still window has filled', async () => {
+    const { client, frames } = await streamStill3R(true);
+    expect(frames.length).toBeGreaterThan(52);
+    // Before: the default calibration of 257 counts (sens 229): about ±1.12 deg/s.
+    expect(Math.abs(gyroCal(frames[50])[0])).toBeCloseTo(257 / 229, 9);
+    // After: the offset is the sample, so exactly +0 on every axis.
+    for (const oc of frames.slice(51)) {
+      for (const v of gyroCal(oc)) expect(Object.is(v, 0)).toBe(true);
+    }
+    expect(client.calibrationInfo.gyroOnTheFly).toMatchObject({
+      enabled: true,
+      active: true,
+      windowSamples: 51,
+      thresholdDps: 1.2,
+      offset: [257, 257, 257],
+    });
+  });
+
+  it('Shimmer3RClient: leaves the offset alone when it is off', async () => {
+    const { client, frames } = await streamStill3R(false);
+    expect(Math.abs(gyroCal(frames[frames.length - 1])[0])).toBeCloseTo(257 / 229, 9);
+    expect(client.calibrationInfo.gyroOnTheFly).toMatchObject({ enabled: false, active: false });
+  });
+
+  it('Shimmer3RClient: turning it off puts the stored offset back, and a new link forgets', async () => {
+    const { client } = await streamStill3R(true);
+    expect(client.calibrationInfo.gyroOnTheFly.active).toBe(true);
+    client.gyroOnTheFlyCal = false;
+    expect(client.calibrationInfo.gyroOnTheFly).toMatchObject({ active: false, updates: 0 });
+
+    const again = await streamStill3R(true);
+    await again.client.disconnect();
+    expect(again.client.calibrationInfo.gyroOnTheFly).toMatchObject({
+      active: false,
+      updates: 0,
+      offset: null,
+    });
+  });
+
+  it('Shimmer3Client: the same, on the classic client', async () => {
+    const t = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'S3' });
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, 3]), 0);
+      else if (op === OPCODES.GET_FW_VERSION_COMMAND)
+        setTimeout(() => tr.notify([FWVER, 3, 0, 0, 0, 15, 0]), 0);
+      else if (op === OPCODES.INQUIRY_COMMAND) setTimeout(() => tr.notify(INQUIRY_MSG_S3), 0);
+      else if (op === OPCODES.START_STREAMING_COMMAND) setTimeout(() => tr.notify([ACK]), 0);
+    });
+    const client = new Shimmer3Client({ transport: t });
+    const frames: ObjectCluster[] = [];
+    client.onStreamFrame = (oc) => frames.push(oc);
+    await client.connect();
+    await client.inquiry();
+    client.gyroOnTheFlyCal = true;
+    await client.startStreaming();
+    t.notify(stillFrames(60, 640));
+    await tick();
+    expect(frames.length).toBeGreaterThan(52);
+    expect(gyroCal(frames[50]).some((v) => v !== 0)).toBe(true);
+    for (const oc of frames.slice(51)) {
+      for (const v of gyroCal(oc)) expect(Object.is(v, 0)).toBe(true);
+    }
+    expect(client.calibrationInfo.gyroOnTheFly).toMatchObject({
+      enabled: true,
+      active: true,
+      windowSamples: 51,
+    });
   });
 });

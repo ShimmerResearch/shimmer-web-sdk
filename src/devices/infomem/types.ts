@@ -27,6 +27,195 @@ export interface InfoMemContext {
   firmwareId: number;
   /** Firmware version triplet. */
   firmwareVersion: { major: number; minor: number; internal: number };
+  /**
+   * Whether the firmware has the event channel and configuration byte 232
+   * (DEV-971), as the device itself answered: `Shimmer3RClient.supportsEventChannel`.
+   * Absent or false leaves byte 232 out of the layout and the field schema.
+   */
+  eventChannel?: boolean;
+  /**
+   * Whether the firmware has audio recording and configuration byte 233
+   * (DEV-99), as the device itself answered: `Shimmer3RClient.supportsAudio`.
+   * Absent or false leaves byte 233 out of the layout and the field schema.
+   * Only a Shimmer3R has a microphone; its field is Shimmer3R-only.
+   */
+  audio?: boolean;
+}
+
+/**
+ * IMU sensor rate/range settings held in the InfoMem config-setup bytes.
+ *
+ * The SAME bits mean different things on Shimmer3 and Shimmer3R because the
+ * firmware reuses them for the newer parts — the field names here follow the
+ * firmware `gConfigBytes` struct (the neutral, part-independent naming), with
+ * each Java accessor named in the JSDoc.
+ */
+export interface InfoMemImuConfig {
+  /**
+   * Wide-range accel range. ConfigSetupByte0 (idx 6) bits 2-3
+   * (`bitShiftLSM303DLHCAccelRange`, FW `wrAccelRange`). LSM303DLHC/LSM303AH on
+   * Shimmer3, LIS2DW12 on Shimmer3R; 0-3 = ±2/4/8/16 g on both.
+   */
+  wrAccelRange: number;
+  /**
+   * Wide-range accel sampling rate. ConfigSetupByte0 bits 4-7
+   * (`bitShiftLSM303DLHCAccelSamplingRate`, FW `wrAccelRate`). Register-code
+   * enum whose labels depend on the part AND on {@link wrAccelLpm}.
+   */
+  wrAccelRate: number;
+  /**
+   * Wide-range accel low-power mode. ConfigSetupByte0 bit 1
+   * (`bitShiftLSM303DLHCAccelLPM`, FW `wrAccelLpModeLsb`).
+   *
+   * The firmware also has a `wrAccelLpModeMsb` at ConfigSetupByte4 bit 1 with
+   * no Java equivalent; it is not modelled and its bit survives round-trip.
+   */
+  wrAccelLpm: boolean;
+  /**
+   * Wide-range accel high-resolution mode. ConfigSetupByte0 bit 0
+   * (`bitShiftLSM303DLHCAccelHRM`, FW `wrAccelHrMode`).
+   */
+  wrAccelHrm: boolean;
+  /**
+   * Gyro range — COMPOSITE. Low 2 bits at ConfigSetupByte2 (idx 8) bits 0-1
+   * (`bitShiftMPU9150GyroRange`, FW `gyroRangeLsb`) plus, on Shimmer3R only, a
+   * 3rd bit at ConfigSetupByte4 (idx 130) bit 2 (`bitShiftLSM6DSVGyroRangeMSB`,
+   * FW `gyroRangeMsb`), combined as `(msb << 2) | lsb`
+   * (SensorLSM6DSV.java:1017). 0-3 on Shimmer3 (MPU9x50 ±250…±2000 dps), 0-5
+   * on Shimmer3R (LSM6DSV ±125…±4000 dps).
+   */
+  gyroRange: number;
+  /**
+   * IMU accel+gyro sampling rate — the whole of ConfigSetupByte1 (idx 7)
+   * (`bitShiftMPU9150AccelGyroSamplingRate`, FW `gyroRate`). A raw MPU9x50
+   * rate-divider byte 0-255 on Shimmer3; an LSM6DSV ODR enum 0-12 on
+   * Shimmer3R.
+   */
+  imuRate: number;
+  /**
+   * Mag range. ConfigSetupByte2 bits 5-7 (`bitShiftLSM303DLHCMagRange`).
+   * On Shimmer3 this is the LSM303DLHC mag range (FW `magRange`, 1-7); on
+   * Shimmer3R the firmware names it `altMagRange` and it carries the LIS3MDL
+   * ALT-mag range 0-3 (SensorLIS3MDL.java:806) — the LIS2MDL "mag" has a fixed
+   * range and its range write is commented out in SensorLIS2MDL.java:579.
+   */
+  magRange: number;
+  /**
+   * Mag sampling rate. ConfigSetupByte2 bits 2-4
+   * (`bitShiftLSM303DLHCMagSamplingRate`, FW `magRate`). NOT composite: the
+   * declared `bitShiftLIS2MDLMagRateMSB` is commented out in both
+   * SensorLIS2MDL.configBytesGenerate (@581) and .configBytesParse (@602), and
+   * the firmware struct has no mag-rate MSB bit anywhere.
+   */
+  magRate: number;
+  /**
+   * ConfigSetupByte3 (idx 9) bits 6-7 (`bitShiftMPU9150AccelRange`). On
+   * Shimmer3 the ALT-accel (MPU9x50) range (FW `altAccelRange`); on Shimmer3R
+   * the firmware names the same bits `lnAccelRange` and Java writes the
+   * LSM6DSV low-noise accel range there (SensorLSM6DSV.java:979). 0-3 =
+   * ±2/4/8/16 g in both cases.
+   */
+  altAccelRange: number;
+  /**
+   * Pressure oversampling ratio — COMPOSITE. Low 2 bits at ConfigSetupByte3
+   * bits 4-5 (`bitShiftBMPX80PressureResolution`, FW
+   * `pressureOversamplingRatioLsb`) plus, on Shimmer3R only, a 3rd bit at
+   * ConfigSetupByte4 bit 0 (`bitShiftBMP390PressureResolution`, FW
+   * `pressureOversamplingRatioMsb`), combined as `(msb << 2) | lsb`
+   * (SensorBMP390.java:490, SensorBMP581.java:371). 0-3 on Shimmer3
+   * (BMP180/BMP280), 0-5 (BMP390) / 0-7 (BMP581) on Shimmer3R.
+   */
+  pressureOversampling: number;
+  /**
+   * Alt-mag (LIS3MDL) sampling rate. ConfigSetupByte5 (idx 131) bits 0-5
+   * (`maskLIS3MDLAltMagSamplingRate` 0x3F, SensorLIS3MDL.java:809; FW
+   * `altMagRate`). Raw LIS3MDL CTRL_REG1 code, e.g. 0x01 = 1000 Hz.
+   *
+   * The byte means this on **both** generations — the field sits outside every
+   * `#if` in the shared firmware's config struct (`Configuration/
+   * shimmer_config.h`, "Idx 131") — but only a Shimmer3R carries the LIS3MDL
+   * it configures, so on a Shimmer3 it is inert rather than absent. It is
+   * parsed and written back unconditionally so a read-modify-write preserves
+   * whatever the byte held; a host should offer it only where the hardware has
+   * the part, which is what the field schema's `appliesTo` expresses.
+   */
+  altMagRate: number;
+  /**
+   * Alt-accel (ADXL371) sampling rate. ConfigSetupByte4 bits 6-7
+   * (`bitShiftADXL371AltAccelSamplingRate`, SensorADXL371.java:356; FW
+   * `altAccelRate`). 0-3 = 320/640/1280/2560 Hz.
+   *
+   * As with {@link InfoMemImuConfig.altMagRate}, the byte carries this meaning
+   * on both generations and is inert on a Shimmer3, which has no ADXL371.
+   */
+  altAccelRate: number;
+}
+
+/** SD-logging / sync timing bytes in InfoMem C. */
+export interface InfoMemSdConfig {
+  /**
+   * Sync broadcast interval in seconds. `idxSDBTInterval` (idx 219, FW
+   * `btIntervalSecs`), ShimmerObject.java:5313.
+   */
+  btInterval: number;
+  /**
+   * Estimated experiment length in SECONDS, big-endian u16 at idx 220 (MSB) /
+   * 221 (LSB) — ShimmerObject.java:5316-5317, used for SD sync.
+   *
+   * The unit is the firmware's, which is the byte-level oracle here: the
+   * struct field is `experimentLengthEstimatedInSecMsb/Lsb` and its accessors
+   * are `ShimConfig_experimentLengthEstimatedInSecSet/Get`
+   * (log-and-stream-common `Configuration/shimmer_config.h:403-404, 539-540`).
+   * The Java accessor `getTrialDurationEstimatedInSecs()` agrees; only Java's
+   * layout comment ("Maximum and Estimated Length in minutes") disagrees, and
+   * it is wrong for this field.
+   *
+   * This property was called `estimatedExpLengthMin` up to 0.1.25 — a name
+   * that asserted minutes for a value the firmware counts in seconds.
+   */
+  estimatedExpLengthSec: number;
+  /**
+   * Maximum experiment length (auto-stop) in MINUTES, big-endian u16 at idx
+   * 222 (MSB) / 223 (LSB) — ShimmerObject.java:5318-5319.
+   *
+   * Minutes here and seconds above is the firmware's own asymmetry, not a
+   * transcription slip: the struct field is
+   * `experimentLengthMaxInMinutesMsb/Lsb` (`shimmer_config.h:405-406`). The
+   * Java accessor `getTrialDurationMaximumInSecs()` is the one that is wrong
+   * about this one.
+   */
+  maxExpLengthMin: number;
+}
+
+/**
+ * The six 21-byte kinematic calibration blocks, kept VERBATIM (bias/
+ * sensitivity big-endian i16, alignment 3×3 i8 ×0.01 — see
+ * `parseKinematicCalibBlock` / `generateKinematicCalibBlock` in
+ * `devices/calibration/kinematic.ts`). The codec never re-encodes them, so an
+ * unedited config round-trips byte-identically; a caller that wants to change
+ * a calibration replaces the whole 21-byte array.
+ */
+export interface InfoMemCalibrationBlocks {
+  /** Low-noise accel: `idxAnalogAccelCalibration` (34), FW NV_LN_ACCEL_CALIBRATION. */
+  lnAccel: Uint8Array;
+  /** Gyro: `idxMPU9150GyroCalibration` (55), FW NV_GYRO_CALIBRATION. */
+  gyro: Uint8Array;
+  /** Mag: `idxLSM303DLHCMagCalibration` (76), FW NV_MAG_CALIBRATION. */
+  mag: Uint8Array;
+  /** Wide-range accel: `idxLSM303DLHCAccelCalibration` (97), FW NV_WR_ACCEL_CALIBRATION. */
+  wrAccel: Uint8Array;
+  /**
+   * Alt-accel (ADXL371): `idxADXL371AltAccelCalibration` (133), FW
+   * NV_ALT_ACCEL_CALIBRATION. Shimmer3R only — on Shimmer3 those bytes are the
+   * (unmodelled) MPL accel calibration region, so the field is absent.
+   */
+  altAccel?: Uint8Array;
+  /**
+   * Alt-mag (LIS3MDL): `idxLIS3MDLAltMagCalibration` (154), FW
+   * NV_ALT_MAG_CALIBRATION. Shimmer3R only — on Shimmer3 those bytes are the
+   * (unmodelled) MPL mag calibration region, so the field is absent.
+   */
+  altMag?: Uint8Array;
 }
 
 /**
@@ -75,6 +264,33 @@ export interface InfoMemDeviceConfig {
     /** Bluetooth disabled while logging (ExperimentConfig0 bit 3). */
     disableBluetooth: boolean;
   };
+  /**
+   * Configuration byte 232 as stored: the button mode, log triggers and TTL
+   * input of LogAndStream firmware with the event channel (DEV-971).
+   *
+   * Kept raw, so a config read and written back unedited leaves it exactly as it
+   * was. Read it through `decodeButtonLogMode` or `describeButtonLogMode`, which
+   * apply the firmware's own rules: 0xFF, what older firmware leaves there, and
+   * any other value the firmware cannot act on read as 0, "as before". Write it
+   * with `encodeButtonLogMode`. 0 unless {@link InfoMemContext.eventChannel}
+   * says the firmware has the byte.
+   */
+  buttonLogMode: number;
+  /**
+   * Configuration byte 233 as stored: what a Shimmer3R records from its
+   * microphone while it logs to SD (DEV-99), and in bit 4 whether it samples
+   * the sound level into the data as channel 0x38 (DEV-1413; read it with
+   * `soundLevelEnabled`, set it with `withSoundLevel` or `joinAudioMode`).
+   *
+   * Kept raw, so a config read and written back unedited leaves it exactly as
+   * it was. Read it through `audioModeOf`, which applies the firmware's own
+   * rule: 0xFF, what older firmware leaves there, and any other value the
+   * firmware cannot act on read as 0, off. Write it with `encodeAudioMode`,
+   * and ask the user first for a mode that records speech
+   * (`audioModeRecordsSpeech`). 0 unless {@link InfoMemContext.audio} says the
+   * firmware has the byte.
+   */
+  audioMode: number;
   /** Bluetooth baud-rate index byte. */
   btBaudRate: number;
   /**
@@ -88,6 +304,19 @@ export interface InfoMemDeviceConfig {
   exg1: Uint8Array;
   /** Raw 10-byte ADS1292R chip-2 (EXG2) register bank. */
   exg2: Uint8Array;
+  /** IMU rate/range settings from the config-setup bytes. */
+  imu: InfoMemImuConfig;
+  /** SD-logging interval / experiment-length bytes. */
+  sd: InfoMemSdConfig;
+  /** The six 21-byte kinematic calibration blocks, verbatim. */
+  calibration: InfoMemCalibrationBlocks;
+  /**
+   * Multi-Shimmer sync node MAC list (InfoMem B, `idxNode0` = 256 + i*6, at
+   * most 21 entries), as 12-char UPPERCASE hex. Parsing stops at the first
+   * all-0xFF slot (ShimmerObject.java:5359-5366); generate pads the unused
+   * slots back to 0xFF.
+   */
+  syncNodes: string[];
   /** The full InfoMem bytes this config was parsed from (defensive copy). */
   raw: Uint8Array;
   /**

@@ -59,16 +59,30 @@ export function calibrateGsrDataToResistanceFromAmplifierEq(
 }
 
 /**
- * Clamp a GSR resistance value to the physical limits of a given range.
+ * Clamp a GSR resistance value to the physical limits of the range in use.
  *
- * When `gsrRangeSetting === 4` (auto-range) no clamping is applied.
+ * On a **fixed** range both ends are clamped, to that range's window. On
+ * **auto-range** (setting 4) only the lower end is, to the smallest resistance
+ * any range can measure — the circuit cannot report below it whatever range it
+ * switched to, but the upper end depends on which range that was, and the
+ * per-sample range bits have already been used to pick the resistor. This
+ * matches `SensorGSR.nudgeGsrResistance` (:415-421).
+ *
+ * The auto-range floor never changes a real reading: range 0 at full scale
+ * already decodes to 8.04 kΩ. The only values under 8 kΩ are the negative ones
+ * that a code below the amplifier's reference produces, which is an open
+ * circuit, and the floor used to report those as 125 µS. `calibrateGsrSample`
+ * now decodes such a code as open before it gets here (DEV-1070), so the floor
+ * is only a backstop.
  *
  * @param gsrResistanceKOhms Calibrated resistance in kΩ.
  * @param gsrRangeSetting    Range 0–3 (fixed) or 4 (auto).
  * @returns Clamped resistance in kΩ.
  */
 export function nudgeGsrResistance(gsrResistanceKOhms: number, gsrRangeSetting: number): number {
-  if (gsrRangeSetting === 4) return gsrResistanceKOhms;
+  if (gsrRangeSetting === 4) {
+    return Math.max(SHIMMER3_GSR_RESISTANCE_MIN_MAX_KOHMS[0][0], gsrResistanceKOhms);
+  }
   const [minVal, maxVal] = SHIMMER3_GSR_RESISTANCE_MIN_MAX_KOHMS[gsrRangeSetting];
   return Math.max(minVal, Math.min(maxVal, gsrResistanceKOhms));
 }
