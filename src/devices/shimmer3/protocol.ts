@@ -23,6 +23,7 @@ import {
 import { u16le } from '../shimmer3r/protocol.js';
 import { SHIMMER3_OLD_IMU_MAG_FORMATS } from '../shimmer3r/channelFormats.js';
 import { EXG_BANK_LENGTH } from '../exg/registers.js';
+import type { StreamingImuRanges } from '../calibration/streaming.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -174,6 +175,35 @@ export function buildShimmer3Schema(
 }
 
 /**
+ * A Shimmer3's inertial ranges, by calibration group, from the inquiry's
+ * config word (`configByte0`, ConfigSetupBytes 0-3 little-endian).
+ *
+ * - `wrAccel`: the LSM303 accel range, ConfigSetupByte0 bits 2-3 (config bits 2-3).
+ * - `gyro`: the MPU9x50 gyro range, ConfigSetupByte2 bits 0-1 (config bits 16-17).
+ * - `mag`: the LSM303 mag range, ConfigSetupByte2 bits 5-7 (config bits 21-23).
+ * - `lnAccel` is 0: the Kionix low-noise accel has one fixed range.
+ * - `altAccel` and `altMag` are 0: a Shimmer3 has neither part.
+ *
+ * Bit names as in the Shimmer3 InfoMem schema (`devices/infomem/schema.ts`).
+ * ConfigSetupByte3 bits 6-7 hold the MPU9x50 accel range, which no streamed
+ * channel is calibrated against, so it has no group here.
+ *
+ * Both `Shimmer3Client` and `Shimmer3RClient` take a Shimmer3's ranges from
+ * here. The second also drives a Shimmer3, and the Shimmer3R gives some of
+ * these bits other meanings (DEV-1515).
+ */
+export function shimmer3ImuRanges(configByte0: number): StreamingImuRanges {
+  return {
+    lnAccel: 0,
+    wrAccel: (configByte0 & 0xc) >>> 2,
+    gyro: (configByte0 & 0x30000) >>> 16,
+    mag: (configByte0 & 0xe00000) >>> 21,
+    altAccel: 0,
+    altMag: 0,
+  };
+}
+
+/**
  * Decode an INQUIRY_RESPONSE using the Shimmer3 (classic) layout.
  *
  * Accepts the message with or without the leading 0x02 opcode byte (the
@@ -232,9 +262,7 @@ export function interpretShimmer3InquiryResponse(
     ((u8[base + 2] | (u8[base + 3] << 8) | (u8[base + 4] << 16) | (u8[base + 5] << 24)) >>> 0) >>>
     0;
 
-  const accelRange = (configByte0 & 0xc) >>> 2;
-  const gyroRange = (configByte0 & 0x30000) >>> 16;
-  const magRange = (configByte0 & 0xe00000) >>> 21;
+  const { wrAccel: accelRange, gyro: gyroRange, mag: magRange } = shimmer3ImuRanges(configByte0);
   const gsrRange = (configByte0 >>> 25) & 0x7;
   const internalExpPower = (configByte0 >>> 24) & 0x1;
   const pressureResolution = (configByte0 >>> 28) & 0x3;

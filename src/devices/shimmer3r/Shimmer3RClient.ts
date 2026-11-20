@@ -2,7 +2,13 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
-import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './constants.js';
+import {
+  OPCODES,
+  BT_FEATURE,
+  BYTE_STREAM_LINK,
+  SHIMMER3R_DEFAULTS,
+  type TimestampFmt,
+} from './constants.js';
 import {
   CRC_MODE,
   SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
@@ -15,7 +21,11 @@ import {
   verifyCrc,
   type CrcMode,
 } from './crcMode.js';
-import { generationFromHardwareVersion, type ShimmerGeneration } from './channelFormats.js';
+import {
+  generationFromHardwareVersion,
+  SHIMMER3_OLD_IMU_MAG_FORMATS,
+  type ShimmerGeneration,
+} from './channelFormats.js';
 import {
   EXG_BANK_LENGTH,
   EXG_CHIP1,
@@ -92,11 +102,18 @@ import {
 } from './factoryTest.js';
 import {
   parseShimmer3DeviceVersionResponse,
+  shimmer3ImuRanges,
   shimmer3SupportsSetFeature,
+  shimmer3SupportsStatusRequest,
   shimmer3RMayRecordAudio,
   shimmer3RRecordsAudio,
   type Shimmer3DeviceVersion,
 } from '../shimmer3/protocol.js';
+import {
+  shimmer3ImuFamily,
+  shimmer3ImuGenerationOfBoard,
+  type Shimmer3ImuGeneration,
+} from '../shimmer3/imu.js';
 import { HW_ID } from '../infomem/layout.js';
 import { WebBluetoothTransport } from '../../core/transport/WebBluetoothTransport.js';
 import {
@@ -125,6 +142,7 @@ import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
   DECLARED_LENGTH_RESPONSE_CAPS,
+  inquiryNumChannelsOffset,
 } from './streamFraming.js';
 import {
   parseKinematicCalibBlock,
@@ -134,6 +152,7 @@ import {
   MAX_CALIB_DUMP_BYTES,
   type StreamingImuRanges,
   type InertialGroup,
+  type ImuFamily,
   type KinematicCalibration,
   type CalibDump,
 } from '../calibration/index.js';
@@ -209,24 +228,29 @@ const CALIB_DUMP_CHUNK_BYTES = 128;
 // ---------------------------------------------------------------------------
 
 /**
- * Header bytes of an inquiry response, opcode included:
- * `[opcode][samplingRateTicks:2][configSetupByte0..6][numChannels][bufferSize]`,
- * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
- * (`log-and-stream-common/Comms/shimmer_bt_uart.c`).
+ * Where an inquiry response's channel count sits, and how long its header is,
+ * both opcode included, for the device that answered.
  *
- * The full response is `INQUIRY_RSP_HEADER_BYTES + numChannels` bytes — 18 for
- * a typical six-channel configuration. Unlike every other multi-byte response
+ * The header is `[opcode][samplingRateTicks:2][config][numChannels][bufferSize]`,
+ * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
+ * (`log-and-stream-common/Comms/shimmer_bt_uart.c`). The config word is the
+ * one part whose width differs: 7 bytes on a Shimmer3R, so the header is 12
+ * bytes, and 4 on a Shimmer3, so it is 9 (`inquiryNumChannelsOffset`).
+ *
+ * The full response is `headerBytes + numChannels` bytes — 18 for a typical
+ * six-channel Shimmer3R configuration. Unlike every other multi-byte response
  * it carries **no length byte**, so its size is only knowable after the header
  * has arrived, which is why it needs a reader of its own rather than
- * {@link Shimmer3RClient._readLengthPrefixedResponse}.
- */
-const INQUIRY_RSP_HEADER_BYTES = 12;
-
-/**
- * Offset of the channel count within that header (opcode included), i.e. the
+ * {@link Shimmer3RClient._readLengthPrefixedResponse}. The channel count is the
  * one byte that has to be in hand before the total length can be computed.
  */
-const INQUIRY_RSP_NUM_CHANNELS_OFFSET = 10;
+function inquiryResponseLayout(generation: ShimmerGeneration): {
+  numChannelsOffset: number;
+  headerBytes: number;
+} {
+  const numChannelsOffset = inquiryNumChannelsOffset(generation);
+  return { numChannelsOffset, headerBytes: numChannelsOffset + 2 };
+}
 
 // ---------------------------------------------------------------------------
 // Stream alignment acquisition
@@ -411,6 +435,14 @@ interface SdExpectation {
   reject: (err: Error) => void;
 }
 
+/** {@link Shimmer3RClient.idleKeepAliveMs}, refused when it is not a time. */
+function checkedKeepAliveMs(ms: number): number {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    throw new RangeError(`idleKeepAliveMs must be 0 or more milliseconds, not ${String(ms)}`);
+  }
+  return ms;
+}
+
 // ---------------------------------------------------------------------------
 // Constructor options
 // ---------------------------------------------------------------------------
@@ -448,6 +480,24 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * connection. Web Bluetooth only lets a page reach services listed here.
    */
   optionalServices?: string[];
+  /**
+   * How long a byte-stream link (Web Serial: Bluetooth Classic, or USB) may
+   * carry nothing before the client sends a command to keep it awake, in ms.
+   * 0 turns the keep-alive off. Never used over BLE. Default
+   * {@link BYTE_STREAM_LINK}.KEEP_ALIVE_IDLE_MS (5000). See
+   * {@link Shimmer3RClient.idleKeepAliveMs}.
+   */
+  idleKeepAliveMs?: number;
+  /**
+   * A classic Shimmer3's IMU generation, when the host knows it: `'old'`
+   * (LSM303DLHC) or `'new'` (LSM303AHTR). It wins over what
+   * {@link Shimmer3RClient.readSrBoard} reads, as `Shimmer3ClientOptions`'s
+   * option of the same name does. Ignored on a Shimmer3R, which has one IMU.
+   *
+   * Usually left out: reading the board decides it (see
+   * {@link Shimmer3RClient.imuGeneration}).
+   */
+  imuGeneration?: Shimmer3ImuGeneration;
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +705,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _statusReadsInFlight = 0;
 
+  /** See {@link idleKeepAliveMs}. */
+  private _idleKeepAliveMs: number;
+  /**
+   * The link the keep-alive watches: set by {@link connect} on a byte-stream
+   * link and cleared with the rest of the link's state, so a timer left from
+   * an earlier link never fires on the next one.
+   */
+  private _keepAliveLink: number | null = null;
+  /** The keep-alive's next look at the link, while one is scheduled. */
+  private _keepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The keep-alive's command while it is in flight. Every other command waits
+   * for it ({@link _keepAliveIdle}) before it is counted or written, so the two
+   * never share the link. Never rejects.
+   */
+  private _keepAliveRun: Promise<void> | null = null;
+  /** When the link last carried a byte, either way: `Date.now()`. */
+  private _lastLinkActivityAt = 0;
+  /**
+   * The last status this link reported, as its raw bytes joined, from a push,
+   * {@link getStatus} or the keep-alive; `null` until it reports one. The
+   * keep-alive compares against it: see {@link _keepLinkAwake}.
+   */
+  private _lastStatusKey: string | null = null;
+  /**
+   * Whether the sensor is logging to its SD card, as far as this link has
+   * heard: from a log start or stop it sent, or the `sdLogging` bit of the
+   * last status. The keep-alive stays quiet while it is set.
+   */
+  private _deviceLogging = false;
+
   /**
    * The in-flight factory-test capture, or null when none is running.
    *
@@ -694,6 +775,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /**
    * Inertial-sensor hardware ranges, refreshed from each inquiry's config word.
    * Used to select the default calibration for streaming inertial channels.
+   *
+   * Read with the meanings of the device that answered ({@link generation}).
+   * On a classic Shimmer3 `wrAccel` is the LSM303 accel, `gyro` the MPU9x50
+   * gyro, `mag` the LSM303 mag, and the other three are 0, as
+   * `Shimmer3Client.imuRanges` has them (DEV-1515).
    */
   imuRanges: StreamingImuRanges = {
     lnAccel: 0,
@@ -742,6 +828,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * ranges that are not currently selected.
    */
   private _dumpCalibrations: DumpCalibrationsByGroup = {};
+
+  /**
+   * The dump {@link applyCalibDump} adopted, and the IMU family its blocks
+   * were sorted into groups for. A dump names its blocks by sensor ID, and the
+   * IDs differ between families, so if the family changes afterwards (a
+   * version or board read that lands later) {@link _reselectDeviceCalibrations}
+   * sorts it again.
+   */
+  private _adoptedDump: { dump: CalibDump; family: ImuFamily } | null = null;
+
+  /** `imuGeneration` as the caller gave it; it wins over a board read. */
+  private readonly _imuGenerationOption: Shimmer3ImuGeneration | undefined;
+
+  /**
+   * What {@link readSrBoard} last read on this link (`board` is null for a
+   * blank id page), or null when it has not been read. Kept as read rather
+   * than as a generation, so that the version read may land before it or
+   * after.
+   */
+  private _srBoardRead: { board: ShimmerSrBoard | null } | null = null;
 
   /**
    * Blocks fetched by {@link readCalibration}, with the range each was read at.
@@ -872,6 +978,61 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._injectedTransport = opts.transport ?? null;
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
     this._extraOptionalServices = opts.optionalServices ?? [];
+    this._idleKeepAliveMs = checkedKeepAliveMs(
+      opts.idleKeepAliveMs ?? BYTE_STREAM_LINK.KEEP_ALIVE_IDLE_MS,
+    );
+    this._imuGenerationOption = opts.imuGeneration;
+  }
+
+  /**
+   * How long a byte-stream link may carry nothing before the client sends a
+   * command to keep it awake, in ms; 0 means never. Default 5000
+   * ({@link BYTE_STREAM_LINK}).
+   *
+   * A Bluetooth Classic link left quiet for a while answers its next command
+   * late: about 1.8 s after 10-20 s of quiet (shimmer-host-core), and on a
+   * Shimmer3 over Web Serial (DEV-1516) late enough that most battery reads a
+   * minute apart timed out. So on a byte-stream link (Web Serial, whether it
+   * reaches a Bluetooth Classic COM port or USB) the client reads the device's
+   * status once the link has been quiet this long, as the Java driver's status
+   * timer and shimmer-host-core do. Until it knows how long a status reply is,
+   * it reads the hardware and firmware versions instead, which tell it. Over
+   * BLE it sends nothing.
+   *
+   * The keep-alive stays out of everyone's way:
+   *
+   * - **Nothing alongside it.** It goes only while no command is in flight,
+   *   and a command issued while it is in flight waits for it first.
+   * - **Paused** while streaming or starting a stream, while the sensor is
+   *   logging to its SD card, during an SD file transfer, the data-rate test,
+   *   a factory test or a Bluetooth module update.
+   * - **Silent.** It writes nothing to {@link onStatus}, and its status read
+   *   is not reported on {@link onDeviceStatus} unless the status changed
+   *   since the last one this link reported. A push that lands while the read
+   *   is in flight is taken for its answer, or dropped, as one landing in a
+   *   {@link getStatus} is; reporting a change is what keeps the news it
+   *   carried, from this read or the next. That needs a status to compare
+   *   with, so a push lost in the link's first status read stays lost.
+   * - **Per link.** It stops when the link ends, and starts again with the
+   *   next {@link connect}.
+   *
+   * Set it at any time; the change applies at once.
+   *
+   * Run on a Shimmer3 (A615, LogAndStream v1.01.009, RN4678) over Bluetooth
+   * Classic, from Chrome on Windows, on 20 Nov 2026 (DEV-1516).
+   *
+   * HARDWARE-VERIFY: not yet run on a Shimmer3R over Bluetooth Classic, nor
+   * over USB.
+   *
+   * @throws RangeError for a negative or non-finite value
+   */
+  get idleKeepAliveMs(): number {
+    return this._idleKeepAliveMs;
+  }
+
+  set idleKeepAliveMs(ms: number) {
+    this._idleKeepAliveMs = checkedKeepAliveMs(ms);
+    this._scheduleKeepAlive();
   }
 
   /**
@@ -957,6 +1118,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * restarts with the connection, and the stream buffer, so bytes stranded by
      * a dropped link cannot be parsed as part of the new session's stream. */
     this._resetLinkProtocolState();
+    const link = this._linkGeneration;
     // A byte-stream transport needs its message boundaries rebuilt; BLE gets
     // them from the notification boundaries and takes the untouched path.
     this._unframed = t.capabilities.framed === false;
@@ -967,6 +1129,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._resetInquiredConfig();
     this._fwVersionCache = null;
     this._deviceVersionCache = null;
+    // The board read, and the IMU generation it decides, are the old sensor's too.
+    this._srBoardRead = null;
     this._audioSupport = null;
     this._statusPayloadBytes = null;
     this._statusWidthReads = null;
@@ -1004,6 +1168,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(overBle ? 'Requesting Bluetooth device…' : `Opening ${t.kind} link…`);
     await t.connect();
     if (t instanceof WebBluetoothTransport) this.device = t.device;
+    /* Once the link is open, and only if it is still this call's: a disconnect
+     * or another connect begun during t.connect() has moved the generation. */
+    if (this._unframed && this._linkGeneration === link) {
+      this._keepAliveLink = link;
+      this._lastLinkActivityAt = Date.now();
+      this._scheduleKeepAlive();
+    }
     /* The name the link reported, and NO invented one where it reported none.
      * `_deviceId()` is not usable here - its fallback is the generation string,
      * which every frame needs and which read as a chooser name in this line. */
@@ -1126,6 +1297,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * reconnect.
    */
   private _resetLinkProtocolState(): void {
+    /* The keep-alive watches one link. Its command in flight, if any, fails
+     * with the waiters below; a command waiting on it is let go at once
+     * rather than when it settles, and finds its link gone. */
+    this._keepAliveLink = null;
+    this._cancelKeepAliveTimer();
+    this._keepAliveRun = null;
+    // What the old link said about the sensor is not news on the next one
+    this._lastStatusKey = null;
+    this._deviceLogging = false;
     this._rxBuf = new Uint8Array(0);
     this._ctrlBuf = new Uint8Array(0);
     // The firmware clears the opt-in on every connect and disconnect
@@ -1189,6 +1369,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _resetCalibrationState(): void {
     this._deviceCalibrations = {};
     this._dumpCalibrations = {};
+    this._adoptedDump = null;
     this._btCommandCalibrations = {};
     this._exgBanks = null;
     this._exgBanksSource = null;
@@ -1259,6 +1440,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _handleNotify = (chunk: Uint8Array): void => {
     this._rxSeq++;
+    if (this._keepAliveLink !== null) this._lastLinkActivityAt = Date.now();
     let bytes = chunk;
     if (this._dataRateTestActive && bytes.length > 0) {
       this._dataRateTestLastRxAt = Date.now();
@@ -1475,9 +1657,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Called for control-plane messages only, so it never sees stream data — and
    * so a push that lands mid-stream is lost to the schema parser instead, as
    * {@link onDeviceStatus} documents.
+   *
+   * Remembered whether or not anyone is listening: the keep-alive pauses while
+   * a push says the sensor is logging, and compares its own reads with it.
    */
   private _maybeEmitDeviceStatus(chunk: Uint8Array): void {
-    if (!this.onDeviceStatus) return;
     // A push carries the ACK prefix when the firmware's
     // `useAckPrefixForInstreamResponses` flag is on
     // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), and a stray ACK can be
@@ -1503,13 +1687,28 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._log('Dropping truncated STATUS push:', msg.length - 2, 'payload byte(s), need', need);
       return;
     }
+    const status = parseShimmer3StatusBytes(msg.subarray(2, 2 + (this._statusPayloadBytes ?? 2)));
+    this._rememberStatus(status);
+    if (!this.onDeviceStatus) return;
     try {
-      this.onDeviceStatus(
-        parseShimmer3StatusBytes(msg.subarray(2, 2 + (this._statusPayloadBytes ?? 2))),
-      );
+      this.onDeviceStatus(status);
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
     }
+  }
+
+  /**
+   * Note a status this link reported, from a push or a read.
+   *
+   * @returns whether it differs from the one before it on this link; false
+   *   for the first.
+   */
+  private _rememberStatus(status: Shimmer3DeviceStatus): boolean {
+    const key = Array.from(status.raw).join(',');
+    const changed = this._lastStatusKey !== null && this._lastStatusKey !== key;
+    this._lastStatusKey = key;
+    this._deviceLogging = status.sdLogging;
+    return changed;
   }
 
   /**
@@ -1618,10 +1817,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * the byte after it rather than from a guess. A guess of two ate the ACK after
    * every one-byte status; a guess of one left a two-byte status's second byte
    * to be framed as a message, and 0x00 there would end framing for the read.
+   *
+   * The inquiry reply's layout depends on the device too, through
+   * {@link generation}: a Shimmer3's config word is 4 bytes and a Shimmer3R's
+   * 7, so the channel count that sizes the reply sits at a different offset
+   * (DEV-1514).
    */
   private _frameLength(buf: Uint8Array): number {
     return shimmer3rControlMessageLength(buf, {
       statusPayloadBytes: this._statusPayloadBytes ?? 'unknown',
+      generation: this.generation,
     });
   }
 
@@ -2078,14 +2283,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
     timeoutMs: number,
     link = this._linkGeneration,
   ): Promise<Uint8Array> {
+    /* Taken before the wait, so the whole response is judged on one layout,
+       the same one the framer and the parser use. */
+    const { numChannelsOffset, headerBytes } = inquiryResponseLayout(this.generation);
     let acc =
       seed && seed[0] === OPCODES.INQUIRY_RESPONSE
         ? seed
         : await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, timeoutMs, link);
 
     const isComplete = (buf: Uint8Array): boolean =>
-      buf.length >= INQUIRY_RSP_HEADER_BYTES &&
-      buf.length >= INQUIRY_RSP_HEADER_BYTES + buf[INQUIRY_RSP_NUM_CHANNELS_OFFSET];
+      buf.length >= headerBytes && buf.length >= headerBytes + buf[numChannelsOffset];
 
     if (isComplete(acc)) return acc;
 
@@ -2098,9 +2305,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
         reject(
           new Error(
             `Inquiry response truncated: ${acc.length} bytes received` +
-              (acc.length >= INQUIRY_RSP_HEADER_BYTES
-                ? `, ${INQUIRY_RSP_HEADER_BYTES + acc[INQUIRY_RSP_NUM_CHANNELS_OFFSET]} expected.`
-                : `, at least ${INQUIRY_RSP_HEADER_BYTES} expected.`),
+              (acc.length >= headerBytes
+                ? `, ${headerBytes + acc[numChannelsOffset]} expected.`
+                : `, at least ${headerBytes} expected.`),
           ),
         );
       }, timeoutMs);
@@ -2624,9 +2831,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * page carries the SR code of the board itself, drawn from the same table
    * the Shimmer3 uses. Pair it with {@link describeShimmerHardware} to get a
    * line like `Shimmer3R GSR+ (SR48-3-0)`.
+   *
+   * On a classic Shimmer3 the board also decides {@link imuGeneration}, and
+   * with it the default calibrations for the inertial channels and the old
+   * IMU's big-endian mag. That is `Shimmer3Client.readExpansionBoard`'s rule,
+   * and a blank page means the old IMU there too. Call it before
+   * {@link inquiry}, which builds the schema, and after
+   * {@link readDeviceVersion}, which says whether the device is a Shimmer3.
+   * Shimmer Capture Web does both on connect.
    */
   async readSrBoard(): Promise<ShimmerSrBoard | null> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
+    const link = this._linkGeneration;
     this._emitStatus('GET_DAUGHTER_CARD_ID → waiting for ACK then RSP…');
     const payload = await this._readLengthPrefixedResponse(
       new Uint8Array([OPCODES.GET_DAUGHTER_CARD_ID_COMMAND, 3, 0]),
@@ -2635,8 +2851,22 @@ export class Shimmer3RClient extends BaseShimmerClient {
       'Daughter-card id read',
     );
     const board = parseExpansionBoard(payload);
+    /* Stored before the status line, which runs onStatus and can end the link,
+       and only for the link it was read on: the next sensor's IMU is not this
+       one's. */
+    if (this._linkGeneration === link) {
+      this._srBoardRead = { board };
+      this._reselectDeviceCalibrations();
+    }
+    const imu =
+      this.generation === 'shimmer3' && this._linkGeneration === link
+        ? ` → ${this.imuGeneration ?? 'old'} IMU` +
+          (this._imuGenerationOption !== undefined
+            ? ` (imuGeneration option '${this._imuGenerationOption}' kept)`
+            : '')
+        : '';
     this._emitStatus(
-      board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank',
+      (board ? `SR board ${formatShimmerSrCode(board)}` : 'SR board id page is blank') + imu,
     );
     return board;
   }
@@ -3802,7 +4032,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         : await this._waitForResponse(respOpcode, timeoutMs, link);
     if (rsp.length < 22) return null; // opcode + 21-byte block
     const block = rsp.subarray(1, 22);
-    const scale = getGroupDefaults('shimmer3r', group)?.sensitivityScale ?? 1;
+    const scale = getGroupDefaults(this._imuFamily, group)?.sensitivityScale ?? 1;
     return parseKinematicCalibBlock(block, { sensitivityScale: scale });
   }
 
@@ -4254,6 +4484,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   private async _startStreaming(): Promise<void> {
+    /* Before the stream plane is prepared: the keep-alive's reply belongs to
+       the control plane. `_streamStarting` already keeps the next one away. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -4391,6 +4624,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (gate) this._streamTailDrain = gate;
     try {
       try {
+        /* A stop sent with no stream running still gets an ACK, which would
+           be taken for the keep-alive's. While streaming there is none. */
+        if (!gate && this._keepAliveRun) await this._keepAliveIdle();
         await this._writeOnLink(new Uint8Array([op]), link, true);
         written();
       } catch (err: unknown) {
@@ -4489,6 +4725,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (this._linkGeneration === link) this._endStreamPlane();
       throw asLogStartRefusal(e, 'START_SDBT');
     }
+    // No status push follows a start by command; see startLogging
+    if (this._linkGeneration === link) this._deviceLogging = true;
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
   }
 
@@ -4512,6 +4750,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._refuseWhileBtModuleUpdating('Logging');
     this._emitStatus('START_LOGGING → waiting for ACK…');
+    const link = this._linkGeneration;
     let remainder: Uint8Array | null;
     try {
       remainder = await this._writeExpectingAck(
@@ -4521,6 +4760,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (e) {
       throw asLogStartRefusal(e, 'START_LOGGING');
     }
+    /* Taken as logging, which keeps the keep-alive quiet. The firmware pushes
+     * no status for a start it was sent (`ShimBt_instreamStatusRespSendIfNotBtCmd`),
+     * so this ACK is all the news there is. A start it ACKs and does not carry
+     * out is corrected by the next status read. */
+    if (this._linkGeneration === link) this._deviceLogging = true;
     if (remainder?.length) this._emitTemp(remainder);
     this._emitStatus('START_LOGGING ACK received.');
   }
@@ -4533,10 +4777,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async stopLogging(): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._emitStatus('STOP_LOGGING → waiting for ACK…');
+    const link = this._linkGeneration;
     const remainder = await this._writeExpectingAck(
       new Uint8Array([OPCODES.STOP_LOGGING_COMMAND]),
       1500,
     );
+    // As for startLogging: no push follows a stop by command
+    if (this._linkGeneration === link) this._deviceLogging = false;
     if (remainder?.length) this._emitTemp(remainder);
     this._emitStatus('STOP_LOGGING ACK received.');
   }
@@ -4550,6 +4797,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus('STOP_BT_STREAM_SD_LOGGING → sending…');
     await this._stopStreamPlane(OPCODES.STOP_SDBT_COMMAND, (err) => {
       if (err) this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${err.message}`);
+      // As for stopLogging, once the stop has gone out
+      else this._deviceLogging = false;
     });
     this._emitStatus('Streaming + logging stopped.');
   }
@@ -4581,14 +4830,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
      *
      * Both lengths are checked here, before any of the parsing below assigns to
      * `this`, so a rejected response leaves the previous configuration intact
-     * rather than half-replacing it. */
-    const headerEnd = base + 11;
+     * rather than half-replacing it.
+     *
+     * The layout is the answering device's. A Shimmer3's config word is 4
+     * bytes, not 7, so its channel count sits three bytes earlier. Reading a
+     * Shimmer3's reply as a Shimmer3R's took a channel ID for the count and
+     * built a one-channel schema (DEV-1514). The config bytes a Shimmer3 does
+     * not send read as zero below. */
+    const layout = inquiryResponseLayout(this.generation);
+    // Within `u8`, which may lack the opcode: the layout counts it.
+    const numChIndex = base - 1 + layout.numChannelsOffset;
+    const configBytes = numChIndex - (base + 2);
+    const headerEnd = numChIndex + 2;
     if (u8.length < headerEnd) {
       throw new Error(
         `Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`,
       );
     }
-    const numCh = u8[base + 9];
+    const numCh = u8[numChIndex];
     if (u8.length < headerEnd + numCh) {
       throw new Error(
         `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + numCh} ` +
@@ -4600,21 +4859,17 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const samplingRateHz = 32768 / adcRaw;
     this.samplingRateHz = samplingRateHz;
 
-    const cfg =
-      BigInt(u8[base + 2]) |
-      (BigInt(u8[base + 3]) << 8n) |
-      (BigInt(u8[base + 4]) << 16n) |
-      (BigInt(u8[base + 5]) << 24n) |
-      (BigInt(u8[base + 6]) << 32n) |
-      (BigInt(u8[base + 7]) << 40n) |
-      (BigInt(u8[base + 8]) << 48n);
+    // Little-endian, 7 bytes on a Shimmer3R and 4 on a Shimmer3.
+    let cfg = 0n;
+    for (let i = 0; i < configBytes; i++) cfg |= BigInt(u8[base + 2 + i]) << BigInt(8 * i);
 
     const internalExpPower = Number((cfg >> 24n) & 0x1n);
     const gsrRange = Number((cfg >> 25n) & 0x7n);
     this.ExpPower = internalExpPower;
     this.gsrRangeSetting = gsrRange;
 
-    // Inertial ranges from the config setup bytes (ConfigByteLayoutShimmer3):
+    // Inertial ranges from the config setup bytes, with the answering device's
+    // meanings. On a Shimmer3R (ConfigByteLayoutShimmer3):
     //   WR accel (LIS2DW12): setup0 bits 2-3  → cfg bits 2-3
     //   gyro (LSM6DSV): LSB setup2 bits 0-1 (cfg bits 16-17) + MSB setup4 bit 2
     //     (cfg bit 34) → 6 ranges (0-5)
@@ -4622,16 +4877,26 @@ export class Shimmer3RClient extends BaseShimmerClient {
     //   alt mag (LIS3MDL): setup2 bits 5-7 → cfg bits 21-23
     // The LIS2MDL magnetometer and the ADXL371 high-g accel are single-range
     // parts, so 0 is not a placeholder for them — it is their only range.
-    const gyroLsb = Number((cfg >> 16n) & 0x3n);
-    const gyroMsb = Number((cfg >> 34n) & 0x1n);
-    this.imuRanges = {
-      lnAccel: Number((cfg >> 30n) & 0x3n),
-      wrAccel: Number((cfg >> 2n) & 0x3n),
-      gyro: gyroLsb | (gyroMsb << 2),
-      mag: 0,
-      altAccel: 0,
-      altMag: Number((cfg >> 21n) & 0x7n),
-    };
+    //
+    // A Shimmer3 gives some of the same bits other meanings: setup2 bits 5-7
+    // are its LSM303 magnetometer's range, so `mag` and not `altMag`, and setup3
+    // bits 6-7 its MPU9x50 accel's, not a low-noise accel range (its Kionix has
+    // one). Reading them as a Shimmer3R's calibrated its mag at the wrong range
+    // (DEV-1515). `shimmer3ImuRanges` is what `Shimmer3Client` reads them with.
+    if (this.generation === 'shimmer3') {
+      this.imuRanges = shimmer3ImuRanges(Number(cfg & 0xffffffffn));
+    } else {
+      const gyroLsb = Number((cfg >> 16n) & 0x3n);
+      const gyroMsb = Number((cfg >> 34n) & 0x1n);
+      this.imuRanges = {
+        lnAccel: Number((cfg >> 30n) & 0x3n),
+        wrAccel: Number((cfg >> 2n) & 0x3n),
+        gyro: gyroLsb | (gyroMsb << 2),
+        mag: 0,
+        altAccel: 0,
+        altMag: Number((cfg >> 21n) & 0x7n),
+      };
+    }
     /* Pressure oversampling: ConfigSetupByte3 bits 4-5 → cfg bits 28-29, plus
        the MSB at ConfigSetupByte4 bit 0 → cfg bit 32 for the BMP390/BMP581's
        wider ladder (schema keys `pressureOversampling.bmpX80` and
@@ -4641,7 +4906,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // The ranges just moved, so re-pick which stored block applies to each group.
     this._reselectDeviceCalibrations();
 
-    const bufSize = u8[base + 10];
+    const bufSize = u8[numChIndex + 1];
     const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
 
     const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24', link);
@@ -4676,8 +4941,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * set), and the two generations disagree about the width of the
    * pressure/temperature channels — a Shimmer3 sends 2 big-endian bytes of
    * temperature where a Shimmer3R sends 3 little-endian ones, and reverses the
-   * order of the pair. So call `readDeviceVersion()` before `inquiry()` on any
-   * link that might be a Shimmer3; `inquiry()` deliberately does not send that
+   * order of the pair. They disagree about the inquiry reply itself too: its
+   * config word is 4 bytes on a Shimmer3 and 7 on a Shimmer3R. Without the
+   * version a Shimmer3's reply is read as a Shimmer3R's, so its channel list is
+   * wrong, and on a byte stream or under a link CRC it is cut short and the
+   * replies after it misframed (DEV-1514). So call `readDeviceVersion()` before
+   * `inquiry()` on any link that might be a Shimmer3; `inquiry()` deliberately
+   * does not send that
    * command itself, to keep the schema rebuild after `setSensors()` a single
    * round trip. When the generation is assumed *and* the channel list contains a
    * channel that depends on it, the schema says so (`trusted === false`) and a
@@ -4690,6 +4960,44 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** True when {@link generation} is this SDK's default rather than the device's answer. */
   get generationIsAssumed(): boolean {
     return generationFromHardwareVersion(this._deviceVersionCache?.hardwareVersion) === null;
+  }
+
+  /**
+   * A classic Shimmer3's IMU generation, as this client decodes and
+   * calibrates it: the `imuGeneration` option when given, else what
+   * {@link readSrBoard} read on this link, else null (not read). The rule
+   * `Shimmer3Client.imuGeneration` follows.
+   *
+   * It matters only when {@link generation} is `'shimmer3'`. There it picks
+   * the inertial channels' default calibrations, `'shimmer3-new'` for new and
+   * `'shimmer3-old'` otherwise, null included, as `Shimmer3Client` and the
+   * Java driver do. An old IMU's mag streams big-endian, and the schema
+   * decodes it so; null keeps little-endian, as `buildShimmer3Schema` does,
+   * so that a skipped board read never flips the byte order of the boards
+   * made since. A Shimmer3R has one IMU and ignores this.
+   *
+   * HARDWARE-VERIFY: exercised against scripted Shimmer3s only (DEV-1515). The
+   * rule is `Shimmer3Client`'s, which has run on Shimmer3 hardware, but no
+   * Shimmer3 has yet streamed calibrated inertial data through this client,
+   * nor has an old-IMU board's big-endian mag.
+   */
+  get imuGeneration(): Shimmer3ImuGeneration | null {
+    if (this._imuGenerationOption !== undefined) return this._imuGenerationOption;
+    if (!this._srBoardRead) return null;
+    return shimmer3ImuGenerationOfBoard(
+      this._deviceVersionCache?.hardwareVersion ?? HW_ID.SHIMMER_3,
+      this._srBoardRead.board,
+    );
+  }
+
+  /**
+   * Whose default inertial calibrations, and whose calibration-dump sensor
+   * IDs, apply to this device: the Shimmer3R's, or on a Shimmer3 those of its
+   * IMU generation. Until {@link readDeviceVersion} has answered the device is
+   * taken for a Shimmer3R, as {@link generation} takes it.
+   */
+  private get _imuFamily(): ImuFamily {
+    return this.generation === 'shimmer3' ? shimmer3ImuFamily(this.imuGeneration) : 'shimmer3r';
   }
 
   private _buildSchemaFromChannels(
@@ -4705,6 +5013,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
       // guessed width shifts every later channel in the frame, and the decode
       // fails silently rather than throwing.
       onProblem: (m) => this._emitStatus(`⚠️ ${m}`),
+      // An old-IMU Shimmer3's LSM303DLHC sends its mag big-endian, as
+      // `buildShimmer3Schema` decodes it (see `imuGeneration`).
+      formatOverrides:
+        this.generation === 'shimmer3' && this.imuGeneration === 'old'
+          ? SHIMMER3_OLD_IMU_MAG_FORMATS
+          : undefined,
     });
     // Each problem ran onStatus, which can end the link before the schema lands
     if (this._linkGeneration !== link) throw this._linkResetError('the inquiry to be applied');
@@ -4783,7 +5097,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
   private _streamCalibrationState(): StreamCalibrationState {
     return {
       generation: this.generation,
-      family: 'shimmer3r',
+      family: this._imuFamily,
       ranges: this.imuRanges,
       device: this._deviceCalibrations,
       emitInertial: this.emitCalibratedInertial,
@@ -4821,6 +5135,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * one.
    */
   private _reselectDeviceCalibrations(): void {
+    /* A version or board read since the dump was adopted can move the family,
+       and with it which sensor ID names which group's blocks. */
+    const family = this._imuFamily;
+    if (this._adoptedDump && this._adoptedDump.family !== family) {
+      this._adoptedDump = { dump: this._adoptedDump.dump, family };
+      this._dumpCalibrations = selectDumpCalibrations(this._adoptedDump.dump, family);
+    }
     const next: Partial<Record<InertialGroup, KinematicCalibration>> = {};
     const groups = Object.keys(this.imuRanges) as InertialGroup[];
     for (const group of groups) {
@@ -4851,10 +5172,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Blocks the dump holds for ranges other than the configured ones are kept,
    * so a later range change re-selects without another read.
    *
+   * The dump's blocks are sorted into groups by the sensor IDs of this
+   * device's IMU family: the Shimmer3R's, or a Shimmer3's old or new IMU
+   * ({@link imuGeneration}). A {@link readDeviceVersion} or
+   * {@link readSrBoard} that lands later and changes the family sorts them
+   * again.
+   *
    * @returns the groups this dump supplied a usable block for, at any range.
    */
   applyCalibDump(dump: CalibDump): InertialGroup[] {
-    this._dumpCalibrations = selectDumpCalibrations(dump, 'shimmer3r');
+    const family = this._imuFamily;
+    this._adoptedDump = { dump, family };
+    this._dumpCalibrations = selectDumpCalibrations(dump, family);
     this._reselectDeviceCalibrations();
     const groups = Object.keys(this._dumpCalibrations) as InertialGroup[];
     this._emitStatus(
@@ -4886,10 +5215,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   get calibrationInfo(): StreamCalibrationInfo {
     const inertial: StreamCalibrationInfo['inertial'] = {};
+    const family = this._imuFamily;
     const groups = Object.keys(this.imuRanges) as InertialGroup[];
     for (const group of groups) {
       const range = this.imuRanges[group];
-      const defaults = getDefaultCalibration('shimmer3r', group, range);
+      const defaults = getDefaultCalibration(family, group, range);
       if (!defaults) continue;
       const fromDump = this._dumpCalibrations[group]?.[range];
       const fromCommand = this._btCommandCalibrations[group];
@@ -4907,7 +5237,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     }
     const gyroBase =
       this._deviceCalibrations.gyro ??
-      getDefaultCalibration('shimmer3r', 'gyro', this.imuRanges.gyro)?.calibration ??
+      getDefaultCalibration(family, 'gyro', this.imuRanges.gyro)?.calibration ??
       null;
     return {
       inertial,
@@ -5402,6 +5732,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
     }
     this._log('Write', u8);
+    if (this._keepAliveLink !== null) this._lastLinkActivityAt = Date.now();
     await this._transport.write(u8);
   }
 
@@ -5432,31 +5763,45 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * @param ackTimeoutMs how long to wait for the ACK; on a byte-stream link,
+   *   never less than {@link BYTE_STREAM_LINK}.MIN_ACK_WAIT_MS, since the
+   *   first command after a quiet spell is answered late there.
    * @param link the link the command belongs to: by default the current one,
    *   or, for one step of a multi-step operation, the link the operation began
    *   on - which fails the step at once if that link has since been reset.
+   * @param keepAlive true only for the keep-alive's own command, which must not
+   *   wait for itself.
    */
   private async _writeExpectingAck(
     u8: Uint8Array,
     ackTimeoutMs = 1000,
     link = this._linkGeneration,
+    keepAlive = false,
   ): Promise<Uint8Array | null> {
     /* Before it is counted: the stop's own ACK, among the last packets, would
        otherwise be spent on this command. */
     await this._afterStopDrain();
+    /* Nor alongside the keep-alive, whose ACK any waiter would take: the count
+       is a count, not a queue. Checked after the drain, and nothing is awaited
+       between here and the count, so none can start in between: a keep-alive
+       starts only from its timer. */
+    if (!keepAlive && this._keepAliveRun) await this._keepAliveIdle();
     /* A step of an operation whose link has already been replaced: refused
        before it is counted, since the count is now the next link's and the
        catch below leaves it alone across a reset. */
     if (link !== this._linkGeneration) {
       throw new Error('The link was reset while the command was being sent');
     }
+    const ackWaitMs = this._unframed
+      ? Math.max(ackTimeoutMs, BYTE_STREAM_LINK.MIN_ACK_WAIT_MS)
+      : ackTimeoutMs;
     this._expectingAck++;
     try {
       /* The write is asynchronous, and the link can be reset while it is
        * pending: the command then went to a link that is gone, and no ACK for
        * it is coming on the next one. */
       await this._writeOnLink(u8, link);
-      return await this._waitForAck(ackTimeoutMs, link);
+      return await this._waitForAck(ackWaitMs, link);
     } catch (e) {
       // Not across a link reset, which has already zeroed the count: what is
       // counted now belongs to the next link's commands
@@ -5711,10 +6056,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readDeviceVersion(): Promise<Shimmer3DeviceVersion> {
     if (this._deviceVersionCache) return this._deviceVersionCache;
+    // The keep-alive may be reading it right now (see _keepLinkAwake)
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (this._deviceVersionCache) return this._deviceVersionCache;
+    return this._askDeviceVersion(this._linkGeneration, false);
+  }
+
+  /**
+   * The round trip behind {@link readDeviceVersion}, without its cache check,
+   * on `link`. `keepAlive` as for {@link _writeExpectingAck}.
+   */
+  private async _askDeviceVersion(
+    link: number,
+    keepAlive: boolean,
+  ): Promise<Shimmer3DeviceVersion> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const cmd = new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]);
-    const link = this._linkGeneration;
-    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500, link, keepAlive);
     const rsp =
       ackRemainder && ackRemainder[0] === OPCODES.DEVICE_VERSION_RESPONSE
         ? ackRemainder
@@ -5722,6 +6080,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (rsp.length < 2) throw new Error('short DEVICE_VERSION_RESPONSE');
     this._deviceVersionCache = parseShimmer3DeviceVersionResponse(rsp);
     this._settleStatusWidth();
+    // A Shimmer3's answer moves the IMU family, and a dump adopted before it.
+    this._reselectDeviceCalibrations();
     return this._deviceVersionCache;
   }
 
@@ -5787,6 +6147,173 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (this._linkGeneration !== link) throw e;
       this._log('Status width not learnt:', (e as Error).message);
       return e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Keeping a byte-stream link awake (see idleKeepAliveMs)
+  // ---------------------------------------------------------------------------
+
+  /** Resolves once no keep-alive command is in flight. */
+  private async _keepAliveIdle(): Promise<void> {
+    while (this._keepAliveRun) await this._keepAliveRun;
+  }
+
+  private _cancelKeepAliveTimer(): void {
+    if (this._keepAliveTimer !== null) {
+      clearTimeout(this._keepAliveTimer);
+      this._keepAliveTimer = null;
+    }
+  }
+
+  /**
+   * Schedule the keep-alive's next look at the link: for when the link will
+   * have been quiet for {@link idleKeepAliveMs}, or after `delayMs`. Nothing
+   * is scheduled while the keep-alive is off or no byte-stream link is open,
+   * nor while its command is in flight, which schedules the next look itself
+   * when it ends.
+   */
+  private _scheduleKeepAlive(delayMs?: number): void {
+    this._cancelKeepAliveTimer();
+    const idleMs = this._idleKeepAliveMs;
+    const link = this._keepAliveLink;
+    if (idleMs <= 0 || link === null || link !== this._linkGeneration || this._keepAliveRun) {
+      return;
+    }
+    const wait = delayMs ?? Math.max(0, this._lastLinkActivityAt + idleMs - Date.now());
+    const timer = setTimeout(this._keepAliveTick, wait);
+    // Never what keeps a Node or Electron process alive
+    (timer as { unref?: () => void }).unref?.();
+    this._keepAliveTimer = timer;
+  }
+
+  private _keepAliveTick = (): void => {
+    this._keepAliveTimer = null;
+    const idleMs = this._idleKeepAliveMs;
+    const link = this._keepAliveLink;
+    if (idleMs <= 0 || link === null || link !== this._linkGeneration) return;
+    // Traffic since the timer was set: look again once that has gone quiet
+    if (Date.now() - this._lastLinkActivityAt < idleMs) {
+      this._scheduleKeepAlive();
+      return;
+    }
+    if (!this._linkFreeForKeepAlive()) {
+      this._scheduleKeepAlive(BYTE_STREAM_LINK.KEEP_ALIVE_RETRY_MS);
+      return;
+    }
+    const run: Promise<void> = this._keepLinkAwake(link)
+      .catch((e: unknown) => {
+        /* Nobody to tell. A link that has gone is reported by the transport,
+           and one that is only slow is the next command's to find out. */
+        this._log('Keep-alive unanswered:', e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (this._keepAliveRun === run) this._keepAliveRun = null;
+        if (this._linkGeneration === link) this._scheduleKeepAlive();
+      });
+    this._keepAliveRun = run;
+  };
+
+  /**
+   * Whether nothing else holds the link, or is about to take it, and the
+   * sensor is not doing anything the keep-alive should stay out of.
+   *
+   * `_expectingAck` covers a command whose ACK has not landed and `_temps` one
+   * still waiting for its reply, or an SD transfer, whose handler stays
+   * attached throughout. The rest are the operations that own the link, and
+   * an SD log: the sensor's own work, left alone. Staying quiet costs only a
+   * late answer to the first command after it, which the byte-stream ACK
+   * wait covers.
+   */
+  private _linkFreeForKeepAlive(): boolean {
+    return (
+      this._transport !== null &&
+      this._keepAliveRun === null &&
+      this._expectingAck === 0 &&
+      this._temps.size === 0 &&
+      this._lastAckRemainder === null &&
+      this._statusReadsInFlight === 0 &&
+      this._statusWidthReads === null &&
+      !this._streaming &&
+      this._streamStarting === 0 &&
+      this._streamTailDrain === null &&
+      !this._dataRateTestActive &&
+      this._factoryTest === null &&
+      this._sdUsers === 0 &&
+      this._sdExpect === null &&
+      !this._btModuleUpdateRunning &&
+      this._btModuleReconnect === null &&
+      !this._deviceLogging
+    );
+  }
+
+  /**
+   * One keep-alive round trip on `link`, with nothing written to
+   * {@link onStatus}.
+   *
+   * GET_STATUS, the read the Java driver's status timer and shimmer-host-core
+   * make, once this link knows how long a status reply is. Until then, the
+   * version reads that tell it, one per round trip, cached as
+   * {@link readDeviceVersion} and {@link readFwVersion} cache them. On
+   * firmware without GET_STATUS, the firmware version again: any round trip
+   * keeps the link awake.
+   *
+   * The status read is claimed, as {@link getStatus} claims its own, so its
+   * answer is not reported as a push. But a push that lands while it is in
+   * flight is taken as its answer, as it would be by {@link getStatus}, and the
+   * keep-alive runs every few seconds for as long as the link is idle. So a
+   * status that differs from the last one this link reported is passed to
+   * {@link onDeviceStatus}: that is news, whichever message carried it. One
+   * that does not is not news, and a host that logs every push stays quiet.
+   */
+  private async _keepLinkAwake(link: number): Promise<void> {
+    const hw = this._deviceVersionCache;
+    if (!hw) {
+      await this._askDeviceVersion(link, true);
+      return;
+    }
+    const fw = this._fwVersionCache;
+    if (!fw) {
+      await this._askFwVersion(link, true);
+      return;
+    }
+    const width = this._statusPayloadBytes;
+    const answersStatus = shimmer3SupportsStatusRequest(
+      { firmwareIdentifier: fw.fwId, major: fw.major, minor: fw.minor, internal: fw.patch },
+      hw.hardwareVersion,
+    );
+    if (width === null || !answersStatus) {
+      await this._askFwVersion(link, true);
+      return;
+    }
+    let status: Shimmer3DeviceStatus;
+    this._statusReadsInFlight++;
+    try {
+      const ackRemainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.GET_STATUS_COMMAND]),
+        BYTE_STREAM_LINK.MIN_ACK_WAIT_MS,
+        link,
+        true,
+      );
+      const rsp =
+        ackRemainder &&
+        ackRemainder.length >= 2 + width &&
+        ackRemainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        ackRemainder[1] === OPCODES.STATUS_RESPONSE
+          ? ackRemainder
+          : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, width, 1500, link);
+      status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + width));
+    } finally {
+      // Not across a link reset, which has already zeroed the count
+      if (this._linkGeneration === link) this._statusReadsInFlight--;
+    }
+    if (this._linkGeneration !== link) return;
+    if (this._rememberStatus(status) && this.onDeviceStatus) {
+      try {
+        this.onDeviceStatus(status);
+      } catch (e) {
+        this._log('onDeviceStatus handler error', e);
+      }
     }
   }
 
@@ -5867,6 +6394,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           ? ackRemainder
           : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, need, 1500, link);
       const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + (this._statusPayloadBytes ?? 2)));
+      if (this._linkGeneration === link) this._rememberStatus(status);
       this._emitStatus(
         `Status: docked=${status.docked} sensing=${status.sensing} ` +
           `logging=${status.sdLogging} streaming=${status.streaming} ` +
@@ -5916,10 +6444,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Read (and cache) the firmware version via GET_FW_VERSION_COMMAND. */
   async readFwVersion(): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
     if (this._fwVersionCache) return this._fwVersionCache;
+    // The keep-alive may be reading it right now (see _keepLinkAwake)
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (this._fwVersionCache) return this._fwVersionCache;
+    return this._askFwVersion(this._linkGeneration, false);
+  }
+
+  /**
+   * The round trip behind {@link readFwVersion}, without its cache check, on
+   * `link`. `keepAlive` as for {@link _writeExpectingAck}.
+   */
+  private async _askFwVersion(
+    link: number,
+    keepAlive: boolean,
+  ): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const cmd = new Uint8Array([OPCODES.GET_FW_VERSION_COMMAND]);
-    const link = this._linkGeneration;
-    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500, link, keepAlive);
     const rsp =
       ackRemainder && ackRemainder[0] === OPCODES.FW_VERSION_RESPONSE
         ? ackRemainder
@@ -6013,6 +6554,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     durationMs = 5000,
     onProgress?: (bytesSoFar: number, elapsedMs: number) => void,
   ): Promise<{ bytesReceived: number; durationMs: number; kBps: number }> {
+    /* The test takes every byte from the moment it is set up, so a keep-alive
+       reply still on its way would be counted as test traffic. Nothing is
+       awaited between here and that set-up, and `_dataRateTestActive` keeps
+       the next keep-alive away. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Data-rate test unavailable while streaming');
 
@@ -6284,6 +6830,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // Validated before anything is written, so an out-of-range type costs the
     // caller an exception rather than a minute of silence.
     const info = requireShimmer3FactoryTestType(type);
+    /* A keep-alive in flight is not "another command" to refuse over: it
+       settles within its ACK wait, and the link is the test's after it. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._factoryTest) {
       throw new FactoryTestError(
         'busy',

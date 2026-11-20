@@ -75,8 +75,13 @@ export const SHIMMER3_DEFAULTS = Object.freeze({
    * classic-BT latencies.
    */
   DUMMY_READ_DRAIN_MS: 250,
-  /** Per-command ACK timeout (ms). */
-  ACK_TIMEOUT_MS: 1500,
+  /**
+   * Per-command ACK timeout (ms). 2000, shimmer-host-core's `DEFAULT_TIMEOUT_MS`:
+   * a Bluetooth Classic link left quiet for a while answers its next command
+   * only after about 1.8 s, and this client has no keep-alive to stop it going
+   * quiet (DEV-1516). It was 1500, which that first command usually missed.
+   */
+  ACK_TIMEOUT_MS: 2000,
   /** Response (post-ACK) timeout (ms). */
   RESPONSE_TIMEOUT_MS: 2000,
   /**

@@ -35,7 +35,7 @@ import {
   srReadBackError,
   type ShimmerSrBoard,
 } from '../identity.js';
-import { isNewImuSensors } from '../sdlog/header.js';
+import { shimmer3ImuFamily, shimmer3ImuGenerationOfBoard } from './imu.js';
 import { parseShimmer3StatusBytes, type Shimmer3DeviceStatus } from '../shimmer3r/protocol.js';
 import {
   ADC_BITS,
@@ -67,6 +67,7 @@ import {
   sign16,
   sign24,
   interpretShimmer3InquiryResponse,
+  shimmer3ImuRanges,
   parseShimmer3DeviceVersionResponse,
   parseShimmer3FwVersionResponse,
   shimmer3SupportsExg,
@@ -369,7 +370,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._timestampFmt = opts.timestampFmt ?? SHIMMER3_DEFAULTS.TIMESTAMP_FMT;
     this._stopStreamingOnConnect = opts.stopStreamingOnConnect ?? true;
     this._imuGenerationOption = opts.imuGeneration;
-    this._imuFamily = opts.imuGeneration === 'new' ? 'shimmer3-new' : 'shimmer3-old';
+    this._imuFamily = shimmer3ImuFamily(opts.imuGeneration ?? null);
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
   }
 
@@ -1369,17 +1370,10 @@ export class Shimmer3Client extends BaseShimmerClient {
     this.enabledSensors = info.schema.enabledSensors;
     this.gsrRangeSetting = info.gsrRange;
     this.ExpPower = info.internalExpPower;
-    // Inertial ranges from the config word (interpretShimmer3InquiryResponse):
-    // accelRange = WR accel (LSM303), gyroRange = MPU gyro, magRange = LSM303 mag.
-    // LN accel (Kionix) is fixed-range → 0.
-    this.imuRanges = {
-      lnAccel: 0,
-      wrAccel: info.accelRange,
-      gyro: info.gyroRange,
-      mag: info.magRange,
-      altAccel: 0,
-      altMag: 0,
-    };
+    // Inertial ranges from the config word: WR accel (LSM303), MPU gyro and
+    // LSM303 mag. LN accel (Kionix) is fixed-range → 0. `Shimmer3RClient`
+    // reads a Shimmer3's the same way.
+    this.imuRanges = shimmer3ImuRanges(info.configByte0);
     this.pressureOversampling = info.pressureResolution;
     // The ranges just moved, so re-pick which stored block applies to each group.
     this._reselectDeviceCalibrations();
@@ -1654,7 +1648,7 @@ export class Shimmer3Client extends BaseShimmerClient {
   private _setBoard(board: ShimmerSrBoard | null, fromBoard: 'old' | 'new' | null): void {
     this.expansionBoard = board;
     this._imuGenerationFromBoard = fromBoard;
-    this._imuFamily = (this.imuGeneration ?? 'old') === 'new' ? 'shimmer3-new' : 'shimmer3-old';
+    this._imuFamily = shimmer3ImuFamily(this.imuGeneration);
   }
 
   /**
@@ -1712,12 +1706,7 @@ export class Shimmer3Client extends BaseShimmerClient {
     const board = parseExpansionBoard(rsp.subarray(off, off + 3));
     this._link.throwIfReset(link, () => linkResetError('the daughter-card id to be applied'));
     const newImu =
-      board !== null &&
-      isNewImuSensors(this.deviceVersion?.hardwareVersion ?? 3, {
-        id: board.boardId,
-        rev: board.boardRev,
-        revSpecial: board.specialRev,
-      });
+      shimmer3ImuGenerationOfBoard(this.deviceVersion?.hardwareVersion ?? 3, board) === 'new';
     this._setBoard(board, newImu ? 'new' : 'old');
     this._emitStatus(
       `Daughter card ${board ? `SR${board.boardId}-${board.boardRev}-${board.specialRev}` : 'id page is blank'}` +
