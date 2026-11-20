@@ -8,6 +8,28 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    # A dependency joins the first group it matches, so the order matters.
+    groups:
+      # Every minor and patch bump to a dev dependency, in one weekly PR.
+      dev-dependencies:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+      # Majors otherwise arrive one per PR, since they are the bumps that can
+      # break the build. These packages have to take a major together.
+      typescript-eslint:
+        patterns:
+          - '@typescript-eslint/*'
+          - 'typescript-eslint'
+        update-types:
+          - major
+      eslint:
+        patterns:
+          - 'eslint'
+          - '@eslint/*'
+        update-types:
+          - major
 
   - package-ecosystem: github-actions
     directory: '/'
@@ -17,3 +39,7 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
