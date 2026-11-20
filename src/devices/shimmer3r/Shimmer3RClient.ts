@@ -170,6 +170,7 @@ import {
 } from '../infomem/index.js';
 import {
   SD_TRANSFER_OPCODES,
+  SD_TRANSFER_MIN_FIRMWARE,
   SD_STATUS,
   SD_LIST_MAX_ENTRIES,
   SD_BLOCK_PAYLOAD_DEFAULT,
@@ -6476,23 +6477,67 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
-   * True when the connected firmware serves the SD file-transfer commands
-   * AND transfers them intact (LogAndStream_Shimmer3R >= v1.01.011).
-   * v1.01.009 and v1.01.010 implement the protocol but ship every 512-byte
-   * block shifted 3 bytes with a zero-padded tail — the firmware's sector DMA
-   * landed below the misaligned payload buffer and the frame CRC was computed
-   * after the fact, so the corruption arrives as valid frames the host cannot
-   * detect. Those versions are therefore gated out. Firmware older than that
-   * silently ignores unknown opcodes, so version gating is the only reliable
-   * probe.
+   * True when the connected sensor serves the SD file-transfer commands AND
+   * transfers files intact. That takes the generation as well as the version,
+   * because the Shimmer3 and the Shimmer3R number their LogAndStream releases
+   * separately ({@link SD_TRANSFER_MIN_FIRMWARE} has the reasons):
+   *
+   * - **Shimmer3R:** LogAndStream_Shimmer3R v1.01.011 or later. v1.01.009 and
+   *   v1.01.010 serve the commands but shift every 512-byte block 3 bytes, and
+   *   the frame CRC covers the damage, so nothing on the host could detect it.
+   * - **Shimmer3:** never. No LogAndStream_Shimmer3 release serves the
+   *   commands, and it must not be sent them: its parser skips an unknown
+   *   opcode a byte at a time and reads the arguments behind it as commands.
+   * - **Hardware this SDK does not recognise:** never.
+   *
+   * Reads the hardware version ({@link readDeviceVersion}) and, on a
+   * Shimmer3R, the firmware version ({@link readFwVersion}); both are cached
+   * for the connection, so this costs at most two round trips once. False when
+   * either read fails. Firmware without the commands ignores them rather than
+   * refusing them, so the versions are the only reliable probe.
    */
   async supportsSdTransfer(): Promise<boolean> {
+    return (await this._sdTransferRefusal()) === null;
+  }
+
+  /**
+   * Why {@link supportsSdTransfer} answers false, as a sentence for the error
+   * the SD entry points throw; null when it answers true.
+   */
+  private async _sdTransferRefusal(): Promise<string | null> {
+    let hardwareVersion: number;
     try {
-      const v = await this.readFwVersion();
-      return v.major * 1_000_000 + v.minor * 1_000 + v.patch >= 1_001_011;
+      hardwareVersion = (await this.readDeviceVersion()).hardwareVersion;
     } catch {
-      return false;
+      return 'SD file transfer was refused: the sensor did not report its hardware version, and only Shimmer3R firmware serves it';
     }
+    const generation = generationFromHardwareVersion(hardwareVersion);
+    if (generation === null) {
+      return `SD file transfer is served only by Shimmer3R firmware, and this sensor reports hardware version ${hardwareVersion}`;
+    }
+    const name = generation === 'shimmer3r' ? 'Shimmer3R' : 'Shimmer3';
+    const min = SD_TRANSFER_MIN_FIRMWARE[generation];
+    if (min === null) {
+      return `A ${name} cannot transfer SD files over Bluetooth: no LogAndStream_${name} release serves the file-transfer commands`;
+    }
+    let fw: { major: number; minor: number; patch: number };
+    try {
+      fw = await this.readFwVersion();
+    } catch {
+      return 'SD file transfer was refused: the sensor did not report its firmware version';
+    }
+    const code = (v: { major: number; minor: number; patch: number }): number =>
+      v.major * 1_000_000 + v.minor * 1_000 + v.patch;
+    if (code(fw) >= code(min)) return null;
+    // LogAndStream_Shimmer3R v1.01.009 first served the commands, corrupting them
+    const servesButCorrupts = generation === 'shimmer3r' && code(fw) >= 1_001_009;
+    return (
+      `SD file transfer requires LogAndStream_${name} ${firmwareTag(min.major, min.minor, min.patch)} or later, ` +
+      `and this sensor runs ${firmwareTag(fw.major, fw.minor, fw.patch)}` +
+      (servesButCorrupts
+        ? ': v1.01.009 and v1.01.010 serve it but corrupt every block they send'
+        : ', which does not serve it')
+    );
   }
 
   /**
@@ -6998,7 +7043,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   // ---------------------------------------------------------------------------
-  // SD-card file transfer (FW >= v1.01.011; see supportsSdTransfer)
+  // SD-card file transfer (Shimmer3R FW >= v1.01.011, never a Shimmer3; see
+  // supportsSdTransfer)
   //
   // A dedicated, self-resynchronising RX pipeline: while any SD operation is
   // active, a persistent temp handler accumulates notification chunks and
@@ -7069,19 +7115,18 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   /**
    * Enforce the {@link supportsSdTransfer} gate on every SD entry point, so a
-   * caller that skips the advisory check cannot pull silently-corrupted data
-   * off a v1.01.009/.010 device. Must complete BEFORE the synchronous
-   * single-slot checks (`_sdExpect`, `_sdFrameListener`): those are
-   * check-then-set atomically only while no await sits between them.
-   * (The first call costs one GET_FW_VERSION round trip; readFwVersion
-   * caches it for the rest of the connection.)
+   * caller that skips the advisory check can neither pull silently-corrupted
+   * data off a Shimmer3R at v1.01.009/.010 nor send SD commands to a Shimmer3,
+   * which would read their arguments as commands of its own. Must complete
+   * BEFORE the synchronous single-slot checks (`_sdExpect`,
+   * `_sdFrameListener`): those are check-then-set atomically only while no
+   * await sits between them. (The first call costs a GET_DEVICE_VERSION and a
+   * GET_FW_VERSION round trip; both are cached for the rest of the connection.)
    */
   private async _ensureSdTransferSupported(): Promise<void> {
-    if (!(await this.supportsSdTransfer())) {
-      throw new SdTransferError(
-        'SD file transfer requires firmware v1.01.011 or later — v1.01.009/.010 corrupt transferred data',
-        SD_STATUS.UNSUPPORTED_FW,
-      );
+    const refusal = await this._sdTransferRefusal();
+    if (refusal !== null) {
+      throw new SdTransferError(refusal, SD_STATUS.UNSUPPORTED_FW);
     }
   }
 

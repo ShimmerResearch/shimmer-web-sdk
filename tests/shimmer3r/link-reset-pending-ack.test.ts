@@ -192,8 +192,9 @@ describe('a command pending when the link drops', () => {
     const first = new LoopbackTransport();
     first.setOnWrite((bytes, tr) => {
       const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      // The SD gate reads both versions first
+      if (versionOf(cmd[0]).length) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(cmd[0])])), 0);
       } else {
         setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no SD reply
       }
@@ -216,8 +217,9 @@ describe('a command pending when the link drops', () => {
     const first = new LoopbackTransport();
     first.setOnWrite((bytes, tr) => {
       const cmd = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      if (cmd[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      // The SD gate reads both versions first
+      if (versionOf(cmd[0]).length) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(cmd[0])])), 0);
       } else {
         setTimeout(() => tr.notify(new Uint8Array([ACK])), 0); // and no data frames
       }
@@ -245,8 +247,9 @@ describe('a command pending when the link drops', () => {
     const client = new Shimmer3RClient({ debug: false });
     const first = new LoopbackTransport();
     first.setOnWrite(async (bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      // The SD gate reads both versions first
+      if (versionOf(bytes[0]).length) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(bytes[0])])), 0);
       } else {
         await held; // the SD command's write is still pending at the drop
       }
@@ -266,8 +269,8 @@ describe('a command pending when the link drops', () => {
     const listing = [SD.LIST_DIR_RESPONSE, SD_STATUS.OK, 0, 0, entry.length, 0, 1, 0, ...entry];
     const second = new LoopbackTransport();
     second.setOnWrite((bytes, tr) => {
-      if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
-        setTimeout(() => tr.notify(new Uint8Array([ACK, ...FW])), 0);
+      if (versionOf(bytes[0]).length) {
+        setTimeout(() => tr.notify(new Uint8Array([ACK, ...versionOf(bytes[0])])), 0);
       } else if (bytes[0] === SD.LIST_DIR_COMMAND) {
         // late enough that the old write has failed by then
         setTimeout(() => tr.notify(new Uint8Array([ACK, ...listing])), 30);

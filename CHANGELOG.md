@@ -104,6 +104,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`Shimmer3RClient.supportsSdTransfer()` refuses a Shimmer3 at every firmware version** (DEV-1517). It answered from the firmware version alone, against the Shimmer3R's threshold of v1.01.011, but `Shimmer3RClient` drives a Shimmer3 too, and the two number their LogAndStream releases separately.
+  - **What the firmware does:** no LogAndStream_Shimmer3 release serves the SD file-transfer commands. The Shimmer3 build compiles the transfer module as empty stubs and every SD opcode in the shared parser as `#if defined(SHIMMER3R)` (log-and-stream-common `71d283f` on, still so at `bf7fe41`). The 3-byte block shift that sets the Shimmer3R threshold was the STM32U5's SDMMC IDMA (`679f94c`), which a Shimmer3 never had.
+  - **Before:** a Shimmer3 at v1.01.009, the newest release, was refused, for the wrong reason, and the error named a Shimmer3R update. From Shimmer3 v1.01.011 it would have passed, and the SDK would have sent SD commands that its parser reads as other commands: `/data` reaches SET_DAUGHTER_CARD_ID, which then waits for 97 bytes of payload and swallows the commands after it.
+  - **Now:** the gate reads the hardware version (`readDeviceVersion()`, cached) before the firmware version, and passes only a Shimmer3R at v1.01.011 or later. A Shimmer3, a sensor reporting hardware this SDK does not know, and one whose version read fails are all refused, and nothing SD is sent. A failed read is not cached, so the next call asks again.
+  - **The error** that `sdListDir`, `sdStatFile`, `sdGetFreeSpace`, `sdDeletePath` and `sdReadFileWindow` throw, still an `SdTransferError` with `SD_STATUS.UNSUPPORTED_FW`, now says which: a Shimmer3, unknown hardware, an unreadable version, or a Shimmer3R before v1.01.011, telling a version that never served the commands from v1.01.009/.010, which corrupt them.
+  - **`SD_TRANSFER_MIN_FIRMWARE`** is exported: the first release of each generation that transfers intact, `null` for the Shimmer3.
+  - Checked against the firmware source and with scripted Shimmer3 and Shimmer3R devices. No Shimmer3 has been asked through the SDK, and no Shimmer3 release past v1.01.009 exists yet. Version 0.5.22, for vendoring into Shimmer Capture; no release is meant to follow on its own.
+
 - **A Verisense request no longer takes over a stream, a sync or a capture** (`VerisenseBleDevice`, DEV-1513). A request set the client's mode to "waiting for a reply" whatever was using the link.
   - **While streaming,** the next stream frame was read as the reply and rejected as `Unexpected response property`, and the mode fell to idle. Decoding stopped with no `streaming {on:false}` event.
   - **During a `transferLoggedData` sync,** the request took the sync's frames.
