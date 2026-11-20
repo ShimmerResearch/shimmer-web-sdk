@@ -430,7 +430,9 @@ export function parseBluetoothModuleVersion(
      * shown to a user as the module's name. */
     for (const b of raw) text += String.fromCharCode(b);
   }
-  const trimmed = text.replace(/\0+$/, '').trim();
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 0) end--;
+  const trimmed = text.slice(0, end).trim();
 
   const cyw = CYW20820_PATTERN.exec(trimmed);
   if (cyw) {

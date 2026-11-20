@@ -192,7 +192,12 @@ export const VERISENSE_USB_DFU_REENUMERATION_DELAY_MS = 2000;
  * requests are never misclassified as "USB DFU unsupported".
  */
 export function isUsbDfuUnsupportedError(error: unknown): boolean {
-  return /NACK.*property=0x0?6\b/i.test(String(error));
+  const message = String(error).toLowerCase();
+  for (const line of message.split(/[\r\n\u2028\u2029]/)) {
+    const nackIndex = line.indexOf('nack');
+    if (nackIndex !== -1 && /property=0x0?6\b/.test(line.slice(nackIndex + 4))) return true;
+  }
+  return false;
 }
 
 // ── Transport + options ─────────────────────────────────────────────────────
