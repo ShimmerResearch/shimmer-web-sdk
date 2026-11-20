@@ -10,26 +10,37 @@ updates:
       include: 'scope'
     # A dependency joins the first group it matches, so the order matters.
     groups:
-      # Every minor and patch bump to a dev dependency, in one weekly PR.
+      # TypeScript and the packages that cap the TypeScript they accept, in
+      # their own PR, majors included. typescript-eslint and typedoc each
+      # accept TypeScript only up to a given minor, so a TypeScript bump on its
+      # own fails to install. Grouped, the PR goes green once all of them
+      # agree, and a blocked TypeScript bump never holds up anything else.
+      typescript:
+        patterns:
+          - 'typescript'
+          - '@typescript-eslint/*'
+          - 'typescript-eslint'
+          - 'typedoc'
+      # Every other minor and patch bump to a dev dependency, in one weekly PR.
       dev-dependencies:
         dependency-type: development
         update-types:
           - minor
           - patch
-      # Majors otherwise arrive one per PR, since they are the bumps that can
+      # Other majors arrive one per PR, since they are the bumps that can
       # break the build. These packages have to take a major together.
-      typescript-eslint:
-        patterns:
-          - '@typescript-eslint/*'
-          - 'typescript-eslint'
-        update-types:
-          - major
       eslint:
         patterns:
           - 'eslint'
           - '@eslint/*'
         update-types:
           - major
+    ignore:
+      # TypeScript 7.0 cannot install here: typescript-eslint and typedoc both
+      # need the compiler API that returns in 7.1. Remove this once on 7.1.
+      - dependency-name: 'typescript'
+        versions:
+          - '7.0.x'
 
   - package-ecosystem: github-actions
     directory: '/'
