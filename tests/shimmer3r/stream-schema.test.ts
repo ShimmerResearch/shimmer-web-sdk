@@ -39,21 +39,19 @@ const CH = {
 } as const;
 
 /**
- * Shimmer3R-layout inquiry response, opcode-inclusive:
- * `[0x02, adcLo, adcHi, cfg0..cfg6, numCh, bufSize, ...channelIds]`.
+ * Inquiry response, opcode-inclusive, in the layout the hardware sends:
+ * `[0x02, adcLo, adcHi, cfg…, numCh, bufSize, ...channelIds]`, with a 7-byte
+ * config word on a Shimmer3R and a 4-byte one on a Shimmer3 (DEV-1514).
  * adcRaw 0x0280 = 640 → 32768/640 = 51.2 Hz; config word all zero.
+ *
+ * A device that does not answer the version sends the Shimmer3R's, the
+ * generation the client assumes then.
  */
-const inquiry = (channelIds: number[]): number[] => [
+const inquiry = (channelIds: number[], hardwareVersion: number | null): number[] => [
   INQ_RSP,
   0x80,
   0x02,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
+  ...Array<number>(hardwareVersion === HW_SHIMMER3 ? 4 : 7).fill(0),
   channelIds.length,
   1,
   ...channelIds,
@@ -95,7 +93,7 @@ async function session(
     if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) {
       if (hardwareVersion !== null) setTimeout(() => tr.notify([ACK, DEVVER, hardwareVersion]), 0);
     } else if (op === OPCODES.INQUIRY_COMMAND) {
-      setTimeout(() => tr.notify([ACK, ...inquiry(channelIds)]), 0);
+      setTimeout(() => tr.notify([ACK, ...inquiry(channelIds, hardwareVersion)]), 0);
     } else {
       setTimeout(() => tr.notify([ACK]), 0);
     }

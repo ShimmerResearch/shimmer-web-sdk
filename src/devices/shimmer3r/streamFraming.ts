@@ -25,6 +25,8 @@ import { EXG_BANK_LENGTH } from '../exg/registers.js';
 import { sdMessageSpan, SD_TRANSFER_OPCODES, SD_INSTREAM_BYTE } from './sdTransfer/protocol.js';
 import { EVENT_CHANNEL_STATUS_LENGTH, eventFrameLength } from '../events/record.js';
 import { AUDIO_STATUS_LENGTH } from '../audio/status.js';
+import { SHIMMER3_INQ_NUM_CHANNELS_OFFSET } from '../shimmer3/protocol.js';
+import type { ShimmerGeneration } from './channelFormats.js';
 
 /**
  * Offset of the `numChannels` byte within an opcode-prefixed
@@ -34,6 +36,18 @@ import { AUDIO_STATUS_LENGTH } from '../audio/status.js';
 export const SHIMMER3R_INQ_NUM_CHANNELS_OFFSET = 10;
 /** Offset of the first channel-ID byte within an INQUIRY_RESPONSE. */
 export const SHIMMER3R_INQ_CHANNELS_OFFSET = SHIMMER3R_INQ_NUM_CHANNELS_OFFSET + 2; // 12
+
+/**
+ * Offset of the `numChannels` byte within an opcode-prefixed INQUIRY_RESPONSE
+ * from the given generation: 7 on a Shimmer3, whose config word is 4 bytes, and
+ * 10 on a Shimmer3R, whose config word is 7. bufferSize follows it, and the
+ * channel IDs start two bytes after it.
+ */
+export function inquiryNumChannelsOffset(generation: ShimmerGeneration): number {
+  return generation === 'shimmer3'
+    ? SHIMMER3_INQ_NUM_CHANNELS_OFFSET
+    : SHIMMER3R_INQ_NUM_CHANNELS_OFFSET;
+}
 
 /**
  * Fixed payload lengths (bytes AFTER the opcode) for the fixed-width control
@@ -171,11 +185,27 @@ export function messageCarriesLinkCrc(msg: Uint8Array): boolean {
 }
 
 /**
- * How many status bytes a STATUS_RESPONSE carries — the one length in this
- * protocol that depends on which device answered, and on what firmware it runs,
- * rather than on the bytes themselves.
+ * The two lengths in this protocol that depend on which device answered, rather
+ * than on the bytes themselves: how many status bytes a STATUS_RESPONSE
+ * carries, which also depends on the firmware, and how long an
+ * INQUIRY_RESPONSE's config word is.
  */
 export interface Shimmer3RFramingOptions {
+  /**
+   * Which generation's INQUIRY_RESPONSE layout to size: `'shimmer3'` reads the
+   * channel count at offset 7, after a 4-byte config word, and `'shimmer3r'`
+   * at offset 10, after a 7-byte one ({@link inquiryNumChannelsOffset}).
+   * Defaults to `'shimmer3r'`.
+   *
+   * `Shimmer3RClient` also drives a classic Shimmer3 over Classic Bluetooth,
+   * and this framer used to size every inquiry as a Shimmer3R's. On a Shimmer3
+   * offset 10 is a channel ID, so a 21-channel inquiry was cut at 13 bytes of
+   * its 30. Under a link CRC the CRC was then checked in the wrong place and the
+   * reply dropped. The 17 bytes left over put the next few replies out of line,
+   * so the battery, status and clock reads that followed failed too (DEV-1514,
+   * seen with a Shimmer3 in Shimmer Capture Web).
+   */
+  generation?: ShimmerGeneration;
   /**
    * 2 on a Shimmer3R running LogAndStream v1.00.024 or later, 1 on anything
    * else (`STATUS_BYTE_COUNT`, log-and-stream-common
@@ -332,13 +362,17 @@ export function shimmer3rControlMessageLength(
   }
 
   if (opcode === OPCODES.INQUIRY_RESPONSE) {
-    if (buf.length <= SHIMMER3R_INQ_NUM_CHANNELS_OFFSET) return NEED_MORE;
-    const numChannels = buf[SHIMMER3R_INQ_NUM_CHANNELS_OFFSET];
+    // [0x02][rate u16][config: 4 bytes on a Shimmer3, 7 on a Shimmer3R]
+    // [numChannels][bufferSize][channels…]
+    const numChannelsOffset = inquiryNumChannelsOffset(opts.generation ?? 'shimmer3r');
+    if (buf.length <= numChannelsOffset) return NEED_MORE;
+    const numChannels = buf[numChannelsOffset];
     // A stray stream byte 0x02 can masquerade as an INQUIRY_RESPONSE whose
     // "numChannels" is garbage, swallowing real control traffic (ACK included).
-    // No Shimmer3R comes close to 32 channels — treat the rest as garbage.
+    // No Shimmer3 or Shimmer3R comes close to 32 channels — treat the rest as
+    // garbage.
     if (numChannels > 32) return RESYNC;
-    const total = SHIMMER3R_INQ_CHANNELS_OFFSET + numChannels;
+    const total = numChannelsOffset + 2 + numChannels;
     return buf.length < total ? NEED_MORE : total;
   }
 
