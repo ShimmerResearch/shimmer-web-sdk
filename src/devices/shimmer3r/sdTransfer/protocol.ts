@@ -2,9 +2,11 @@
  * Wire protocol for Shimmer3R SD-card file transfer over BLE.
  *
  * Mirrors the firmware implementation in
- * `log-and-stream-common/Comms/shimmer_sd_file_transfer.{c,h}` (FW >= v1.01.011;
- * v1.01.009/.010 speak the protocol but corrupt every block — see
- * Shimmer3RClient.supportsSdTransfer).
+ * `log-and-stream-common/Comms/shimmer_sd_file_transfer.{c,h}`, which only the
+ * Shimmer3R build serves: LogAndStream_Shimmer3R v1.01.011 and later
+ * (v1.01.009/.010 speak the protocol but corrupt every block), and no
+ * Shimmer3 release — see SD_TRANSFER_MIN_FIRMWARE and
+ * Shimmer3RClient.supportsSdTransfer.
  *
  * Command/response shapes (all multi-byte fields little-endian):
  *
@@ -24,6 +26,34 @@
  */
 
 import { NEED_MORE, RESYNC } from '../../../core/framing.js';
+import type { ShimmerGeneration } from '../channelFormats.js';
+
+/**
+ * The first LogAndStream release of each generation that serves the SD
+ * file-transfer commands and transfers files intact; null where no release
+ * does. The two generations number their releases separately, so a version
+ * means nothing without the generation beside it.
+ *
+ * - **Shimmer3R: v1.01.011.** v1.01.009 and v1.01.010 serve the commands but
+ *   ship every 512-byte block shifted 3 bytes, with a zero-padded tail. The
+ *   STM32U5's SDMMC IDMA ignores the two low address bits, so each sector
+ *   landed 3 bytes below the misaligned payload buffer, and the frame CRC,
+ *   computed afterwards, covered the damage. Fixed by word-aligning the buffer
+ *   (log-and-stream-common `679f94c`).
+ * - **Shimmer3: none.** The Shimmer3 build compiles the transfer module as
+ *   empty stubs, and every SD opcode in the shared command parser sits inside
+ *   `#if defined(SHIMMER3R)` (`Comms/shimmer_bt_uart.c`). That has held since
+ *   the feature landed (`71d283f`), through LogAndStream_Shimmer3 v1.01.009.
+ *
+ * Firmware without the commands ignores them rather than refusing them, so
+ * this table is the only way a host can tell.
+ */
+export const SD_TRANSFER_MIN_FIRMWARE: Readonly<
+  Record<ShimmerGeneration, { major: number; minor: number; patch: number } | null>
+> = {
+  shimmer3r: { major: 1, minor: 1, patch: 11 },
+  shimmer3: null,
+};
 
 export const SD_TRANSFER_OPCODES = {
   // Command opcodes must avoid the CYW20820 EZ-Serial SOF bytes 0x80/0xC0/
@@ -52,8 +82,9 @@ export const SD_STATUS = {
   SD_UNAVAILABLE: 0xf0,
   BUSY: 0xf1,
   BAD_ARGS: 0xf2,
-  /** Host-side only, never on the wire: the connected firmware's version is
-   * below the transfer gate (see Shimmer3RClient.supportsSdTransfer). */
+  /** Host-side only, never on the wire: the connected sensor does not pass the
+   * transfer gate — a Shimmer3, or Shimmer3R firmware before v1.01.011 (see
+   * Shimmer3RClient.supportsSdTransfer). */
   UNSUPPORTED_FW: 0xff,
 } as const;
 
@@ -156,7 +187,7 @@ export function sdStatusToString(status: number): string {
     case SD_STATUS.BAD_ARGS:
       return 'bad arguments';
     case SD_STATUS.UNSUPPORTED_FW:
-      return 'firmware too old for SD file transfer (update required)';
+      return 'this sensor or its firmware cannot transfer SD files (a Shimmer3, or Shimmer3R firmware before v1.01.011)';
     default:
       return `FatFs error ${status}`;
   }

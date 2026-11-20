@@ -291,9 +291,11 @@ export {
   buildBlankBrandRecord,
 } from './devices/brandRecord.js';
 export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
-// Shimmer3R SD-card file transfer (FW >= v1.01.011)
+// Shimmer3R SD-card file transfer (Shimmer3R FW >= v1.01.011; no Shimmer3
+// release serves it — SD_TRANSFER_MIN_FIRMWARE)
 export {
   SD_TRANSFER_OPCODES,
+  SD_TRANSFER_MIN_FIRMWARE,
   SD_STATUS,
   SD_XFER,
   SD_ATTR_DIR,

@@ -273,6 +273,15 @@ interface SimOptions {
   chunkSize?: number;
   /** Firmware patch version reported by the sim (default 11 = the gate). */
   fwPatch?: number;
+  /**
+   * The hardware version GET_DEVICE_VERSION reports: 10, a Shimmer3R, by
+   * default. Anything else plays a sensor whose firmware has no SD commands
+   * compiled in, as a Shimmer3 (3) has at every release: it answers the
+   * version reads, and neither ACKs nor answers an SD command.
+   */
+  hardwareVersion?: number;
+  /** Leave GET_DEVICE_VERSION unanswered, as a reply lost on the link would. */
+  silentDeviceVersion?: boolean;
   maxEntriesPerPage?: number;
   /** Corrupt the CRC of the given (sessionId-agnostic) block seq once. */
   corruptSeqOnce?: number;
@@ -295,9 +304,25 @@ interface SimOptions {
   crcBytes?: 1 | 2;
 }
 
+/** The SD-transfer command opcodes, which only a Shimmer3R's firmware serves. */
+const SD_COMMANDS: ReadonlySet<number> = new Set([
+  OP.LIST_DIR_COMMAND,
+  OP.FILE_STAT_COMMAND,
+  OP.FILE_READ_COMMAND,
+  OP.TRANSFER_ABORT_COMMAND,
+  OP.FREE_SPACE_COMMAND,
+  OP.DELETE_COMMAND,
+]);
+
 /** Scripted Shimmer3R firmware: answers SD-transfer commands from a VirtualCard. */
 function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions = {}) {
-  const state = { session: 0, reads: [] as { path: string; offset: number; windowLen: number }[] };
+  const state = {
+    session: 0,
+    reads: [] as { path: string; offset: number; windowLen: number }[],
+    /** The opcode of every SD command written, answered or not. */
+    sdCommands: [] as number[],
+  };
+  const hardwareVersion = opts.hardwareVersion ?? 10;
   let corruptArmed = opts.corruptSeqOnce !== undefined;
   let dropArmed = opts.dropSeqOnce !== undefined;
   /* The link CRC in force, as SET_CRC_COMMAND left it. Zero until a host asks,
@@ -325,6 +350,13 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
     const pathFrom = (lenIdx: number): string =>
       String.fromCharCode(...cmd.slice(lenIdx + 1, lenIdx + 1 + cmd[lenIdx]));
 
+    if (SD_COMMANDS.has(cmd[0])) {
+      state.sdCommands.push(cmd[0]);
+      /* Not compiled in: the Shimmer3's parser skips the opcode unanswered and
+         would read the arguments behind it as commands of its own. */
+      if (hardwareVersion !== 10) return;
+    }
+
     switch (cmd[0]) {
       case OPCODES.SET_CRC_COMMAND: {
         /* The firmware sets its mode while processing the arguments and
@@ -342,9 +374,11 @@ function attachFwSim(t: LoopbackTransport, card: VirtualCard, opts: SimOptions =
         return;
       }
       case 0x3f: {
-        // GET_DEVICE_VERSION → Shimmer3R (10). setCrcMode reads it first and
-        // refuses a CRC without it.
-        send([ACK, 0x25, 10]);
+        // GET_DEVICE_VERSION → Shimmer3R (10) unless told otherwise.
+        // setCrcMode reads it first and refuses a CRC without it, and
+        // supportsSdTransfer reads it to learn the generation.
+        if (opts.silentDeviceVersion) return;
+        send([ACK, 0x25, hardwareVersion]);
         return;
       }
       case OP.LIST_DIR_COMMAND: {
@@ -549,12 +583,67 @@ describe('Shimmer3RClient SD commands over LoopbackTransport', () => {
   // fact), so the gate must refuse them — and the sd* entry points must
   // enforce it rather than trust callers to ask first.
   it.each([9, 10])('gates OUT corrupting firmware v1.01.0%02d', async (fwPatch) => {
-    const { client } = await makeClient(makeCard(), { fwPatch });
+    const { client, sim } = await makeClient(makeCard(), { fwPatch });
     await expect(client.supportsSdTransfer()).resolves.toBe(false);
     await expect(client.sdListDir('data')).rejects.toThrow(/v1\.01\.011/);
     await expect(client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1024)).rejects.toThrow(
-      /v1\.01\.011/,
+      /v1\.01\.011 or later, and this sensor runs v1\.01\.0\d\d: v1\.01\.009 and v1\.01\.010 serve it but corrupt/,
     );
+    expect(sim.sdCommands).toEqual([]);
+  });
+
+  it('gates OUT a Shimmer3R from before the commands, and says it does not serve them', async () => {
+    const { client } = await makeClient(makeCard(), { fwPatch: 8 });
+    await expect(client.supportsSdTransfer()).resolves.toBe(false);
+    await expect(client.sdGetFreeSpace()).rejects.toThrow(
+      'SD file transfer requires LogAndStream_Shimmer3R v1.01.011 or later, and this sensor runs v1.01.008, which does not serve it',
+    );
+  });
+
+  // DEV-1517. A Shimmer3 numbers its LogAndStream releases on a line of its
+  // own, and none of them serves the SD commands: the Shimmer3 build stubs the
+  // transfer module and compiles the opcodes only for SHIMMER3R. So no version
+  // passes, including those past the Shimmer3R's threshold, and no SD command
+  // may reach one: its parser would read the arguments as commands. The client
+  // learns the generation itself — nothing here calls readDeviceVersion first.
+  it.each([9, 11, 30])(
+    'gates OUT a Shimmer3 at every version: LogAndStream_Shimmer3 v1.01.0%02d',
+    async (fwPatch) => {
+      const { client, sim } = await makeClient(makeCard(), { hardwareVersion: 3, fwPatch });
+      await expect(client.supportsSdTransfer()).resolves.toBe(false);
+      expect(client.generation).toBe('shimmer3');
+      await expect(client.sdListDir('data')).rejects.toThrow(
+        'A Shimmer3 cannot transfer SD files over Bluetooth: no LogAndStream_Shimmer3 release serves the file-transfer commands',
+      );
+      await expect(client.sdGetFreeSpace()).rejects.toMatchObject({
+        name: 'SdTransferError',
+        status: SD_STATUS.UNSUPPORTED_FW,
+      });
+      await expect(client.sdStatFile('data/Trial_1/Shim-000/000')).rejects.toThrow(/Shimmer3/);
+      await expect(client.sdDeletePath('data/Trial_1/Shim-000/000')).rejects.toThrow(/Shimmer3/);
+      await expect(client.sdReadFileWindow('data/Trial_1/Shim-000/000', 0, 1024)).rejects.toThrow(
+        /Shimmer3/,
+      );
+      expect(sim.sdCommands).toEqual([]);
+    },
+  );
+
+  it('gates OUT hardware it does not recognise, whatever its firmware version', async () => {
+    const { client, sim } = await makeClient(makeCard(), { hardwareVersion: 4, fwPatch: 11 });
+    await expect(client.supportsSdTransfer()).resolves.toBe(false);
+    await expect(client.sdListDir('data')).rejects.toThrow(
+      'SD file transfer is served only by Shimmer3R firmware, and this sensor reports hardware version 4',
+    );
+    expect(sim.sdCommands).toEqual([]);
+  });
+
+  it('gates OUT a sensor whose hardware version cannot be read, and tries again next time', async () => {
+    const card = makeCard();
+    const { client, t } = await makeClient(card, { silentDeviceVersion: true });
+    await expect(client.supportsSdTransfer()).resolves.toBe(false);
+    // The failed read is not cached: once the sensor answers, the gate opens
+    attachFwSim(t, card);
+    await expect(client.supportsSdTransfer()).resolves.toBe(true);
   });
 
   it('sdListDir reassembles responses fragmented into 20-byte notifications', async () => {
@@ -713,6 +802,19 @@ describe('Shimmer3RClient SD commands over an UNFRAMED transport', () => {
   it('supportsSdTransfer still gates on FW version', async () => {
     const { client } = await makeClient(makeCard(), unframed());
     await expect(client.supportsSdTransfer()).resolves.toBe(true);
+  });
+
+  // The shape DEV-1517 was found in: a Shimmer3 over the COM port its Classic
+  // pairing creates. Past the Shimmer3R's threshold, so only the generation
+  // can refuse it.
+  it('supportsSdTransfer refuses a Shimmer3 on a byte stream, past the Shimmer3R threshold', async () => {
+    const { client, sim } = await makeClient(
+      makeCard(),
+      unframed({ hardwareVersion: 3, fwPatch: 11 }),
+    );
+    await expect(client.supportsSdTransfer()).resolves.toBe(false);
+    await expect(client.sdListDir('data')).rejects.toThrow(/A Shimmer3 cannot transfer SD files/);
+    expect(sim.sdCommands).toEqual([]);
   });
 
   it('sdGetFreeSpace parses a one-shot response delivered 3 bytes at a time', async () => {
