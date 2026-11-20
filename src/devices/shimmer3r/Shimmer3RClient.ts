@@ -125,6 +125,7 @@ import {
   shimmer3rControlMessageLength,
   messageCarriesLinkCrc,
   DECLARED_LENGTH_RESPONSE_CAPS,
+  inquiryNumChannelsOffset,
 } from './streamFraming.js';
 import {
   parseKinematicCalibBlock,
@@ -208,24 +209,29 @@ const CALIB_DUMP_CHUNK_BYTES = 128;
 // ---------------------------------------------------------------------------
 
 /**
- * Header bytes of an inquiry response, opcode included:
- * `[opcode][samplingRateTicks:2][configSetupByte0..6][numChannels][bufferSize]`,
- * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
- * (`log-and-stream-common/Comms/shimmer_bt_uart.c`).
+ * Where an inquiry response's channel count sits, and how long its header is,
+ * both opcode included, for the device that answered.
  *
- * The full response is `INQUIRY_RSP_HEADER_BYTES + numChannels` bytes — 18 for
- * a typical six-channel configuration. Unlike every other multi-byte response
+ * The header is `[opcode][samplingRateTicks:2][config][numChannels][bufferSize]`,
+ * matching the `INQUIRY_COMMAND` case of `ShimBt_processCmd`
+ * (`log-and-stream-common/Comms/shimmer_bt_uart.c`). The config word is the
+ * one part whose width differs: 7 bytes on a Shimmer3R, so the header is 12
+ * bytes, and 4 on a Shimmer3, so it is 9 (`inquiryNumChannelsOffset`).
+ *
+ * The full response is `headerBytes + numChannels` bytes — 18 for a typical
+ * six-channel Shimmer3R configuration. Unlike every other multi-byte response
  * it carries **no length byte**, so its size is only knowable after the header
  * has arrived, which is why it needs a reader of its own rather than
- * {@link Shimmer3RClient._readLengthPrefixedResponse}.
- */
-const INQUIRY_RSP_HEADER_BYTES = 12;
-
-/**
- * Offset of the channel count within that header (opcode included), i.e. the
+ * {@link Shimmer3RClient._readLengthPrefixedResponse}. The channel count is the
  * one byte that has to be in hand before the total length can be computed.
  */
-const INQUIRY_RSP_NUM_CHANNELS_OFFSET = 10;
+function inquiryResponseLayout(generation: ShimmerGeneration): {
+  numChannelsOffset: number;
+  headerBytes: number;
+} {
+  const numChannelsOffset = inquiryNumChannelsOffset(generation);
+  return { numChannelsOffset, headerBytes: numChannelsOffset + 2 };
+}
 
 // ---------------------------------------------------------------------------
 // Stream alignment acquisition
@@ -1617,10 +1623,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * the byte after it rather than from a guess. A guess of two ate the ACK after
    * every one-byte status; a guess of one left a two-byte status's second byte
    * to be framed as a message, and 0x00 there would end framing for the read.
+   *
+   * The inquiry reply's layout depends on the device too, through
+   * {@link generation}: a Shimmer3's config word is 4 bytes and a Shimmer3R's
+   * 7, so the channel count that sizes the reply sits at a different offset
+   * (DEV-1514).
    */
   private _frameLength(buf: Uint8Array): number {
     return shimmer3rControlMessageLength(buf, {
       statusPayloadBytes: this._statusPayloadBytes ?? 'unknown',
+      generation: this.generation,
     });
   }
 
@@ -2077,14 +2089,16 @@ export class Shimmer3RClient extends BaseShimmerClient {
     timeoutMs: number,
     link = this._linkGeneration,
   ): Promise<Uint8Array> {
+    /* Taken before the wait, so the whole response is judged on one layout,
+       the same one the framer and the parser use. */
+    const { numChannelsOffset, headerBytes } = inquiryResponseLayout(this.generation);
     let acc =
       seed && seed[0] === OPCODES.INQUIRY_RESPONSE
         ? seed
         : await this._waitForResponse(OPCODES.INQUIRY_RESPONSE, timeoutMs, link);
 
     const isComplete = (buf: Uint8Array): boolean =>
-      buf.length >= INQUIRY_RSP_HEADER_BYTES &&
-      buf.length >= INQUIRY_RSP_HEADER_BYTES + buf[INQUIRY_RSP_NUM_CHANNELS_OFFSET];
+      buf.length >= headerBytes && buf.length >= headerBytes + buf[numChannelsOffset];
 
     if (isComplete(acc)) return acc;
 
@@ -2097,9 +2111,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
         reject(
           new Error(
             `Inquiry response truncated: ${acc.length} bytes received` +
-              (acc.length >= INQUIRY_RSP_HEADER_BYTES
-                ? `, ${INQUIRY_RSP_HEADER_BYTES + acc[INQUIRY_RSP_NUM_CHANNELS_OFFSET]} expected.`
-                : `, at least ${INQUIRY_RSP_HEADER_BYTES} expected.`),
+              (acc.length >= headerBytes
+                ? `, ${headerBytes + acc[numChannelsOffset]} expected.`
+                : `, at least ${headerBytes} expected.`),
           ),
         );
       }, timeoutMs);
@@ -4580,14 +4594,24 @@ export class Shimmer3RClient extends BaseShimmerClient {
      *
      * Both lengths are checked here, before any of the parsing below assigns to
      * `this`, so a rejected response leaves the previous configuration intact
-     * rather than half-replacing it. */
-    const headerEnd = base + 11;
+     * rather than half-replacing it.
+     *
+     * The layout is the answering device's. A Shimmer3's config word is 4
+     * bytes, not 7, so its channel count sits three bytes earlier. Reading a
+     * Shimmer3's reply as a Shimmer3R's took a channel ID for the count and
+     * built a one-channel schema (DEV-1514). The config bytes a Shimmer3 does
+     * not send read as zero below. */
+    const layout = inquiryResponseLayout(this.generation);
+    // Within `u8`, which may lack the opcode: the layout counts it.
+    const numChIndex = base - 1 + layout.numChannelsOffset;
+    const configBytes = numChIndex - (base + 2);
+    const headerEnd = numChIndex + 2;
     if (u8.length < headerEnd) {
       throw new Error(
         `Inquiry response too short: ${u8.length} bytes, need at least ${headerEnd}.`,
       );
     }
-    const numCh = u8[base + 9];
+    const numCh = u8[numChIndex];
     if (u8.length < headerEnd + numCh) {
       throw new Error(
         `Inquiry response truncated: ${u8.length} bytes, need ${headerEnd + numCh} ` +
@@ -4599,14 +4623,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     const samplingRateHz = 32768 / adcRaw;
     this.samplingRateHz = samplingRateHz;
 
-    const cfg =
-      BigInt(u8[base + 2]) |
-      (BigInt(u8[base + 3]) << 8n) |
-      (BigInt(u8[base + 4]) << 16n) |
-      (BigInt(u8[base + 5]) << 24n) |
-      (BigInt(u8[base + 6]) << 32n) |
-      (BigInt(u8[base + 7]) << 40n) |
-      (BigInt(u8[base + 8]) << 48n);
+    // Little-endian, 7 bytes on a Shimmer3R and 4 on a Shimmer3.
+    let cfg = 0n;
+    for (let i = 0; i < configBytes; i++) cfg |= BigInt(u8[base + 2 + i]) << BigInt(8 * i);
 
     const internalExpPower = Number((cfg >> 24n) & 0x1n);
     const gsrRange = Number((cfg >> 25n) & 0x7n);
@@ -4621,6 +4640,12 @@ export class Shimmer3RClient extends BaseShimmerClient {
     //   alt mag (LIS3MDL): setup2 bits 5-7 → cfg bits 21-23
     // The LIS2MDL magnetometer and the ADXL371 high-g accel are single-range
     // parts, so 0 is not a placeholder for them — it is their only range.
+    //
+    // These are the Shimmer3R's meanings, and they are read on a Shimmer3 too.
+    // There the same bits are the Shimmer3's own parts' ranges: setup2 bits 5-7
+    // the LSM303 magnetometer's, and setup3 bits 6-7 the MPU9x50 accel's, not a
+    // low-noise accel range (`interpretShimmer3InquiryResponse`). Not yet
+    // generation-aware, nor is the inertial calibration this client applies.
     const gyroLsb = Number((cfg >> 16n) & 0x3n);
     const gyroMsb = Number((cfg >> 34n) & 0x1n);
     this.imuRanges = {
@@ -4640,7 +4665,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // The ranges just moved, so re-pick which stored block applies to each group.
     this._reselectDeviceCalibrations();
 
-    const bufSize = u8[base + 10];
+    const bufSize = u8[numChIndex + 1];
     const channelIds = [...u8.slice(headerEnd, headerEnd + numCh)];
 
     const schema = this._buildSchemaFromChannels(channelIds, this.forceTimestampFmt ?? 'u24', link);
@@ -4675,8 +4700,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * set), and the two generations disagree about the width of the
    * pressure/temperature channels — a Shimmer3 sends 2 big-endian bytes of
    * temperature where a Shimmer3R sends 3 little-endian ones, and reverses the
-   * order of the pair. So call `readDeviceVersion()` before `inquiry()` on any
-   * link that might be a Shimmer3; `inquiry()` deliberately does not send that
+   * order of the pair. They disagree about the inquiry reply itself too: its
+   * config word is 4 bytes on a Shimmer3 and 7 on a Shimmer3R. Without the
+   * version a Shimmer3's reply is read as a Shimmer3R's, so its channel list is
+   * wrong, and on a byte stream or under a link CRC it is cut short and the
+   * replies after it misframed (DEV-1514). So call `readDeviceVersion()` before
+   * `inquiry()` on any link that might be a Shimmer3; `inquiry()` deliberately
+   * does not send that
    * command itself, to keep the schema rebuild after `setSensors()` a single
    * round trip. When the generation is assumed *and* the channel list contains a
    * channel that depends on it, the schema says so (`trusted === false`) and a

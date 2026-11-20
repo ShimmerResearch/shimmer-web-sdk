@@ -184,11 +184,13 @@ export {
   SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS,
   SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
+  inquiryNumChannelsOffset,
 } from './devices/shimmer3r/streamFraming.js';
 /**
- * Per-device length input the STATUS_RESPONSE span needs: 2 bytes from a
- * Shimmer3R on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`),
- * or `'unknown'` before the versions are read.
+ * Per-device length inputs: the STATUS_RESPONSE span, 2 bytes from a Shimmer3R
+ * on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`), or
+ * `'unknown'` before the versions are read; and the generation whose
+ * INQUIRY_RESPONSE layout to size (DEV-1514).
  */
 export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
 /**

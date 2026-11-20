@@ -5,6 +5,7 @@ import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js
 import { NEED_MORE, RESYNC } from '../../src/core/framing.js';
 import {
   shimmer3rControlMessageLength,
+  inquiryNumChannelsOffset,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
 } from '../../src/devices/shimmer3r/streamFraming.js';
 import {
@@ -130,6 +131,45 @@ describe('shimmer3rControlMessageLength', () => {
       // A stray 0x02 stream byte whose "numChannels" is garbage would otherwise
       // eat up to 255 bytes of real traffic, ACKs included.
       expect(len(inq(200, []))).toBe(RESYNC);
+    });
+  });
+
+  describe('INQUIRY_RESPONSE (Shimmer3 4-byte config word, DEV-1514)', () => {
+    // [0x02][adc u16][cfg0..cfg3][numCh][bufSize][channels…] — numCh at [7].
+    // Shimmer3 A615's reply, captured over Classic Bluetooth: 21 channels, 30
+    // bytes.
+    const A615 = [
+      0x02, 0x80, 0x02, 0x00, 0x06, 0x0d, 0x08, 0x15, 0x01, 0x00, 0x01, 0x02, 0x03, 0x0a, 0x0b,
+      0x0c, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    ];
+    const s3 = (bytes: number[]): number =>
+      shimmer3rControlMessageLength(new Uint8Array(bytes), { generation: 'shimmer3' });
+
+    it('reads the channel count at offset 7', () => {
+      expect(inquiryNumChannelsOffset('shimmer3')).toBe(7);
+      expect(inquiryNumChannelsOffset('shimmer3r')).toBe(10);
+    });
+
+    it('spans 9 + numChannels, and ignores what follows', () => {
+      expect(s3(A615)).toBe(30);
+      expect(s3([...A615, ACK, ACK])).toBe(30);
+    });
+
+    it('was cut at 13 bytes when read as a Shimmer3R reply', () => {
+      // Offset 10 is the channel ID 0x01, so 12 + 1. The default stays the
+      // Shimmer3R layout; the client passes the generation it has read.
+      expect(len(A615)).toBe(13);
+    });
+
+    it('needs the channel count, then the channels, before it can size the message', () => {
+      expect(s3(A615.slice(0, 7))).toBe(NEED_MORE);
+      expect(s3(A615.slice(0, 29))).toBe(NEED_MORE);
+    });
+
+    it('resyncs on an implausible channel count', () => {
+      const bad = [...A615];
+      bad[7] = 200;
+      expect(s3(bad)).toBe(RESYNC);
     });
   });
 
