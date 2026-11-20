@@ -964,8 +964,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    *
    * Set it at any time; the change applies at once.
    *
-   * HARDWARE-VERIFY: not yet run against a sensor: a Shimmer3 and a Shimmer3R
-   * over Bluetooth Classic, and a Shimmer3R over USB.
+   * Run on a Shimmer3 (A615, LogAndStream v1.01.009, RN4678) over Bluetooth
+   * Classic, from Chrome on Windows, on 20 Nov 2026 (DEV-1516).
+   *
+   * HARDWARE-VERIFY: not yet run on a Shimmer3R over Bluetooth Classic, nor
+   * over USB.
    *
    * @throws RangeError for a negative or non-finite value
    */
