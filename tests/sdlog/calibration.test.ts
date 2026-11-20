@@ -4,7 +4,10 @@ import {
   decodeSdSession,
   SDLogHeaderBitmask as BM,
 } from '../../src/devices/sdlog/index.js';
-import { generateKinematicCalibBlock } from '../../src/devices/calibration/index.js';
+import {
+  generateKinematicCalibBlock,
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+} from '../../src/devices/calibration/index.js';
 import { buildFile, buildPacket, buildSdLogHeader, encodeValue } from './fixtures.js';
 
 // A real per-device LN accel calibration block written into the SD header at
@@ -103,6 +106,86 @@ describe('SD-log inertial calibration', () => {
     expect(h.calibration.find((c) => c.group === 'lnAccel')!.usingDefaultCalibration).toBe(true);
     // Kionix default: raw = offset (2047) → 0.
     expect(records[0].values.map((v) => v + 0)).toEqual([0, 0, 0]);
+  });
+});
+
+describe("SD-log: a Shimmer3's pre-2025 KXTC9 default record (DEV-1528)", () => {
+  // Firmware before DEV-4 (Feb 2025) wrote 2253/92, the KXTC9-2050's 3.3 V
+  // figures, as a new-IMU Shimmer3's own LN accel record, and every file it
+  // logs carries that record in its header. The part runs at 3.0 V, so the
+  // record reads about 17 % high. The decoder applies it as before and says so.
+  const KIONIX_ALIGN = [0, -1, 0, -1, 0, 0, 0, 0, -1];
+  const block = (offset: number, sens: number) =>
+    generateKinematicCalibBlock([offset, offset, offset], [sens, sens, sens], KIONIX_ALIGN);
+  const shimmer3File = (ln: Uint8Array) =>
+    buildFile(
+      buildSdLogHeader({
+        fwId: 3,
+        fwVersion: [1, 0, 0],
+        enabledSensors: BM.ACCEL_LN,
+        calibFill: (off) => (off >= 139 && off < 160 ? ln[off - 139] : 0xff),
+      }),
+      buildPacket(100, 3, [
+        ...encodeValue('u12', 2253 + 92),
+        ...encodeValue('u12', 2253),
+        ...encodeValue('u12', 2253),
+      ]),
+    );
+
+  it('applies the record unchanged and warns once', () => {
+    const { header: h, records } = decodeSdLogFile(shimmer3File(block(2253, 92)));
+    expect(h.warnings.filter((w) => w === STALE_LN_ACCEL_DEFAULT_WARNING)).toHaveLength(1);
+    expect(h.calibration.find((c) => c.group === 'lnAccel')).toMatchObject({
+      source: 'sd-header',
+      staleDefault: true,
+    });
+    // Kionix alignment: X out is -(raw Y - offset), Y out is -(raw X - offset).
+    // Raw X is one sensitivity above the offset, so Y reads -1 against 92.
+    expect(records[0].values[0] + 0).toBeCloseTo(0, 10);
+    expect(records[0].values[1]).toBeCloseTo(-1, 10);
+    expect(records[0].values[2] + 0).toBeCloseTo(0, 10);
+  });
+
+  it('warns once for a whole session', () => {
+    const f = shimmer3File(block(2253, 92));
+    const { header: h } = decodeSdSession([
+      { name: '000', bytes: f },
+      { name: '001', bytes: f },
+    ]);
+    expect(h.warnings.filter((w) => w === STALE_LN_ACCEL_DEFAULT_WARNING)).toHaveLength(1);
+  });
+
+  it('says nothing of a 2047/83 record, a real one, or a blank one', () => {
+    for (const ln of [block(2047, 83), LN_BLOCK, new Uint8Array(21).fill(0xff)]) {
+      const { header: h } = decodeSdLogFile(shimmer3File(ln));
+      expect(h.warnings).not.toContain(STALE_LN_ACCEL_DEFAULT_WARNING);
+      expect(h.calibration.find((c) => c.group === 'lnAccel')!.staleDefault).toBe(false);
+    }
+  });
+
+  it('says nothing of the same numbers on a Shimmer3R', () => {
+    const ln = block(2253, 92);
+    const header = buildSdLogHeader({
+      hw: 10,
+      fwId: 3,
+      fwVersion: [1, 0, 0],
+      signalIds: [0x00, 0x01, 0x02],
+      calibFill: (off) => (off >= 139 && off < 160 ? ln[off - 139] : 0xff),
+    });
+    const { header: h } = decodeSdLogFile(
+      buildFile(
+        header,
+        buildPacket(100, 3, [
+          ...encodeValue('i16', 0),
+          ...encodeValue('i16', 0),
+          ...encodeValue('i16', 0),
+        ]),
+      ),
+    );
+    const info = h.calibration.find((c) => c.group === 'lnAccel')!;
+    expect(info.source).toBe('sd-header');
+    expect(info.staleDefault).toBe(false);
+    expect(h.warnings).not.toContain(STALE_LN_ACCEL_DEFAULT_WARNING);
   });
 });
 
