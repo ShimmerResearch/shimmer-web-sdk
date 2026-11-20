@@ -65,6 +65,8 @@ interface Device {
   config: number[];
   /** The daughter-card id page; null is a blank (erased) page. */
   board: [number, number, number] | null;
+  /** The whole inquiry reply, opcode included, when not built from `config` and {@link CHANNELS}. */
+  inquiry?: number[];
 }
 
 const SHIMMER3_NEW: Device = {
@@ -139,13 +141,15 @@ async function sensor(
     } else if (op === OPCODES.INQUIRY_COMMAND) {
       deliver([
         ACK,
-        OPCODES.INQUIRY_RESPONSE,
-        0x80,
-        0x02,
-        ...device.config,
-        CHANNELS.length,
-        1,
-        ...CHANNELS,
+        ...(device.inquiry ?? [
+          OPCODES.INQUIRY_RESPONSE,
+          0x80,
+          0x02,
+          ...device.config,
+          CHANNELS.length,
+          1,
+          ...CHANNELS,
+        ]),
       ]);
     } else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
       const page = device.board ?? [0xff, 0xff, 0xff];
@@ -444,4 +448,123 @@ describe("a calibration dump is sorted by the device's own sensor IDs", () => {
     const def = getDefaultCalibration('shimmer3-old', 'mag', 6)!.calibration;
     expect(calOf(oc, 'mag')).not.toEqual(calibrateVector3(RAW.mag, def));
   });
+});
+
+describe('Shimmer3 A615, as the bench saw it through SDK 0.5.18 (20 Nov 2026)', () => {
+  // A615: LogAndStream v1.01.009, RN4678 v1.23, board SR49-3-1 (a new IMU),
+  // over Classic Bluetooth. Its inquiry reply as captured, and a calibration
+  // dump laid out as its own was: 17 records, the Kionix LN accel at range 0,
+  // the MPU9x50 gyro at 0-3, the LSM303 accel at 0-3 and the LSM303 mag at 0-7.
+  // Through 0.5.18 the page logged "The calibration dump held no usable
+  // inertial block", and streamed against the Shimmer3R's defaults.
+  const hex = (s: string): number[] => s.split(' ').map((h) => parseInt(h, 16));
+  const A615_CHANNELS = hex('00 01 02 03 0a 0b 0c 04 05 06 07 08 09 14 15 16 17 18 19 1a 1b');
+  const A615: Device = {
+    name: 'Shimmer3 A615',
+    hw: HW.SHIMMER3,
+    config: hex('00 06 0d 08'),
+    board: [49, 3, 1],
+    inquiry: hex('02 80 02 00 06 0d 08 15 01').concat(A615_CHANNELS),
+  };
+
+  const a615Dump = () => {
+    const layout: Array<[number, InertialGroup, number[]]> = [
+      [SC_SENSOR.ANALOG_ACCEL, 'lnAccel', [0]],
+      [SC_SENSOR.MPU9X50_GYRO, 'gyro', [0, 1, 2, 3]],
+      [SC_SENSOR.LSM303_ACCEL, 'wrAccel', [0, 1, 2, 3]],
+      [SC_SENSOR.LSM303_MAG, 'mag', [0, 1, 2, 3, 4, 5, 6, 7]],
+    ];
+    const records = layout.flatMap(([sensorId, group, ranges]) =>
+      ranges.map((range) => {
+        const def = getDefaultCalibration('shimmer3-new', group, range)!;
+        // A device's own offsets, so a block in force is told from a default.
+        const calibBytes = generateKinematicCalibBlock(
+          [range + 1, 2, 3],
+          def.calibration.sensitivity,
+          def.calibration.alignment,
+          { sensitivityScale: def.sensitivityScale },
+        );
+        return {
+          sensorId,
+          range,
+          calibLen: calibBytes.length,
+          timestampTicks: Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
+          calibBytes,
+          isDefault: false,
+        };
+      }),
+    );
+    expect(records).toHaveLength(17);
+    return parseCalibDump(
+      generateCalibDump(
+        {
+          hardwareId: HW.SHIMMER3,
+          firmwareId: 3,
+          firmwareMajor: 1,
+          firmwareMinor: 1,
+          firmwareInternal: 9,
+        },
+        records,
+      ),
+    );
+  };
+
+  for (const link of LINKS) {
+    it(`reads its ranges, adopts its dump and leaves its MPU channels raw, over ${link.name}`, async () => {
+      const s = await sensor(A615, link);
+      await identifyAndInquire(s);
+      expect(s.client.imuGeneration).toBe('new');
+      // The ranges the page logged were right for this unit: its mag and MPU
+      // accel bits happen to be 0, so both readings agree on them.
+      expect(s.client.imuRanges).toEqual({
+        lnAccel: 0,
+        wrAccel: 0,
+        gyro: 1,
+        mag: 0,
+        altAccel: 0,
+        altMag: 0,
+      });
+      expect(s.client.gsrRangeSetting).toBe(4);
+
+      expect(s.client.applyCalibDump(a615Dump()).sort()).toEqual([
+        'gyro',
+        'lnAccel',
+        'mag',
+        'wrAccel',
+      ]);
+      const info = s.client.calibrationInfo.inertial;
+      expect(Object.keys(info).sort()).toEqual(['gyro', 'lnAccel', 'mag', 'wrAccel']);
+      for (const group of ['lnAccel', 'wrAccel', 'gyro', 'mag'] as const) {
+        expect(info[group]?.source).toBe('radio-dump');
+      }
+
+      // One frame of its 21 channels: LN accel, battery, gyro (big-endian),
+      // WR accel, mag, the MPU9x50 accel (0x14-0x16, big-endian) and mag
+      // (0x17-0x19), then temperature (2 bytes) and pressure (3), big-endian.
+      const payload = [
+        ...RAW.lnAccel.flatMap(i16le),
+        ...i16le(2900),
+        ...RAW.gyro.flatMap(i16be),
+        ...RAW.wrAccel.flatMap(i16le),
+        ...RAW.mag.flatMap(i16le),
+        ...[100, 200, 300].flatMap(i16be),
+        ...[10, 20, 30].flatMap(i16le),
+        0x12,
+        0x34,
+        0x01,
+        0x02,
+        0x03,
+      ];
+      const oc = await streamOne(s, payload);
+      expect(oc.get('MAG_X', 'raw')!.value).toBe(RAW.mag[0]);
+      expect(calOf(oc, 'mag')).not.toEqual(expected('shimmer3-new', 'mag', 0));
+      // A Shimmer3's MPU9x50 accel and mag are not the Shimmer3R's ADXL371 and
+      // LIS3MDL, whose calibrations 0.5.18 put on them. Neither client has a
+      // calibration for them, so they stream raw, as from Shimmer3Client.
+      expect(oc.get('HG_ACCEL_X', 'raw')!.value).toBe(100);
+      expect(oc.get('HG_ACCEL_X', 'cal')).toBeNull();
+      expect(oc.get('ALT_MAG_X', 'raw')!.value).toBe(10);
+      expect(oc.get('ALT_MAG_X', 'cal')).toBeNull();
+    });
+  }
 });
