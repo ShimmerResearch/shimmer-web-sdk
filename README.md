@@ -348,6 +348,32 @@ a recording. That status is reported through `onDeviceStatus`, and
 `getStatus()` and `getBattery()` request the status and battery readings on
 demand.
 
+#### A classic link left quiet answers late
+
+A classic link that has carried nothing for a while answers its next command
+late: about 1.8 s after 10-20 s of quiet, on a Shimmer3 and a Shimmer3R alike
+(Windows; measured by `shimmer-host-core`). BLE does not slow down this way.
+`Shimmer3RClient` follows the rule the Java driver and `shimmer-host-core` do:
+
+- **A keep-alive.** Once a byte-stream link (any `WebSerialTransport`, or a
+  transport with `capabilities.framed = false`) has been quiet for
+  `idleKeepAliveMs`, 5 s by default, the client reads the device's status
+  (GET_STATUS). Until it knows how long a status reply is, it reads the hardware
+  and firmware versions instead, and caches them as `readDeviceVersion()` and
+  `readFwVersion()` would. It sends nothing alongside another command, and a
+  command issued while it is in flight waits for it. It pauses while streaming,
+  while the sensor logs to its SD card, and during an SD transfer, the data-rate
+  test, a factory test or a Bluetooth module update. It stops when the link
+  ends. It writes nothing to `onStatus`, and reports a status on
+  `onDeviceStatus` only when it differs from the last one the link reported.
+  Set `idleKeepAliveMs: 0` (option or property) to turn it off.
+- **A 2 s ACK wait.** On a byte-stream link every command waits at least
+  `BYTE_STREAM_LINK.MIN_ACK_WAIT_MS` (2000 ms) for its ACK, whatever its own
+  timeout. That covers a command sent while the keep-alive is off or paused.
+
+`Shimmer3Client` has no keep-alive yet; its ACK wait is 2000 ms
+(`SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS`).
+
 ### Wired / dock UART (`WiredShimmerClient`)
 
 > **Verification status: code-complete, pending hardware.** The protocol is

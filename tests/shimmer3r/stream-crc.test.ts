@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
-import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { BYTE_STREAM_LINK, OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { CRC_MODE, crcTrailerBytes, type CrcMode } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { shimmerUartCrcCalc } from '../../src/devices/dock/crc.js';
@@ -666,7 +666,8 @@ describe('switching the CRC width, in either direction', () => {
     vi.useFakeTimers();
     try {
       const switching = expect(client.setCrcMode(CRC_MODE.OFF)).rejects.toThrow(/ACK timeout/);
-      await vi.advanceTimersByTimeAsync(1500);
+      // Classic: never less than the byte-stream ACK wait
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS);
       await switching;
     } finally {
       vi.useRealTimers();
@@ -691,7 +692,8 @@ describe('switching the CRC width, in either direction', () => {
       await vi.advanceTimersByTimeAsync(0);
       t.emitDisconnect(new Error('link lost'));
       expect(client.crcMode).toBe(CRC_MODE.OFF);
-      await vi.advanceTimersByTimeAsync(1500);
+      // Classic: never less than the byte-stream ACK wait
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS);
       await switching;
     } finally {
       vi.useRealTimers();

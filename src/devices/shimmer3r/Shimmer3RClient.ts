@@ -2,7 +2,13 @@ import { BaseShimmerClient } from '../../core/BaseShimmerClient.js';
 import { HandlerSet } from '../../core/handlerSet.js';
 import { ObjectCluster } from '../../core/ObjectCluster.js';
 import type { ShimmerClientOptions } from '../../core/types.js';
-import { OPCODES, BT_FEATURE, SHIMMER3R_DEFAULTS, type TimestampFmt } from './constants.js';
+import {
+  OPCODES,
+  BT_FEATURE,
+  BYTE_STREAM_LINK,
+  SHIMMER3R_DEFAULTS,
+  type TimestampFmt,
+} from './constants.js';
 import {
   CRC_MODE,
   SHIMMER3R_LINK_CRC_MIN_FIRMWARE,
@@ -98,6 +104,7 @@ import {
   parseShimmer3DeviceVersionResponse,
   shimmer3ImuRanges,
   shimmer3SupportsSetFeature,
+  shimmer3SupportsStatusRequest,
   shimmer3RMayRecordAudio,
   shimmer3RRecordsAudio,
   type Shimmer3DeviceVersion,
@@ -427,6 +434,14 @@ interface SdExpectation {
   reject: (err: Error) => void;
 }
 
+/** {@link Shimmer3RClient.idleKeepAliveMs}, refused when it is not a time. */
+function checkedKeepAliveMs(ms: number): number {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    throw new RangeError(`idleKeepAliveMs must be 0 or more milliseconds, not ${String(ms)}`);
+  }
+  return ms;
+}
+
 // ---------------------------------------------------------------------------
 // Constructor options
 // ---------------------------------------------------------------------------
@@ -464,6 +479,14 @@ export interface Shimmer3RClientOptions extends ShimmerClientOptions {
    * connection. Web Bluetooth only lets a page reach services listed here.
    */
   optionalServices?: string[];
+  /**
+   * How long a byte-stream link (Web Serial: Bluetooth Classic, or USB) may
+   * carry nothing before the client sends a command to keep it awake, in ms.
+   * 0 turns the keep-alive off. Never used over BLE. Default
+   * {@link BYTE_STREAM_LINK}.KEEP_ALIVE_IDLE_MS (5000). See
+   * {@link Shimmer3RClient.idleKeepAliveMs}.
+   */
+  idleKeepAliveMs?: number;
   /**
    * A classic Shimmer3's IMU generation, when the host knows it: `'old'`
    * (LSM303DLHC) or `'new'` (LSM303AHTR). It wins over what
@@ -680,6 +703,37 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * two callers may be awaiting at once.
    */
   private _statusReadsInFlight = 0;
+
+  /** See {@link idleKeepAliveMs}. */
+  private _idleKeepAliveMs: number;
+  /**
+   * The link the keep-alive watches: set by {@link connect} on a byte-stream
+   * link and cleared with the rest of the link's state, so a timer left from
+   * an earlier link never fires on the next one.
+   */
+  private _keepAliveLink: number | null = null;
+  /** The keep-alive's next look at the link, while one is scheduled. */
+  private _keepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The keep-alive's command while it is in flight. Every other command waits
+   * for it ({@link _keepAliveIdle}) before it is counted or written, so the two
+   * never share the link. Never rejects.
+   */
+  private _keepAliveRun: Promise<void> | null = null;
+  /** When the link last carried a byte, either way: `Date.now()`. */
+  private _lastLinkActivityAt = 0;
+  /**
+   * The last status this link reported, as its raw bytes joined, from a push,
+   * {@link getStatus} or the keep-alive; `null` until it reports one. The
+   * keep-alive compares against it: see {@link _keepLinkAwake}.
+   */
+  private _lastStatusKey: string | null = null;
+  /**
+   * Whether the sensor is logging to its SD card, as far as this link has
+   * heard: from a log start or stop it sent, or the `sdLogging` bit of the
+   * last status. The keep-alive stays quiet while it is set.
+   */
+  private _deviceLogging = false;
 
   /**
    * The in-flight factory-test capture, or null when none is running.
@@ -923,7 +977,61 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._injectedTransport = opts.transport ?? null;
     this.emitCalibratedInertial = opts.emitCalibratedInertial ?? true;
     this._extraOptionalServices = opts.optionalServices ?? [];
+    this._idleKeepAliveMs = checkedKeepAliveMs(
+      opts.idleKeepAliveMs ?? BYTE_STREAM_LINK.KEEP_ALIVE_IDLE_MS,
+    );
     this._imuGenerationOption = opts.imuGeneration;
+  }
+
+  /**
+   * How long a byte-stream link may carry nothing before the client sends a
+   * command to keep it awake, in ms; 0 means never. Default 5000
+   * ({@link BYTE_STREAM_LINK}).
+   *
+   * A Bluetooth Classic link left quiet for a while answers its next command
+   * late: about 1.8 s after 10-20 s of quiet (shimmer-host-core), and on a
+   * Shimmer3 over Web Serial (DEV-1516) late enough that most battery reads a
+   * minute apart timed out. So on a byte-stream link (Web Serial, whether it
+   * reaches a Bluetooth Classic COM port or USB) the client reads the device's
+   * status once the link has been quiet this long, as the Java driver's status
+   * timer and shimmer-host-core do. Until it knows how long a status reply is,
+   * it reads the hardware and firmware versions instead, which tell it. Over
+   * BLE it sends nothing.
+   *
+   * The keep-alive stays out of everyone's way:
+   *
+   * - **Nothing alongside it.** It goes only while no command is in flight,
+   *   and a command issued while it is in flight waits for it first.
+   * - **Paused** while streaming or starting a stream, while the sensor is
+   *   logging to its SD card, during an SD file transfer, the data-rate test,
+   *   a factory test or a Bluetooth module update.
+   * - **Silent.** It writes nothing to {@link onStatus}, and its status read
+   *   is not reported on {@link onDeviceStatus} unless the status changed
+   *   since the last one this link reported. A push that lands while the read
+   *   is in flight is taken for its answer, or dropped, as one landing in a
+   *   {@link getStatus} is; reporting a change is what keeps the news it
+   *   carried, from this read or the next. That needs a status to compare
+   *   with, so a push lost in the link's first status read stays lost.
+   * - **Per link.** It stops when the link ends, and starts again with the
+   *   next {@link connect}.
+   *
+   * Set it at any time; the change applies at once.
+   *
+   * Run on a Shimmer3 (A615, LogAndStream v1.01.009, RN4678) over Bluetooth
+   * Classic, from Chrome on Windows, on 20 Nov 2026 (DEV-1516).
+   *
+   * HARDWARE-VERIFY: not yet run on a Shimmer3R over Bluetooth Classic, nor
+   * over USB.
+   *
+   * @throws RangeError for a negative or non-finite value
+   */
+  get idleKeepAliveMs(): number {
+    return this._idleKeepAliveMs;
+  }
+
+  set idleKeepAliveMs(ms: number) {
+    this._idleKeepAliveMs = checkedKeepAliveMs(ms);
+    this._scheduleKeepAlive();
   }
 
   /**
@@ -1009,6 +1117,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
      * restarts with the connection, and the stream buffer, so bytes stranded by
      * a dropped link cannot be parsed as part of the new session's stream. */
     this._resetLinkProtocolState();
+    const link = this._linkGeneration;
     // A byte-stream transport needs its message boundaries rebuilt; BLE gets
     // them from the notification boundaries and takes the untouched path.
     this._unframed = t.capabilities.framed === false;
@@ -1058,6 +1167,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus(overBle ? 'Requesting Bluetooth device…' : `Opening ${t.kind} link…`);
     await t.connect();
     if (t instanceof WebBluetoothTransport) this.device = t.device;
+    /* Once the link is open, and only if it is still this call's: a disconnect
+     * or another connect begun during t.connect() has moved the generation. */
+    if (this._unframed && this._linkGeneration === link) {
+      this._keepAliveLink = link;
+      this._lastLinkActivityAt = Date.now();
+      this._scheduleKeepAlive();
+    }
     /* The name the link reported, and NO invented one where it reported none.
      * `_deviceId()` is not usable here - its fallback is the generation string,
      * which every frame needs and which read as a chooser name in this line. */
@@ -1180,6 +1296,15 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * reconnect.
    */
   private _resetLinkProtocolState(): void {
+    /* The keep-alive watches one link. Its command in flight, if any, fails
+     * with the waiters below; a command waiting on it is let go at once
+     * rather than when it settles, and finds its link gone. */
+    this._keepAliveLink = null;
+    this._cancelKeepAliveTimer();
+    this._keepAliveRun = null;
+    // What the old link said about the sensor is not news on the next one
+    this._lastStatusKey = null;
+    this._deviceLogging = false;
     this._rxBuf = new Uint8Array(0);
     this._ctrlBuf = new Uint8Array(0);
     // The firmware clears the opt-in on every connect and disconnect
@@ -1314,6 +1439,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
 
   private _handleNotify = (chunk: Uint8Array): void => {
     this._rxSeq++;
+    if (this._keepAliveLink !== null) this._lastLinkActivityAt = Date.now();
     let bytes = chunk;
     if (this._dataRateTestActive && bytes.length > 0) {
       this._dataRateTestLastRxAt = Date.now();
@@ -1530,9 +1656,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
    * Called for control-plane messages only, so it never sees stream data — and
    * so a push that lands mid-stream is lost to the schema parser instead, as
    * {@link onDeviceStatus} documents.
+   *
+   * Remembered whether or not anyone is listening: the keep-alive pauses while
+   * a push says the sensor is logging, and compares its own reads with it.
    */
   private _maybeEmitDeviceStatus(chunk: Uint8Array): void {
-    if (!this.onDeviceStatus) return;
     // A push carries the ACK prefix when the firmware's
     // `useAckPrefixForInstreamResponses` flag is on
     // (SET_INSTREAM_RESPONSE_ACK_PREFIX_STATE, 0xA3), and a stray ACK can be
@@ -1558,13 +1686,28 @@ export class Shimmer3RClient extends BaseShimmerClient {
       this._log('Dropping truncated STATUS push:', msg.length - 2, 'payload byte(s), need', need);
       return;
     }
+    const status = parseShimmer3StatusBytes(msg.subarray(2, 2 + (this._statusPayloadBytes ?? 2)));
+    this._rememberStatus(status);
+    if (!this.onDeviceStatus) return;
     try {
-      this.onDeviceStatus(
-        parseShimmer3StatusBytes(msg.subarray(2, 2 + (this._statusPayloadBytes ?? 2))),
-      );
+      this.onDeviceStatus(status);
     } catch (e) {
       this._log('onDeviceStatus handler error', e);
     }
+  }
+
+  /**
+   * Note a status this link reported, from a push or a read.
+   *
+   * @returns whether it differs from the one before it on this link; false
+   *   for the first.
+   */
+  private _rememberStatus(status: Shimmer3DeviceStatus): boolean {
+    const key = Array.from(status.raw).join(',');
+    const changed = this._lastStatusKey !== null && this._lastStatusKey !== key;
+    this._lastStatusKey = key;
+    this._deviceLogging = status.sdLogging;
+    return changed;
   }
 
   /**
@@ -4340,6 +4483,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   private async _startStreaming(): Promise<void> {
+    /* Before the stream plane is prepared: the keep-alive's reply belongs to
+       the control plane. `_streamStarting` already keeps the next one away. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
     if (!this.schema) this._emitStatus('Starting stream without schema (not recommended).');
     this._prepareStreamTimeline();
     this._emitStatus('START_STREAM → waiting for ACK…');
@@ -4477,6 +4623,9 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (gate) this._streamTailDrain = gate;
     try {
       try {
+        /* A stop sent with no stream running still gets an ACK, which would
+           be taken for the keep-alive's. While streaming there is none. */
+        if (!gate && this._keepAliveRun) await this._keepAliveIdle();
         await this._writeOnLink(new Uint8Array([op]), link, true);
         written();
       } catch (err: unknown) {
@@ -4575,6 +4724,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (this._linkGeneration === link) this._endStreamPlane();
       throw asLogStartRefusal(e, 'START_SDBT');
     }
+    // No status push follows a start by command; see startLogging
+    if (this._linkGeneration === link) this._deviceLogging = true;
     this._emitStatus('START_BT_STREAM_SD_LOGGING ACK received; frames should follow');
   }
 
@@ -4598,6 +4749,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._refuseWhileBtModuleUpdating('Logging');
     this._emitStatus('START_LOGGING → waiting for ACK…');
+    const link = this._linkGeneration;
     let remainder: Uint8Array | null;
     try {
       remainder = await this._writeExpectingAck(
@@ -4607,6 +4759,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     } catch (e) {
       throw asLogStartRefusal(e, 'START_LOGGING');
     }
+    /* Taken as logging, which keeps the keep-alive quiet. The firmware pushes
+     * no status for a start it was sent (`ShimBt_instreamStatusRespSendIfNotBtCmd`),
+     * so this ACK is all the news there is. A start it ACKs and does not carry
+     * out is corrected by the next status read. */
+    if (this._linkGeneration === link) this._deviceLogging = true;
     if (remainder?.length) this._emitTemp(remainder);
     this._emitStatus('START_LOGGING ACK received.');
   }
@@ -4619,10 +4776,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
   async stopLogging(): Promise<void> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     this._emitStatus('STOP_LOGGING → waiting for ACK…');
+    const link = this._linkGeneration;
     const remainder = await this._writeExpectingAck(
       new Uint8Array([OPCODES.STOP_LOGGING_COMMAND]),
       1500,
     );
+    // As for startLogging: no push follows a stop by command
+    if (this._linkGeneration === link) this._deviceLogging = false;
     if (remainder?.length) this._emitTemp(remainder);
     this._emitStatus('STOP_LOGGING ACK received.');
   }
@@ -4636,6 +4796,8 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._emitStatus('STOP_BT_STREAM_SD_LOGGING → sending…');
     await this._stopStreamPlane(OPCODES.STOP_SDBT_COMMAND, (err) => {
       if (err) this._emitStatus(`STOP_BT_STREAM_SD_LOGGING write failed: ${err.message}`);
+      // As for stopLogging, once the stop has gone out
+      else this._deviceLogging = false;
     });
     this._emitStatus('Streaming + logging stopped.');
   }
@@ -5569,6 +5731,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
       );
     }
     this._log('Write', u8);
+    if (this._keepAliveLink !== null) this._lastLinkActivityAt = Date.now();
     await this._transport.write(u8);
   }
 
@@ -5599,31 +5762,45 @@ export class Shimmer3RClient extends BaseShimmerClient {
   }
 
   /**
+   * @param ackTimeoutMs how long to wait for the ACK; on a byte-stream link,
+   *   never less than {@link BYTE_STREAM_LINK}.MIN_ACK_WAIT_MS, since the
+   *   first command after a quiet spell is answered late there.
    * @param link the link the command belongs to: by default the current one,
    *   or, for one step of a multi-step operation, the link the operation began
    *   on - which fails the step at once if that link has since been reset.
+   * @param keepAlive true only for the keep-alive's own command, which must not
+   *   wait for itself.
    */
   private async _writeExpectingAck(
     u8: Uint8Array,
     ackTimeoutMs = 1000,
     link = this._linkGeneration,
+    keepAlive = false,
   ): Promise<Uint8Array | null> {
     /* Before it is counted: the stop's own ACK, among the last packets, would
        otherwise be spent on this command. */
     await this._afterStopDrain();
+    /* Nor alongside the keep-alive, whose ACK any waiter would take: the count
+       is a count, not a queue. Checked after the drain, and nothing is awaited
+       between here and the count, so none can start in between: a keep-alive
+       starts only from its timer. */
+    if (!keepAlive && this._keepAliveRun) await this._keepAliveIdle();
     /* A step of an operation whose link has already been replaced: refused
        before it is counted, since the count is now the next link's and the
        catch below leaves it alone across a reset. */
     if (link !== this._linkGeneration) {
       throw new Error('The link was reset while the command was being sent');
     }
+    const ackWaitMs = this._unframed
+      ? Math.max(ackTimeoutMs, BYTE_STREAM_LINK.MIN_ACK_WAIT_MS)
+      : ackTimeoutMs;
     this._expectingAck++;
     try {
       /* The write is asynchronous, and the link can be reset while it is
        * pending: the command then went to a link that is gone, and no ACK for
        * it is coming on the next one. */
       await this._writeOnLink(u8, link);
-      return await this._waitForAck(ackTimeoutMs, link);
+      return await this._waitForAck(ackWaitMs, link);
     } catch (e) {
       // Not across a link reset, which has already zeroed the count: what is
       // counted now belongs to the next link's commands
@@ -5878,10 +6055,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   async readDeviceVersion(): Promise<Shimmer3DeviceVersion> {
     if (this._deviceVersionCache) return this._deviceVersionCache;
+    // The keep-alive may be reading it right now (see _keepLinkAwake)
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (this._deviceVersionCache) return this._deviceVersionCache;
+    return this._askDeviceVersion(this._linkGeneration, false);
+  }
+
+  /**
+   * The round trip behind {@link readDeviceVersion}, without its cache check,
+   * on `link`. `keepAlive` as for {@link _writeExpectingAck}.
+   */
+  private async _askDeviceVersion(
+    link: number,
+    keepAlive: boolean,
+  ): Promise<Shimmer3DeviceVersion> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const cmd = new Uint8Array([OPCODES.GET_DEVICE_VERSION_COMMAND]);
-    const link = this._linkGeneration;
-    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500, link, keepAlive);
     const rsp =
       ackRemainder && ackRemainder[0] === OPCODES.DEVICE_VERSION_RESPONSE
         ? ackRemainder
@@ -5956,6 +6146,173 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (this._linkGeneration !== link) throw e;
       this._log('Status width not learnt:', (e as Error).message);
       return e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Keeping a byte-stream link awake (see idleKeepAliveMs)
+  // ---------------------------------------------------------------------------
+
+  /** Resolves once no keep-alive command is in flight. */
+  private async _keepAliveIdle(): Promise<void> {
+    while (this._keepAliveRun) await this._keepAliveRun;
+  }
+
+  private _cancelKeepAliveTimer(): void {
+    if (this._keepAliveTimer !== null) {
+      clearTimeout(this._keepAliveTimer);
+      this._keepAliveTimer = null;
+    }
+  }
+
+  /**
+   * Schedule the keep-alive's next look at the link: for when the link will
+   * have been quiet for {@link idleKeepAliveMs}, or after `delayMs`. Nothing
+   * is scheduled while the keep-alive is off or no byte-stream link is open,
+   * nor while its command is in flight, which schedules the next look itself
+   * when it ends.
+   */
+  private _scheduleKeepAlive(delayMs?: number): void {
+    this._cancelKeepAliveTimer();
+    const idleMs = this._idleKeepAliveMs;
+    const link = this._keepAliveLink;
+    if (idleMs <= 0 || link === null || link !== this._linkGeneration || this._keepAliveRun) {
+      return;
+    }
+    const wait = delayMs ?? Math.max(0, this._lastLinkActivityAt + idleMs - Date.now());
+    const timer = setTimeout(this._keepAliveTick, wait);
+    // Never what keeps a Node or Electron process alive
+    (timer as { unref?: () => void }).unref?.();
+    this._keepAliveTimer = timer;
+  }
+
+  private _keepAliveTick = (): void => {
+    this._keepAliveTimer = null;
+    const idleMs = this._idleKeepAliveMs;
+    const link = this._keepAliveLink;
+    if (idleMs <= 0 || link === null || link !== this._linkGeneration) return;
+    // Traffic since the timer was set: look again once that has gone quiet
+    if (Date.now() - this._lastLinkActivityAt < idleMs) {
+      this._scheduleKeepAlive();
+      return;
+    }
+    if (!this._linkFreeForKeepAlive()) {
+      this._scheduleKeepAlive(BYTE_STREAM_LINK.KEEP_ALIVE_RETRY_MS);
+      return;
+    }
+    const run: Promise<void> = this._keepLinkAwake(link)
+      .catch((e: unknown) => {
+        /* Nobody to tell. A link that has gone is reported by the transport,
+           and one that is only slow is the next command's to find out. */
+        this._log('Keep-alive unanswered:', e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (this._keepAliveRun === run) this._keepAliveRun = null;
+        if (this._linkGeneration === link) this._scheduleKeepAlive();
+      });
+    this._keepAliveRun = run;
+  };
+
+  /**
+   * Whether nothing else holds the link, or is about to take it, and the
+   * sensor is not doing anything the keep-alive should stay out of.
+   *
+   * `_expectingAck` covers a command whose ACK has not landed and `_temps` one
+   * still waiting for its reply, or an SD transfer, whose handler stays
+   * attached throughout. The rest are the operations that own the link, and
+   * an SD log: the sensor's own work, left alone. Staying quiet costs only a
+   * late answer to the first command after it, which the byte-stream ACK
+   * wait covers.
+   */
+  private _linkFreeForKeepAlive(): boolean {
+    return (
+      this._transport !== null &&
+      this._keepAliveRun === null &&
+      this._expectingAck === 0 &&
+      this._temps.size === 0 &&
+      this._lastAckRemainder === null &&
+      this._statusReadsInFlight === 0 &&
+      this._statusWidthReads === null &&
+      !this._streaming &&
+      this._streamStarting === 0 &&
+      this._streamTailDrain === null &&
+      !this._dataRateTestActive &&
+      this._factoryTest === null &&
+      this._sdUsers === 0 &&
+      this._sdExpect === null &&
+      !this._btModuleUpdateRunning &&
+      this._btModuleReconnect === null &&
+      !this._deviceLogging
+    );
+  }
+
+  /**
+   * One keep-alive round trip on `link`, with nothing written to
+   * {@link onStatus}.
+   *
+   * GET_STATUS, the read the Java driver's status timer and shimmer-host-core
+   * make, once this link knows how long a status reply is. Until then, the
+   * version reads that tell it, one per round trip, cached as
+   * {@link readDeviceVersion} and {@link readFwVersion} cache them. On
+   * firmware without GET_STATUS, the firmware version again: any round trip
+   * keeps the link awake.
+   *
+   * The status read is claimed, as {@link getStatus} claims its own, so its
+   * answer is not reported as a push. But a push that lands while it is in
+   * flight is taken as its answer, as it would be by {@link getStatus}, and the
+   * keep-alive runs every few seconds for as long as the link is idle. So a
+   * status that differs from the last one this link reported is passed to
+   * {@link onDeviceStatus}: that is news, whichever message carried it. One
+   * that does not is not news, and a host that logs every push stays quiet.
+   */
+  private async _keepLinkAwake(link: number): Promise<void> {
+    const hw = this._deviceVersionCache;
+    if (!hw) {
+      await this._askDeviceVersion(link, true);
+      return;
+    }
+    const fw = this._fwVersionCache;
+    if (!fw) {
+      await this._askFwVersion(link, true);
+      return;
+    }
+    const width = this._statusPayloadBytes;
+    const answersStatus = shimmer3SupportsStatusRequest(
+      { firmwareIdentifier: fw.fwId, major: fw.major, minor: fw.minor, internal: fw.patch },
+      hw.hardwareVersion,
+    );
+    if (width === null || !answersStatus) {
+      await this._askFwVersion(link, true);
+      return;
+    }
+    let status: Shimmer3DeviceStatus;
+    this._statusReadsInFlight++;
+    try {
+      const ackRemainder = await this._writeExpectingAck(
+        new Uint8Array([OPCODES.GET_STATUS_COMMAND]),
+        BYTE_STREAM_LINK.MIN_ACK_WAIT_MS,
+        link,
+        true,
+      );
+      const rsp =
+        ackRemainder &&
+        ackRemainder.length >= 2 + width &&
+        ackRemainder[0] === OPCODES.INSTREAM_CMD_RESPONSE &&
+        ackRemainder[1] === OPCODES.STATUS_RESPONSE
+          ? ackRemainder
+          : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, width, 1500, link);
+      status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + width));
+    } finally {
+      // Not across a link reset, which has already zeroed the count
+      if (this._linkGeneration === link) this._statusReadsInFlight--;
+    }
+    if (this._linkGeneration !== link) return;
+    if (this._rememberStatus(status) && this.onDeviceStatus) {
+      try {
+        this.onDeviceStatus(status);
+      } catch (e) {
+        this._log('onDeviceStatus handler error', e);
+      }
     }
   }
 
@@ -6036,6 +6393,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
           ? ackRemainder
           : await this._waitForInstreamResponse(OPCODES.STATUS_RESPONSE, need, 1500, link);
       const status = parseShimmer3StatusBytes(rsp.subarray(2, 2 + (this._statusPayloadBytes ?? 2)));
+      if (this._linkGeneration === link) this._rememberStatus(status);
       this._emitStatus(
         `Status: docked=${status.docked} sensing=${status.sensing} ` +
           `logging=${status.sdLogging} streaming=${status.streaming} ` +
@@ -6085,10 +6443,23 @@ export class Shimmer3RClient extends BaseShimmerClient {
   /** Read (and cache) the firmware version via GET_FW_VERSION_COMMAND. */
   async readFwVersion(): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
     if (this._fwVersionCache) return this._fwVersionCache;
+    // The keep-alive may be reading it right now (see _keepLinkAwake)
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (this._fwVersionCache) return this._fwVersionCache;
+    return this._askFwVersion(this._linkGeneration, false);
+  }
+
+  /**
+   * The round trip behind {@link readFwVersion}, without its cache check, on
+   * `link`. `keepAlive` as for {@link _writeExpectingAck}.
+   */
+  private async _askFwVersion(
+    link: number,
+    keepAlive: boolean,
+  ): Promise<{ fwId: number; major: number; minor: number; patch: number }> {
     if (!this._transport) throw new Error('Not connected (RX missing)');
     const cmd = new Uint8Array([OPCODES.GET_FW_VERSION_COMMAND]);
-    const link = this._linkGeneration;
-    const ackRemainder = await this._writeExpectingAck(cmd, 1500);
+    const ackRemainder = await this._writeExpectingAck(cmd, 1500, link, keepAlive);
     const rsp =
       ackRemainder && ackRemainder[0] === OPCODES.FW_VERSION_RESPONSE
         ? ackRemainder
@@ -6138,6 +6509,11 @@ export class Shimmer3RClient extends BaseShimmerClient {
     durationMs = 5000,
     onProgress?: (bytesSoFar: number, elapsedMs: number) => void,
   ): Promise<{ bytesReceived: number; durationMs: number; kBps: number }> {
+    /* The test takes every byte from the moment it is set up, so a keep-alive
+       reply still on its way would be counted as test traffic. Nothing is
+       awaited between here and that set-up, and `_dataRateTestActive` keeps
+       the next keep-alive away. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
     if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._streaming) throw new Error('Data-rate test unavailable while streaming');
 
@@ -6409,6 +6785,10 @@ export class Shimmer3RClient extends BaseShimmerClient {
     // Validated before anything is written, so an out-of-range type costs the
     // caller an exception rather than a minute of silence.
     const info = requireShimmer3FactoryTestType(type);
+    /* A keep-alive in flight is not "another command" to refuse over: it
+       settles within its ACK wait, and the link is the test's after it. */
+    if (this._keepAliveRun) await this._keepAliveIdle();
+    if (!this._transport) throw new Error('Not connected (RX missing)');
     if (this._factoryTest) {
       throw new FactoryTestError(
         'busy',
