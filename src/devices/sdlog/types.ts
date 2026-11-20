@@ -218,6 +218,13 @@ export interface SdLogChannelCalibrationInfo {
   /** The hardware range value used to select the calibration. */
   range: number;
   /**
+   * True when the header's calibration is a Shimmer3's pre-2025 KXTC9-2050
+   * default record (offset 2253, sensitivity 92), which reads about 17 % high
+   * (DEV-1528). Low-noise accel on a Shimmer3 only; false elsewhere. The record
+   * is still the one applied, and the header's `warnings` say so once.
+   */
+  staleDefault: boolean;
+  /**
    * Gyro only: the on-the-fly offset calibration (derived-sensor bit 29).
    * `enabled` comes from the header; `active`, `updates` and `offset` describe
    * the decode once it has run - for a session, the state the last file left,

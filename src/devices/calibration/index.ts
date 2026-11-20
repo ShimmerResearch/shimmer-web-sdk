@@ -29,6 +29,13 @@ export {
 } from './dump.js';
 export type { CalibDump, CalibDumpRecord, CalibDumpVersion, CalibReadSource } from './dump.js';
 
+export {
+  STALE_KXTC9_DEFAULT_OFFSET,
+  STALE_KXTC9_DEFAULT_SENSITIVITY,
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+  isStaleKxtc9DefaultCalibration,
+} from './staleDefaults.js';
+
 export { applyStreamingCalibration } from './streaming.js';
 export type { StreamingCalibrationState, StreamingImuRanges } from './streaming.js';
 
