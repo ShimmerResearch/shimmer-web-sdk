@@ -143,6 +143,7 @@ export {
   OPCODES,
   BT_FEATURE,
   SHIMMER3R_DEFAULTS,
+  BYTE_STREAM_LINK,
   TIMESTAMP_FIELD,
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';

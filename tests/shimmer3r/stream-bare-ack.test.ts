@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js';
-import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
+import { BYTE_STREAM_LINK, OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { appendCrc, CRC_MODE, type CrcMode } from '../../src/devices/shimmer3r/crcMode.js';
 import { LoopbackTransport } from '../../src/core/transport/LoopbackTransport.js';
 import { versionReply } from './configFirmware.js';
@@ -411,7 +411,7 @@ describe('bytes that only look like a reply', () => {
       const settled = expect(done).rejects.toThrow(/ACK timeout/);
       await vi.advanceTimersByTimeAsync(0);
       s.pump(6, undefined, tricky);
-      await vi.advanceTimersByTimeAsync(1600);
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS + 100);
       await settled;
     } finally {
       vi.useRealTimers();
@@ -436,7 +436,7 @@ describe('bytes that only look like a reply', () => {
       s.t.notify([ACK]);
       s.t.notify(wireFrame(5_000_000, CRC_MODE.OFF));
       s.pump(3);
-      await vi.advanceTimersByTimeAsync(1600);
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS + 100);
       await settled;
     } finally {
       vi.useRealTimers();
@@ -458,7 +458,7 @@ describe('bytes that only look like a reply', () => {
       // Half a packet of junk with an ACK and its CRC at the end, then packets.
       s.t.notify([0x12, 0x00, 0x34, 0xff, 0xf4, 0x65]);
       s.pump(4);
-      await vi.advanceTimersByTimeAsync(1600);
+      await vi.advanceTimersByTimeAsync(BYTE_STREAM_LINK.MIN_ACK_WAIT_MS + 100);
       await settled;
     } finally {
       vi.useRealTimers();
