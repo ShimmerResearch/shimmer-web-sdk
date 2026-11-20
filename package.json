@@ -58,7 +58,7 @@
     "@rollup/plugin-typescript": "^12.3.1",
     "@types/node": "^26.6.6",
     "@types/web-bluetooth": "^0.0.22",
-    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
     "@typescript-eslint/parser": "^8.72.2",
     "eslint": "^10.14.0",
     "globals": "^17.14.0",
