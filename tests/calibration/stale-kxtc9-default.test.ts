@@ -161,6 +161,41 @@ describe('Shimmer3Client: a stale LN accel record (DEV-1528)', () => {
     }
   });
 
+  it('warns for the record the per-sensor GET returns too', async () => {
+    const stale = generateKinematicCalibBlock([2253, 2253, 2253], [92, 92, 92], KIONIX_ALIGN);
+    const other = generateKinematicCalibBlock([1, 2, 3], [100, 100, 100], KIONIX_ALIGN);
+    const gets: Record<number, [number, Uint8Array]> = {
+      [OPCODES.GET_LN_ACCEL_CALIBRATION_COMMAND]: [OPCODES.LN_ACCEL_CALIBRATION_RESPONSE, stale],
+      [OPCODES.GET_GYRO_CALIBRATION_COMMAND]: [OPCODES.GYRO_CALIBRATION_RESPONSE, other],
+      [OPCODES.GET_MAG_CALIBRATION_COMMAND]: [OPCODES.MAG_CALIBRATION_RESPONSE, other],
+      [OPCODES.GET_WR_ACCEL_CALIBRATION_COMMAND]: [OPCODES.WR_ACCEL_CALIBRATION_RESPONSE, other],
+    };
+    const t = new LoopbackTransport({ capabilities: { framed: false }, deviceName: 'S3' });
+    t.setOnWrite((bytes, tr) => {
+      const op = bytes[0];
+      const reply =
+        op === OPCODES.GET_DEVICE_VERSION_COMMAND
+          ? [OPCODES.DEVICE_VERSION_RESPONSE, 3]
+          : op === OPCODES.GET_FW_VERSION_COMMAND
+            ? [OPCODES.FW_VERSION_RESPONSE, 3, 0, 1, 0, 1, 9]
+            : gets[op]
+              ? [OPCODES.ACK_COMMAND_PROCESSED, gets[op][0], ...gets[op][1]]
+              : null;
+      if (reply) setTimeout(() => tr.notify(reply), 0);
+    });
+    const client = new Shimmer3Client({ transport: t });
+    const status: string[] = [];
+    client.onStatus = (m) => status.push(m);
+    await client.connect();
+
+    expect(await client.readCalibration()).toContain('lnAccel');
+    expect(warnings(status)).toBe(1);
+    expect(client.calibrationInfo.inertial.lnAccel).toMatchObject({
+      source: 'bt-command',
+      staleDefault: true,
+    });
+  });
+
   it('flags only the low-noise accel', async () => {
     const { client } = await connectedShimmer3();
     client.applyCalibDump(lnAccelDump([2253, 2253, 2253], [92, 92, 92]));
