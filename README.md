@@ -502,13 +502,41 @@ delay (`SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD`) before the per-Shimmer UART is
 usable. Normal base-command reads use the ported **1000 ms** timeout
 (`SMARTDOCK_RESPONSE_TIMEOUT`). Like D1, the base UART is an unframed byte
 stream, so the client accumulates bytes and extracts `\r\n`-terminated lines,
-ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
+ignoring unrelated / partial lines (resync).
+
+**A base can refuse commands at random, so a command is sent again.** On 24 Nov
+2026 a Base6 answered most slot changes with an `E` within 20 ms, and left others
+unanswered, through a power cycle; sent again every 2 s, each got through within
+6 tries. Its firmware keeps only the last UART byte received, so a byte that
+arrives while its main loop is busy is lost. So each command is sent up to **8**
+times (`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fails
+(`CMD_RETRY_INTERVAL_MS`):
+
+- A try fails on an `E`, on no answer in time, or, for a slot change, on an answer
+  naming another slot (a slot, for `SDD$`). That answer may be a late one to an
+  earlier command, so it is not taken.
+- The answer asked for still counts if it arrives between tries, and the command
+  is not sent again. Anything else between tries, an `E` included, is dropped.
+- The call ends with one result: the answer, or the last try's failure. When the
+  last try names another slot, `activeSlot` is the slot it named.
+- Losing the link, or calling `disconnect()`, ends the command at once, and every
+  call queued behind it, without sending anything more.
+
+The Java driver sends each command once, so Consensys fails on such a base. The
+cost is time when the base will not answer: a query refused on every try fails
+after 14 s, and unanswered after 22 s; a slot change unanswered, after 94 s. Each
+try that fails is reported through `onStatus`. A host probing a port that may not
+be a base can pass `commandTries` (and `timeouts.retryIntervalMs`) to fail
+sooner, at the risk of taking a refusing base for no base.
 
 **Hardware-verify items** (need a real Base-6 / Base-15 to confirm):
 
 - **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
   settle delay are ported as-is; real base latency (especially how long the
   per-Shimmer UART takes to become usable after routing) needs measuring.
+- **Sending again.** 8 tries 2 s apart is what got every command through on the
+  bench Base6 that refused them, sent from the HIL harness rather than from this
+  client. This client has not yet driven a base with it.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only

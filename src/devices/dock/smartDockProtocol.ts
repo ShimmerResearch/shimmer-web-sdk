@@ -81,7 +81,8 @@ export const SMARTDOCK_BASE_CMD = Object.freeze({
  * and com.shimmerresearch.managers.dockManager.AbstractDock:
  * - `SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD` = 1500 ms (AbstractDock.java:96) —
  *   settle delay after a without-SD slot change before talking to the Shimmer.
- * - `CMD_RETRY_ATTEMPTS` = 2 (SmartDockUart.java:30).
+ *
+ * The two retry values are not the Java's: see `CMD_RETRY_ATTEMPTS` below.
  */
 export const SMARTDOCK_DEFAULTS = Object.freeze({
   RESPONSE_TIMEOUT_MS: 1000,
@@ -107,7 +108,34 @@ export const SMARTDOCK_DEFAULTS = Object.freeze({
   SLOT_CHANGEOVER_DELAY_WITH_SD_WIN_MS: 5000,
   /** As above on macOS/Linux (AbstractDock.java:95, selected by `getSDMountDelay()`). */
   SLOT_CHANGEOVER_DELAY_WITH_SD_UNIX_MS: 6000,
-  CMD_RETRY_ATTEMPTS: 2,
+  /**
+   * How many times in all a base command is sent while each try fails: on an
+   * `E`, on no answer in time, or, for a slot change, on an answer naming
+   * another slot (a slot, for `SDD$`).
+   *
+   * The Java has 2 (`CMD_RETRY_ATTEMPTS`, SmartDockUart.java:30), but
+   * `waitForSmartDockResponse` throws on the first `E` and the first timeout,
+   * so Consensys sends each command once. That is not enough. On 24 Nov 2026 a
+   * Base6 (`V,2,1,0,1,0`) answered most `SDC,NN$`, `SDP,NN$` and `SDD$` with an
+   * `E` within 20 ms and others not at all, through a power cycle; sent again
+   * every 2 s, each got through within 6 tries.
+   *
+   * The base firmware loses bytes (smartdock-firmware `CBase6/main.c` at
+   * 66532f8). Its UART interrupt (`USCI_A0_ISR`) keeps only the last byte
+   * received, and the main loop decodes one byte per pass, so a byte that
+   * arrives while the loop is busy is lost. A command short a byte is answered
+   * `E` at its `$`; one that loses its `$` is not answered at all.
+   *
+   * The cost is time when the base will not answer: a query refused on every
+   * try ends after 14 s, and unanswered after 22 s; a slot change unanswered,
+   * after 94 s.
+   */
+  CMD_RETRY_ATTEMPTS: 8,
+  /**
+   * How long after a try fails the command is sent again: the 2 s that got
+   * every command through on that Base6.
+   */
+  CMD_RETRY_INTERVAL_MS: 2000,
   /**
    * Attempts at the FIRST per-Shimmer read after a slot change
    * (`READ_MAC_RETRY_ATTEMPTS`, AbstractDock.java:92, used by

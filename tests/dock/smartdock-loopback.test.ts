@@ -84,7 +84,12 @@ function scriptShimmer(
   });
 }
 
-const FAST = { responseTimeoutMs: 200, slotChangeTimeoutMs: 200, slotChangeoverDelayMs: 0 };
+const FAST = {
+  responseTimeoutMs: 200,
+  slotChangeTimeoutMs: 200,
+  slotChangeoverDelayMs: 0,
+  retryIntervalMs: 0,
+};
 
 async function connectedDock(
   opts: {
@@ -92,6 +97,8 @@ async function connectedDock(
     occupancy?: string;
     baseScript?: Parameters<typeof scriptBase>[2];
     shimmerScript?: Parameters<typeof scriptShimmer>[2];
+    /** Sending again is covered in smartdock-retry.test.ts, on fake timers. */
+    commandTries?: number;
   } = {},
 ): Promise<{
   dock: SmartDockClient;
@@ -113,6 +120,7 @@ async function connectedDock(
     transport: base,
     shimmerTransport: shimmer,
     timeouts: FAST,
+    commandTries: opts.commandTries,
   });
   await dock.connect();
   return { dock, base, shimmer, state };
@@ -169,20 +177,23 @@ describe('SmartDockClient selectSlot', () => {
     expect(dec(base.lastWrite!.bytes)).toBe('SDP,04$');
   });
 
-  it('rejects when the confirmed slot differs from the request', async () => {
-    const state: BaseState = { slot: -1, hwVersion: 1, occupancy: '1' };
+  it('rejects when the confirmed slot differs from the request on every try', async () => {
     const base = new LoopbackTransport({ capabilities: { framed: false } });
     base.setOnWrite((bytes, tr) => {
       if (dec(bytes).startsWith('SDP,')) setTimeout(() => tr.notify(enc('P,09\r\n')), 0); // wrong slot
     });
     const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
     await dock.connect();
-    await expect(dock.selectSlot(4)).rejects.toThrow(/slot select failed|FAIL_SET/i);
-    void state;
+    await expect(dock.selectSlot(4)).rejects.toThrow(/FAIL_SET/);
+    // Only the last try's answer is taken as what the base routes.
+    expect(dock.activeSlot).toBe(9);
   });
 
   it('times out on the slot-change timeout when the base never answers', async () => {
-    const { dock } = await connectedDock({ baseScript: { silentSlotChange: true } });
+    const { dock } = await connectedDock({
+      baseScript: { silentSlotChange: true },
+      commandTries: 1,
+    });
     await expect(dock.selectSlot(2)).rejects.toThrow(/timeout/i);
   });
 });
@@ -240,7 +251,7 @@ describe('SmartDockClient robustness (unframed base stream)', () => {
     expect(info.hardwareType).toBe('base6');
   });
 
-  it('rejects on an E error response', async () => {
+  it('rejects when every try is answered E', async () => {
     const base = new LoopbackTransport({ capabilities: { framed: false } });
     base.setOnWrite((bytes, tr) => {
       if (dec(bytes) === 'SDV$') setTimeout(() => tr.notify(enc('E\r\n')), 0);
@@ -252,7 +263,12 @@ describe('SmartDockClient robustness (unframed base stream)', () => {
 
   it('times out when the base never answers a normal command', async () => {
     const base = new LoopbackTransport({ capabilities: { framed: false } });
-    const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
+    const dock = new SmartDockClient({
+      debug: false,
+      transport: base,
+      timeouts: FAST,
+      commandTries: 1,
+    });
     await dock.connect();
     await expect(dock.getDockInfo()).rejects.toThrow(/timeout/i);
   });
@@ -266,7 +282,8 @@ describe('SmartDockClient robustness (unframed base stream)', () => {
   });
 });
 
-describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=2)', () => {
+// The whole rule, with its timings, is in smartdock-retry.test.ts.
+describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=8)', () => {
   it('re-sends a command whose first reply is missed, then succeeds', async () => {
     let versionWrites = 0;
     const base = new LoopbackTransport({ capabilities: { framed: false } });
@@ -284,31 +301,37 @@ describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=2)', () => {
     expect(versionWrites).toBe(2); // re-sent exactly once
   });
 
-  it('gives up after exactly 2 attempts when no reply ever arrives', async () => {
+  it('gives up after commandTries attempts when no reply ever arrives', async () => {
     let versionWrites = 0;
     const base = new LoopbackTransport({ capabilities: { framed: false } });
     base.setOnWrite((bytes) => {
       if (dec(bytes) === 'SDV$') versionWrites += 1; // never answers
     });
-    const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
+    const dock = new SmartDockClient({
+      debug: false,
+      transport: base,
+      timeouts: FAST,
+      commandTries: 2,
+    });
     await dock.connect();
-    await expect(dock.getDockInfo()).rejects.toThrow(/timeout/i);
+    await expect(dock.getDockInfo()).rejects.toThrow(/timeout.*try 2 of 2/i);
     expect(versionWrites).toBe(2);
   });
 
-  it('does NOT retry on an explicit error response (fails fast)', async () => {
+  it('re-sends a command answered E, as a base refusing at random needs', async () => {
     let versionWrites = 0;
     const base = new LoopbackTransport({ capabilities: { framed: false } });
     base.setOnWrite((bytes, tr) => {
       if (dec(bytes) === 'SDV$') {
         versionWrites += 1;
-        setTimeout(() => tr.notify(enc('E\r\n')), 0);
+        const reply = versionWrites === 1 ? 'E\r\n' : 'V,2,3,0,5,0\r\n';
+        setTimeout(() => tr.notify(enc(reply)), 0);
       }
     });
     const dock = new SmartDockClient({ debug: false, transport: base, timeouts: FAST });
     await dock.connect();
-    await expect(dock.getDockInfo()).rejects.toThrow(/error response/i);
-    expect(versionWrites).toBe(1); // no re-send after an error reply
+    expect((await dock.getDockInfo()).hardwareType).toBe('base6');
+    expect(versionWrites).toBe(2);
   });
 });
 
