@@ -179,8 +179,10 @@ export type SmartDockHardwareType = 'base6' | 'base15' | 'basic' | 'unknown';
  * Map a base hardware-version byte to a family + slot count
  * (HwDriverShimmerDeviceDetails.java:313-321: BASE15→15 slots, BASE6→6 slots,
  * BASICDOCK→1). NB: in the Java driver the slot count actually comes from the
- * USB device descriptor, not the version byte — see the SmartDock README
- * hardware-verify note.
+ * USB device descriptor, not the version byte. The version byte alone was
+ * right on a Base6 and a Base15, both firmware 0.1.0 (25 Nov 2026); other
+ * firmware versions and board revisions are unconfirmed — see the SmartDock
+ * README hardware-verify note.
  */
 export function baseHardwareType(hardwareVersion: number): {
   hardwareType: SmartDockHardwareType;

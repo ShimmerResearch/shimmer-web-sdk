@@ -553,9 +553,14 @@ sooner, at the risk of taking a refusing base for no base.
   production base needs the remap.
 - **Base6-vs-15 detection.** `getDockInfo` derives family + slot count from the
   version reply's hardware-version field (`BASE_HARDWARE_IDS`: 1 → base15, 2 →
-  base6). In the Java driver the slot count actually comes from the **USB device
-  descriptor**, not the version byte — verify the version byte alone is
-  sufficient, or fall back to the occupancy-bitmap length.
+  base6), where the Java driver takes the slot count from the **USB device
+  descriptor**. On 25 Nov 2026 the version byte alone was right on both bases
+  this client ran on, each on firmware 0.1.0: the bench Base6 (`V,2,1,0,1,0`)
+  came back base6 with 6 slots, and a Base15 (hardware 1) base15 with 15, its
+  occupancy reaching slots 14 and 15. Still to confirm: that other base
+  firmware versions and board revisions report the same hardware byte. A byte
+  the SDK does not know gives `unknown` with 0 slots, and the host then has
+  only the occupancy-bitmap length to go on.
 - **Two-port assumption.** Real hardware presents the base control UART and the
   per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
   confirm the port enumeration / which is which on the target platform.
