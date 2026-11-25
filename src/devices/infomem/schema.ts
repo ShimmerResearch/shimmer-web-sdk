@@ -337,7 +337,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelRate.lis2dw12',
     label: 'WR Accel Rate',
-    desc: 'LIS2DW12 (Shimmer3R) rate — ConfigSetupByte0 bits 4-7 (SensorLIS2DW12.java:428).',
+    desc: 'LIS2DW12 (Shimmer3R) rate — ConfigSetupByte0 bits 4-7 (SensorLIS2DW12.java:428). The labels are the high-performance rates; in a low-power mode code 1 is 1.6 Hz and codes 7-9 deliver only 200 Hz.',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 4,
@@ -350,7 +350,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelLpm',
     label: 'WR Accel Low-Power Mode',
-    desc: 'ConfigSetupByte0 bit 1 (bitShiftLSM303DLHCAccelLPM=1, FW wrAccelLpModeLsb).',
+    desc: 'ConfigSetupByte0 bit 1 (bitShiftLSM303DLHCAccelLPM=1, FW wrAccelLpModeLsb). On a Shimmer3R (LIS2DW12) it only picks WHICH low-power mode the part uses while High-Performance Mode is off; with that off the part is in a low-power mode whatever this says. Consensys always sets it to the opposite of High-Performance Mode (SensorLIS2DW12.setLowPowerAccelWR).',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 1,
@@ -363,14 +363,30 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelHrm',
     label: 'WR Accel High-Resolution Mode',
-    desc: 'ConfigSetupByte0 bit 0 (bitShiftLSM303DLHCAccelHRM=0, FW wrAccelHrMode).',
+    desc: 'LSM303 (Shimmer3) high-resolution mode — ConfigSetupByte0 bit 0 (bitShiftLSM303DLHCAccelHRM=0, FW wrAccelHrMode).',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 0,
     width: 1,
     options: ON_OFF,
     group: 'wrAccel',
-    appliesTo: ALL,
+    appliesTo: SHIMMER3_ONLY,
+    configKey: 'imu.wrAccelHrm',
+  },
+  {
+    // The same bit as `wrAccelHrm`, under the name it has on this chip. Labelled
+    // "High-Resolution" here it read as a resolution setting, and turning it off
+    // put a Shimmer3R's LIS2DW12 into low-power mode at 256 Hz (DEV-1563).
+    key: 'wrAccelHrm.lis2dw12',
+    label: 'WR Accel High-Performance Mode',
+    desc: 'LIS2DW12 (Shimmer3R) high-performance mode — ConfigSetupByte0 bit 0 (FW wrAccelHrMode; Java mHighPerModeAccelWR). The firmware gives the part (this bit << 2) | low-power mode, so this bit alone decides high performance against low power. On: every rate up to 1600 Hz. Off: a low-power mode, which cannot deliver more than 200 Hz, so a sampling rate above that leaves packets with no new wide-range reading. Consensys turns it on whenever the sensor is enabled (SensorLIS2DW12.setDefaultLIS2DW12AccelSensorConfig).',
+    kind: 'bit',
+    layoutKey: 'idxConfigSetupByte0',
+    shift: 0,
+    width: 1,
+    options: ON_OFF,
+    group: 'wrAccel',
+    appliesTo: S3R_ONLY,
     configKey: 'imu.wrAccelHrm',
   },
 
