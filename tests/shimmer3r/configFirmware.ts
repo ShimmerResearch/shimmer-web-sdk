@@ -95,7 +95,23 @@ export interface ScriptedFirmwareOptions {
    * flag it rewrites) without disturbing what the write actually stored.
    */
   divergeReadback?: (bytes: Uint8Array) => void;
+  /**
+   * Emulate how LogAndStream up to v1.01.027 handles calibration in a
+   * SET_INFOMEM chunk (DEV-1562). The firmware copies config bytes 0-127 into
+   * its calibration dump only for a chunk that starts at offset 0, and bytes
+   * 128-255 only for one that starts at 128. After every chunk it copies the
+   * dump back over the calibration blocks. So calibration sent in a chunk that
+   * starts anywhere else is reverted, and the chunk is still ACKed.
+   *
+   * The blocks are the Shimmer3R's: LN accel, gyro, mag and WR accel at 34-117
+   * in page D, and alt accel and alt mag at 133-174 in page C.
+   */
+  calibSyncOnlyAtPageStart?: boolean;
 }
+
+/** Shimmer3R calibration blocks, `[start, end)`, per page. */
+const CALIB_BLOCKS_PAGE_D: ReadonlyArray<readonly [number, number]> = [[34, 118]];
+const CALIB_BLOCKS_PAGE_C: ReadonlyArray<readonly [number, number]> = [[133, 175]];
 
 export interface ScriptedFirmware {
   t: LoopbackTransport;
@@ -155,6 +171,16 @@ export async function scriptedFirmware(
   const store = opts.store ?? new Uint8Array(INFOMEM_SIZE);
   const calibRam = opts.calibRam ?? new Uint8Array(CALIB_RAM_SIZE);
   const cmds: number[][] = [];
+  // The firmware's calibration dump, as far as the config bytes see it: a
+  // copy of each calibration block, taken from the starting image.
+  const dump = store.slice();
+  const copyBlocks = (
+    from: Uint8Array,
+    to: Uint8Array,
+    blocks: ReadonlyArray<readonly [number, number]>,
+  ): void => {
+    for (const [s, e] of blocks) to.set(from.subarray(s, e), s);
+  };
 
   const t = new LoopbackTransport({
     ...(framed ? {} : { capabilities: { framed: false } }),
@@ -190,6 +216,11 @@ export async function scriptedFirmware(
         const len = b[1];
         const off = pageOffset(b[2] | (b[3] << 8));
         store.set(b.subarray(4, 4 + len), off);
+        if (opts.calibSyncOnlyAtPageStart) {
+          if (off === 0) copyBlocks(store, dump, CALIB_BLOCKS_PAGE_D);
+          else if (off === 128) copyBlocks(store, dump, CALIB_BLOCKS_PAGE_C);
+          copyBlocks(dump, store, [...CALIB_BLOCKS_PAGE_D, ...CALIB_BLOCKS_PAGE_C]);
+        }
         send([ACK]);
         return;
       }
