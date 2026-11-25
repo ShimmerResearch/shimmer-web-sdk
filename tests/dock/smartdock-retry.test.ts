@@ -6,8 +6,9 @@
  * UART byte received, so a byte that arrives while its main loop is busy is
  * lost (smartdock-firmware `CBase6/main.c` at 66532f8).
  *
- * So SmartDockClient sends a command up to 8 tries, 2 s after each try that
- * fails. A try fails on an `E`, on no answer in time, or, for a slot change, on
+ * So SmartDockClient sends a command up to 15 tries, 2 s after each try that
+ * fails: the same Base6 later refused one select 8 times in a row, so 8 was
+ * not enough. A try fails on an `E`, on no answer in time, or, for a slot change, on
  * an answer naming another slot (a slot, for `SDD$`), which may be a late
  * answer to an earlier command. An answer for what was asked that arrives
  * between tries is still taken. The call ends with one result.
@@ -134,7 +135,7 @@ describe('a command refused, then taken', () => {
     expect(triesFailed(status)).toEqual(
       [1, 2, 3, 4, 5].map(
         (n) =>
-          `SmartDock error response (select slot 2): refused (E), try ${n} of 8; ` +
+          `SmartDock error response (select slot 2): refused (E), try ${n} of 15; ` +
           'sending again in 2000 ms',
       ),
     );
@@ -169,8 +170,8 @@ describe('a command unanswered, then answered', () => {
     expect(base.sentCount('SDQ$')).toBe(3);
     expect(r.ms).toBe(2 * (QUERY_MS + RETRY_MS));
     expect(triesFailed(status)).toEqual([
-      'SmartDock response timeout (SDQ$): no answer within 1000 ms, try 1 of 8; sending again in 2000 ms',
-      'SmartDock response timeout (SDQ$): no answer within 1000 ms, try 2 of 8; sending again in 2000 ms',
+      'SmartDock response timeout (SDQ$): no answer within 1000 ms, try 1 of 15; sending again in 2000 ms',
+      'SmartDock response timeout (SDQ$): no answer within 1000 ms, try 2 of 15; sending again in 2000 ms',
     ]);
   });
 
@@ -199,14 +200,14 @@ describe('a command unanswered, then answered', () => {
 });
 
 describe('a command refused on every try', () => {
-  it('ends refused once, after the last of 8 tries', async () => {
+  it('ends refused once, after the last of 15 tries', async () => {
     const { base, dock, status } = await rig(new Base6().always('SDQ$', 'E\r\n'));
     const r = await run(() => dock.getSlotOccupancy());
     expect(r.ok).toBe(false);
-    expect(r.error?.message).toBe('SmartDock error response (SDQ$): refused (E), try 8 of 8');
-    expect(base.sent).toEqual(Array(TRIES).fill('SDQ$'));
-    expect(r.ms).toBe(7 * RETRY_MS); // 14 s in all
-    expect(triesFailed(status)).toHaveLength(7);
+    expect(r.error?.message).toBe('SmartDock error response (SDQ$): refused (E), try 15 of 15');
+    expect(base.sent).toEqual(Array(15).fill('SDQ$'));
+    expect(r.ms).toBe(28_000); // 14 waits of 2 s
+    expect(triesFailed(status)).toHaveLength(14);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -214,7 +215,7 @@ describe('a command refused on every try', () => {
     const base = new Base6().then('SDP,', TRIES, 'E\r\n');
     const { dock } = await rig(base);
     const r = await run(() => dock.selectSlot(2));
-    expect(r.error?.message).toMatch(/refused \(E\), try 8 of 8/);
+    expect(r.error?.message).toMatch(/refused \(E\), try 15 of 15/);
     expect(base.sentCount('SDP,02$')).toBe(TRIES);
     expect(dock.activeSlot).toBe(-1);
 
@@ -223,14 +224,27 @@ describe('a command refused on every try', () => {
     expect(next.ok).toBe(true);
   });
 
-  it('ends unanswered after 22 s for a query', async () => {
+  it('ends unanswered after 43 s for a query', async () => {
     const { base, dock } = await rig(new Base6().always('SDV$', ''));
     const r = await run(() => dock.getDockInfo());
     expect(r.error?.message).toBe(
-      'SmartDock response timeout (SDV$): no answer within 1000 ms, try 8 of 8',
+      'SmartDock response timeout (SDV$): no answer within 1000 ms, try 15 of 15',
     );
     expect(base.sentCount('SDV$')).toBe(TRIES);
-    expect(r.ms).toBe(8 * QUERY_MS + 7 * RETRY_MS);
+    expect(r.ms).toBe(43_000);
+    expect(r.ms).toBe(TRIES * QUERY_MS + (TRIES - 1) * RETRY_MS);
+  });
+
+  it('ends unanswered after 178 s for a slot change', async () => {
+    const { base, dock } = await rig(new Base6().always('SDP,', ''));
+    const r = await run(() => dock.selectSlot(2));
+    expect(r.error?.message).toBe(
+      'SmartDock response timeout (select slot 2): no answer within 10000 ms, try 15 of 15',
+    );
+    expect(base.sentCount('SDP,02$')).toBe(TRIES);
+    expect(r.ms).toBe(178_000);
+    expect(r.ms).toBe(TRIES * SLOT_CHANGE_MS + (TRIES - 1) * RETRY_MS);
+    expect(dock.activeSlot).toBe(-1);
   });
 });
 
@@ -250,7 +264,7 @@ describe('an answer for another slot', () => {
     await vi.advanceTimersByTimeAsync(5);
     base.says('P,01');
     expect(triesFailed(status)).toEqual([
-      'SmartDock select slot 2 failed: the base routes slot 1 ("P,01"), try 1 of 8 ' +
+      'SmartDock select slot 2 failed: the base routes slot 1 ("P,01"), try 1 of 15 ' +
         '(DOCK_CMD_ERR_FAIL_SET); sending again in 2000 ms',
     ]);
     expect(dock.activeSlot).toBe(1); // unchanged
@@ -295,9 +309,9 @@ describe('an answer for another slot', () => {
       const { dock } = await rig(base);
       base.always('SDP,04', `${answer}\r\n`);
       const r = await run(() => dock.selectSlot(4));
-      expect(r.error?.message).toMatch(/the base routes .*try 8 of 8 \(DOCK_CMD_ERR_FAIL_SET\)/);
+      expect(r.error?.message).toMatch(/the base routes .*try 15 of 15 \(DOCK_CMD_ERR_FAIL_SET\)/);
       expect(base.sentCount('SDP,04$')).toBe(TRIES);
-      expect(r.ms).toBe(7 * RETRY_MS);
+      expect(r.ms).toBe(14 * RETRY_MS);
       expect(dock.activeSlot).toBe(routed);
     }
   });
@@ -315,7 +329,7 @@ describe('an answer for another slot', () => {
     base.always('SDD$', 'P,03\r\n');
     const stuck = await run(() => dock.disconnectAllSlots());
     expect(stuck.error?.message).toBe(
-      'SmartDock SDD$ failed: the base routes slot 3 ("P,03"), try 8 of 8 (DOCK_CMD_ERR_FAIL_SET)',
+      'SmartDock SDD$ failed: the base routes slot 3 ("P,03"), try 15 of 15 (DOCK_CMD_ERR_FAIL_SET)',
     );
     expect(dock.activeSlot).toBe(3);
   });

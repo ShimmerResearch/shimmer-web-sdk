@@ -126,11 +126,15 @@ export const SMARTDOCK_DEFAULTS = Object.freeze({
    * arrives while the loop is busy is lost. A command short a byte is answered
    * `E` at its `$`; one that loses its `$` is not answered at all.
    *
+   * 15, not the 8 first chosen: the same Base6 later refused one select 8
+   * times in a row, so the HIL harness's Base6 driver went to 15
+   * (log-and-stream-common DEV-1533), and shimmer-host-core sends 15 too.
+   *
    * The cost is time when the base will not answer: a query refused on every
-   * try ends after 14 s, and unanswered after 22 s; a slot change unanswered,
-   * after 94 s.
+   * try ends after 28 s, and unanswered after 43 s; a slot change unanswered,
+   * after 178 s.
    */
-  CMD_RETRY_ATTEMPTS: 8,
+  CMD_RETRY_ATTEMPTS: 15,
   /**
    * How long after a try fails the command is sent again: the 2 s that got
    * every command through on that Base6.

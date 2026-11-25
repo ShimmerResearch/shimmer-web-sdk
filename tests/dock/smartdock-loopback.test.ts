@@ -283,7 +283,7 @@ describe('SmartDockClient robustness (unframed base stream)', () => {
 });
 
 // The whole rule, with its timings, is in smartdock-retry.test.ts.
-describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=8)', () => {
+describe('SmartDockClient base-command retry (CMD_RETRY_ATTEMPTS=15)', () => {
   it('re-sends a command whose first reply is missed, then succeeds', async () => {
     let versionWrites = 0;
     const base = new LoopbackTransport({ capabilities: { framed: false } });

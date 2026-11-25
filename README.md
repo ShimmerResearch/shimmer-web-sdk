@@ -508,8 +508,9 @@ ignoring unrelated / partial lines (resync).
 2026 a Base6 answered most slot changes with an `E` within 20 ms, and left others
 unanswered, through a power cycle; sent again every 2 s, each got through within
 6 tries. Its firmware keeps only the last UART byte received, so a byte that
-arrives while its main loop is busy is lost. So each command is sent up to **8**
-times (`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fails
+arrives while its main loop is busy is lost. The same base later refused one
+select 8 times in a row. So each command is sent up to **15** times
+(`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fails
 (`CMD_RETRY_INTERVAL_MS`):
 
 - A try fails on an `E`, on no answer in time, or, for a slot change, on an answer
@@ -524,7 +525,7 @@ times (`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fai
 
 The Java driver sends each command once, so Consensys fails on such a base. The
 cost is time when the base will not answer: a query refused on every try fails
-after 14 s, and unanswered after 22 s; a slot change unanswered, after 94 s. Each
+after 28 s, and unanswered after 43 s; a slot change unanswered, after 178 s. Each
 try that fails is reported through `onStatus`. A host probing a port that may not
 be a base can pass `commandTries` (and `timeouts.retryIntervalMs`) to fail
 sooner, at the risk of taking a refusing base for no base.
@@ -534,9 +535,10 @@ sooner, at the risk of taking a refusing base for no base.
 - **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
   settle delay are ported as-is; real base latency (especially how long the
   per-Shimmer UART takes to become usable after routing) needs measuring.
-- **Sending again.** 8 tries 2 s apart is what got every command through on the
+- **Sending again.** Tries 2 s apart are what got every command through on the
   bench Base6 that refused them, sent from the HIL harness rather than from this
-  client. This client has not yet driven a base with it.
+  client. The harness went from 8 tries to 15 after one select was refused 8
+  times in a row. This client has not yet driven a base with it.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only

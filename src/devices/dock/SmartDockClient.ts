@@ -98,7 +98,7 @@ export interface SmartDockClientOptions extends ShimmerClientOptions {
   }>;
   /**
    * How many times in all a base command is sent while each try fails.
-   * Default {@link SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS} (8), which a base
+   * Default {@link SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS} (15), which a base
    * that refuses commands at random needs. A host probing a port that may not
    * be a base at all can pass fewer, at the risk of taking a refusing base for
    * no base.
@@ -161,7 +161,7 @@ export interface SlotOccupancy {
  *
  * A base can refuse commands at random, so a command that is refused (`E`),
  * unanswered, or, for a slot change, answered with another slot is sent again,
- * up to {@link SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS} (8) tries 2 s apart; see
+ * up to {@link SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS} (15) tries 2 s apart; see
  * {@link _sendWithRetry}. Each call still ends with one result.
  *
  * Transport injection is mandatory — `connect()` with no base transport throws.
@@ -574,7 +574,7 @@ export class SmartDockClient extends BaseShimmerClient {
    * arrive while its main loop is busy (see
    * {@link SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS}). So:
    *
-   * - The command is sent up to `commandTries` (8) times, `retryIntervalMs`
+   * - The command is sent up to `commandTries` (15) times, `retryIntervalMs`
    *   (2 s) after each try that fails.
    * - A try fails on an `E`, on no answer within `timeoutMs`, or on an answer
    *   `judge` calls `otherSlot`. That answer may be a late one to an earlier
