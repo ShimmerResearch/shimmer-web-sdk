@@ -225,9 +225,14 @@ const INFOMEM_MAC_OFFSET = 224;
  * and a 128-byte page written over BLE stored exactly on a Shimmer3R on
  * v1.01.027 (unit 5307, IF820 v1.4.16.16).
  *
- * HARDWARE-VERIFY: that bench write went through Windows' Bluetooth stack
- * (bleak), not a browser's Web Bluetooth, and nothing has tried an RN4678
- * Shimmer3 over BLE or an IF820 test build.
+ * Through this client and a browser's Web Bluetooth (headless Chrome, the
+ * same unit and firmware), the default sent three 132-byte GATT writes at 0,
+ * 128 and 256, and every calibration block read back exactly, in the config
+ * bytes and in the dump. `chunkBytes: 64` on the same link reproduced the
+ * DEV-1562 mix.
+ *
+ * HARDWARE-VERIFY: nothing has tried an RN4678 Shimmer3 over BLE or an IF820
+ * test build.
  */
 const INFOMEM_WRITE_CHUNK_BYTES = INFOMEM_PAGE_SIZE;
 
