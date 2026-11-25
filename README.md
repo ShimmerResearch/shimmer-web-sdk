@@ -205,6 +205,16 @@ Three rules worth knowing before reading the numbers:
   hands back a dump for inspection; `applyCalibDump(dump)` is what makes the
   stream use it. Which numbers are in force, per group and per range, is what
   `calibrationInfo` reports.
+- **The gyro offset can move while you stream.** With derived-sensor bit 29
+  (`GYRO_ON_THE_FLY_CAL`) set, the SDK runs the Java driver's on-the-fly
+  offset calibration, as Consensys does. Whenever the last round(fs) samples
+  are still (every calibrated axis has a standard deviation under 1.2 deg/s),
+  their raw mean becomes the gyro offset from the next sample on.
+  `Shimmer3RClient` takes the bit from the configuration it reads or writes. On
+  `Shimmer3Client` a host sets `gyroOnTheFlyCal` itself.
+  `calibrationInfo.gyroOnTheFly` says whether it is enabled and whether an
+  estimate is in force. The SD decoder does the same per file, from the header,
+  and reports it on the gyro entry of `header.calibration`.
 
 `client.timelineState` says how absolute time was fixed: `rwc-aligned` (exact,
 Shimmer3R — its packet timestamp is the low 24 bits of the same counter
@@ -338,6 +348,32 @@ a recording. That status is reported through `onDeviceStatus`, and
 `getStatus()` and `getBattery()` request the status and battery readings on
 demand.
 
+#### A classic link left quiet answers late
+
+A classic link that has carried nothing for a while answers its next command
+late: about 1.8 s after 10-20 s of quiet, on a Shimmer3 and a Shimmer3R alike
+(Windows; measured by `shimmer-host-core`). BLE does not slow down this way.
+`Shimmer3RClient` follows the rule the Java driver and `shimmer-host-core` do:
+
+- **A keep-alive.** Once a byte-stream link (any `WebSerialTransport`, or a
+  transport with `capabilities.framed = false`) has been quiet for
+  `idleKeepAliveMs`, 5 s by default, the client reads the device's status
+  (GET_STATUS). Until it knows how long a status reply is, it reads the hardware
+  and firmware versions instead, and caches them as `readDeviceVersion()` and
+  `readFwVersion()` would. It sends nothing alongside another command, and a
+  command issued while it is in flight waits for it. It pauses while streaming,
+  while the sensor logs to its SD card, and during an SD transfer, the data-rate
+  test, a factory test or a Bluetooth module update. It stops when the link
+  ends. It writes nothing to `onStatus`, and reports a status on
+  `onDeviceStatus` only when it differs from the last one the link reported.
+  Set `idleKeepAliveMs: 0` (option or property) to turn it off.
+- **A 2 s ACK wait.** On a byte-stream link every command waits at least
+  `BYTE_STREAM_LINK.MIN_ACK_WAIT_MS` (2000 ms) for its ACK, whatever its own
+  timeout. That covers a command sent while the keep-alive is off or paused.
+
+`Shimmer3Client` has no keep-alive yet; its ACK wait is 2000 ms
+(`SHIMMER3_DEFAULTS.ACK_TIMEOUT_MS`).
+
 ### Wired / dock UART (`WiredShimmerClient`)
 
 > **Verification status: code-complete, pending hardware.** The protocol is
@@ -466,26 +502,87 @@ delay (`SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD`) before the per-Shimmer UART is
 usable. Normal base-command reads use the ported **1000 ms** timeout
 (`SMARTDOCK_RESPONSE_TIMEOUT`). Like D1, the base UART is an unframed byte
 stream, so the client accumulates bytes and extracts `\r\n`-terminated lines,
-ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
+ignoring unrelated / partial lines (resync).
+
+**A base can refuse commands at random, so a command is sent again.** On 24 Nov
+2026 a Base6 answered most slot changes with an `E` within 20 ms, and left others
+unanswered, through a power cycle; sent again every 2 s, each got through within
+6 tries. Its firmware keeps only the last UART byte received, so a byte that
+arrives while its main loop is busy is lost. The same base later refused one
+select 8 times in a row. So each command is sent up to **15** times
+(`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fails
+(`CMD_RETRY_INTERVAL_MS`):
+
+- A try fails on an `E`, on no answer in time, or, for a slot change, on an answer
+  naming another slot (a slot, for `SDD$`). That answer may be a late one to an
+  earlier command, so it is not taken.
+- The answer asked for still counts if it arrives between tries, and the command
+  is not sent again. Anything else between tries, an `E` included, is dropped.
+- The call ends with one result: the answer, or the last try's failure. When the
+  last try names another slot, `activeSlot` is the slot it named.
+- Losing the link, or calling `disconnect()`, ends the command at once, and every
+  call queued behind it, without sending anything more.
+
+The Java driver sends each command once, so Consensys fails on such a base. The
+cost is time when the base will not answer: a query refused on every try fails
+after 28 s, and unanswered after 43 s; a slot change unanswered, after 178 s. Each
+try that fails is reported through `onStatus`. A host probing a port that may not
+be a base can pass `commandTries` (and `timeouts.retryIntervalMs`) to fail
+sooner, at the risk of taking a refusing base for no base.
 
 **Hardware-verify items** (need a real Base-6 / Base-15 to confirm):
 
 - **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
-  settle delay are ported as-is; real base latency (especially how long the
-  per-Shimmer UART takes to become usable after routing) needs measuring.
+  settle delay are ported as-is. On 25 Nov 2026 both were enough on both bases
+  this client ran on, with idle Shimmer3s on v1.01.009 and v1.01.010. Every
+  select was answered inside the 10 s, and every per-slot call passed after the
+  settle: an identify, a status read and an InfoMem read of each slot, each
+  after its own select. The status read is tried once and never failed.
+  Identify's first read, the MAC, is tried twice, and the run records don't say
+  whether it ever needed the second. Still to measure: how long a select takes
+  to be answered, and how soon after routing the per-Shimmer UART is usable,
+  which may be well under 1500 ms.
+- **Sending again.** Tries 2 s apart are what got every command through on the
+  bench Base6 that refused them, sent from the HIL harness. The harness went
+  from 8 tries to 15 after one select was refused 8 times in a row. This client
+  ran the rule from Node on 25 Nov 2026, on that Base6 and on a Base15 (both
+  firmware 0.1.0), three runs on each: `getDockInfo`, `getSlotOccupancy`, an
+  identify, status and InfoMem read of each docked Shimmer3 (four on the Base6;
+  six on the Base15, slots 14 and 15 included), and `disconnectAllSlots`, all
+  passing. In each run the first try of `SDQ$`, `SDP,01$` and `SDD$` was cut
+  short a byte and refused with `E`, and the first `SDV$` was sent without its
+  `$` and left unanswered; each was taken on the second try. Not yet seen on a
+  base: two or more failed tries in a row, and `SDC,NN$`.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only
-  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented — confirm no
-  production base needs the remap.
+  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented. On 25 Nov
+  2026 the decoding was right on both bases this client ran on: the Base6
+  reported slots 1-4 and the Base15 slots 1, 3, 4, 6, 14 and 15, exactly where
+  the Shimmer3s were docked, and identify found a unit in each. The Java
+  remaps only a Base15 whose version reply gives firmware identifier 1 and
+  version 0.0.0-0.0.5 (`SmartDockUart.java:818-823`). That Base15 reports
+  identifier 1 and version 0.1.0 (1.0.1.0), outside the range, and needed no
+  remap. Still to confirm: that no production base runs firmware in the remap
+  range.
 - **Base6-vs-15 detection.** `getDockInfo` derives family + slot count from the
   version reply's hardware-version field (`BASE_HARDWARE_IDS`: 1 → base15, 2 →
-  base6). In the Java driver the slot count actually comes from the **USB device
-  descriptor**, not the version byte — verify the version byte alone is
-  sufficient, or fall back to the occupancy-bitmap length.
+  base6), where the Java driver takes the slot count from the **USB device
+  descriptor**. On 25 Nov 2026 the version byte alone was right on both bases
+  this client ran on, each on firmware 0.1.0: the bench Base6 (`V,2,1,0,1,0`)
+  came back base6 with 6 slots, and a Base15 (hardware 1) base15 with 15, its
+  occupancy reaching slots 14 and 15. Still to confirm: that other base
+  firmware versions and board revisions report the same hardware byte. A byte
+  the SDK does not know gives `unknown` with 0 slots, and the host then has
+  only the occupancy-bitmap length to go on.
 - **Two-port assumption.** Real hardware presents the base control UART and the
-  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
-  confirm the port enumeration / which is which on the target platform.
+  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`). On
+  25 Nov 2026 that held on both bases this client ran on, from Node on Windows:
+  base commands went to one port, and each docked Shimmer's identify, status
+  and InfoMem reads to the other (COM11 and COM14 for the bench Base6). The
+  runner was told which port was which. Still to confirm: how the two ports
+  enumerate through Web Serial in a browser and on macOS or Linux, and how a
+  host tells them apart without being told.
 
 ## Factory Self-Test (Shimmer3 / Shimmer3R)
 
@@ -556,6 +653,165 @@ toggle with no "set", `setRedLed(on)` reads status bit 7 either side of it,
 writes nothing when the LED is already as asked, and throws rather than
 reporting success if the sensor's flag does not follow. Bluetooth only: the
 dock protocol has no LED command.
+
+## Shimmer3R Bluetooth Module Update (IF820 OTA)
+
+The Shimmer3R's Bluetooth module (Ezurio Vela IF820, an Infineon CYW20820)
+is updated over BLE through Infineon's OTA firmware upgrade service: the same
+protocol `WsOtaUpgrade.exe` uses. The Shimmer3R's own MCU cannot reflash it,
+so a host does it directly, on the BLE connection it already has open.
+
+```ts
+import {
+  Shimmer3RClient,
+  if820OtaSensorSupport,
+  isIf820UpdateAvailable,
+} from '@shimmerresearch/shimmer-web-sdk';
+
+const client = new Shimmer3RClient(); // requests the OTA services in optionalServices
+await client.connect();
+const hw = await client.readDeviceVersion();
+const fw = await client.readFwVersion();
+const sensor = {
+  hardwareVersion: hw.hardwareVersion,
+  firmwareId: fw.fwId,
+  major: fw.major,
+  minor: fw.minor,
+  internal: fw.patch,
+};
+const current = await client.readBtModuleVersion();
+if (if820OtaSensorSupport(sensor).supported && isIf820UpdateAvailable(current, '1.4.18.18')) {
+  const image = await (await fetch('firmware/if820/module.ota.bin')).arrayBuffer();
+  await client.updateBtModuleFirmware(image, {
+    onProgress: ({ currentBytes, totalBytes }) => console.log(currentBytes / totalBytes),
+  });
+  // The module resets onto the new image and the link drops. Reconnect without
+  // a picker by handing the same BluetoothDevice to a new WebBluetoothTransport.
+}
+```
+
+- **Shimmer3R on LogAndStream v1.01.022 or later only.** That release is the
+  first to recover by itself once the module restarts on its new image, and
+  to repair the SPP MTU an update leaves broken on v1.4.18.x.
+  `if820OtaSensorSupport` says whether a sensor qualifies, with a message to
+  show when it does not, and `updateBtModuleFirmware` refuses any other
+  sensor.
+- **One update per device at a time.** A second update on the same device,
+  from any client or a direct `runIf820OtaUpdate`, is refused until the first
+  has finished, including any connect, reconnect or write it gave up on but
+  which may still be running on the link. A failed update whose command
+  answer timed out leaves the link dropped; reconnect before trying again.
+- **BLE only.** A Classic Bluetooth or USB link cannot reach the module's GATT
+  service.
+- **The OTA services must be granted at connect time.** `Shimmer3RClient`
+  requests them by default. A host that builds its own `requestDevice` options
+  must include `client.requestedOptionalServices()`, or the update cannot run
+  without a second device picker.
+- **512-byte writes first, 63 if the link stalls.** Whether the module accepts
+  large writes depends on the packet airtime the two radios agreed, which a
+  page cannot see. A stalled first write makes the update drop and re-open
+  the link (no picker) and continue at 63 bytes, so expect one disconnect
+  during the update in that case; `onRetry` reports it. Through
+  `updateBtModuleFirmware` that reconnect goes through the client's own
+  transport, so the client is fully connected again afterwards; a host
+  calling `runIf820OtaUpdate` with its own transport on the link passes a
+  `reconnect` that does the same.
+- **Interruption is safe.** The module switches images only after it has
+  verified the whole image's CRC-32, so a dropped link or a cancel leaves the
+  old firmware running, and the update can be run again. The one exception
+  is the VERIFY itself: once it is written the module may already be
+  switching, so a cancel then is ignored, and a failure after it says the
+  new firmware may have been accepted (reconnect and read the version).
+- **Never arm reboot-on-disconnect for it.** Rebooting the MCU when the
+  link drops after VERIFY cuts the module's power while it is still switching
+  images, and it comes back on the old one. LogAndStream v1.01.022 and later
+  reboot the MCU themselves once the module is back, so the new version is
+  reported after reconnecting.
+
+`runIf820OtaUpdate(device, image, opts)` is the same flow without a client,
+for any object that has the `BluetoothDevice`'s `gatt` server. Run end to end
+on a Shimmer3R from Chrome; the stalled-link fallback (reconnect, then 63-byte
+writes) is not yet hardware-verified under Web Bluetooth: `HARDWARE-VERIFY:`.
+
+## Reconnecting After a Dropped Link
+
+A sensor that walks out of range, or is switched off, drops the link. The
+browser's pickers appear only when a page asks for a new device
+(`requestDevice()`, `requestPort()`), so a page that kept what it was given
+reconnects with no picker and no click:
+
+- **BLE:** a new `WebBluetoothTransport` with `device:` set to the same
+  `BluetoothDevice` reconnects through `device.gatt.connect()`.
+- **Classic Bluetooth:** a new `WebSerialTransport` with `port:` set to the
+  same `SerialPort` reopens it, which brings the RFCOMM link up again. Keep
+  the port when connecting: the transport lets go of it on disconnect.
+
+`startAutoReconnect` runs the tries; the caller says what one try is.
+
+```ts
+import {
+  Shimmer3RClient,
+  WebBluetoothTransport,
+  SHIMMER3R_DEFAULTS,
+  planStreamResume,
+  startAutoReconnect,
+} from '@shimmerresearch/shimmer-web-sdk';
+
+client.onDisconnect = () => {
+  // Fired only for a drop the page did not ask for, never by disconnect().
+  const before = { streaming: wasStreaming, sdLogging: wasLogging };
+  const device = keptDevice;
+  const handle = startAutoReconnect({
+    attempt: async () => {
+      client = new Shimmer3RClient({
+        transport: new WebBluetoothTransport({
+          serviceUUID: SHIMMER3R_DEFAULTS.SERVICE_UUID,
+          writeCharUUID: SHIMMER3R_DEFAULTS.CHAR_RX_UUID,
+          notifyCharUUID: SHIMMER3R_DEFAULTS.CHAR_TX_UUID,
+          device, // no picker
+          defaultWriteWithResponse: true,
+        }),
+      });
+      await client.connect();
+    },
+    abandon: () => device.gatt?.disconnect(), // ends a connect stuck pending
+    onAttemptFailed: ({ nextDelayMs }) => show(`retrying in ${nextDelayMs} ms`),
+  });
+  cancelButton.onclick = () => handle.cancel();
+  handle.done.then(async ({ outcome }) => {
+    if (outcome !== 'connected') return;
+    const action = planStreamResume(before, await client.getStatus());
+    if (action === 'start-streaming') await client.startStreaming();
+    if (action === 'start-streaming-and-logging') await client.startStreamingAndLogging();
+  });
+};
+```
+
+- **Every try has a deadline** (`attemptTimeoutMs`, 30 s). On Windows a
+  `gatt.connect()` to a sensor that is out of range, or whose bond the PC holds
+  stale, can stay pending forever (DEV-845). An overrun try is abandoned: its
+  `signal` aborts and `abandon` is called. If it succeeds anyway, `abandon` is
+  called again with `late: true`, so the link it opened can be closed.
+- **The waits grow:** 1 s before the first try, then 2, 4, 8 and 15 s at most
+  (`initialDelayMs`, `retryDelayMs`, `backoffFactor`, `maxDelayMs`). It keeps
+  going until cancelled unless `maxAttempts` or `maxDurationMs` is set.
+  `reconnectDelayMs` and `nextReconnectDelayMs` give the schedule on their own.
+- **`cancel()` is immediate.** It abandons a try in progress without waiting
+  for it, and `done` resolves `'cancelled'`.
+- **What to send once back is `planStreamResume`'s answer.** On a lost link
+  the firmware stops the stream and leaves an SD log running, so a stream with
+  a log comes back as a plain stream while the log is still running, and as a
+  stream and log only once the status says the log ended too. With no status
+  it never starts a second log on a guess.
+- **Data sent while the link was down is lost.** The firmware does not buffer
+  it for the host; an SD log, if one was running, has it.
+- **Not across a page reload.** The device or port object is gone then, and
+  getting it back without a picker needs `navigator.bluetooth.getDevices()`,
+  which Chrome still keeps behind a flag.
+
+`HARDWARE-VERIFY:` the loop and the resume rule are tested against fakes and
+the firmware source; reconnecting a real sensor over BLE and Classic Bluetooth
+from Chrome has not been run yet.
 
 ## Building
 
@@ -633,6 +889,7 @@ src/
   devices/
     calibration/
       streamChannels.ts         ← the one per-channel conversion table
+      gyroOnTheFly.ts           ← gyro on-the-fly offset re-estimation (bit 29)
       gsr.ts                    ← GSR µS / kΩ / range, shared by both clients
       sensorIds.ts              ← SC_SENSOR ids, dump → per-group calibration
     pressure/                   ← Bosch BMP180 / 280 / 390 / 581 compensation

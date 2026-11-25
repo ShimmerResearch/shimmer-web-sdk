@@ -36,4 +36,13 @@ export type { SdLogDataType, SdLogChannelSpec } from './channels.js';
 export { parseSdLogHeader } from './header.js';
 export { decodeSdLogFile, decodeSdSession } from './decode.js';
 export type { SdLogDecodeOptions, SdLogDecodeResult } from './decode.js';
-export { parseSdSessionName, parseSdTrialFolderName } from './naming.js';
+export {
+  parseSdSessionName,
+  parseSdTrialFolderName,
+  SD_DATA_ROOT,
+  SD_COMPANION_KINDS,
+  sdCompanionKindOf,
+  sdCompanionPathFor,
+  sdDataPathForCompanion,
+} from './naming.js';
+export type { SdCompanionKind } from './naming.js';

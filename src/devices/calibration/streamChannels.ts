@@ -34,11 +34,13 @@ import { calibrateU12AdcValue } from '../shimmer3r/calibration.js';
 import { calibrateExgSample, type ExgSampleResolution } from '../exg/calibration.js';
 import type { ExgBanks } from '../exg/knobs.js';
 import { compensatePressure } from '../pressure/compensate.js';
+import { SOUND_LEVEL_UNIT, soundLevelDbA } from '../audio/soundLevel.js';
 import type { PressureCalibration } from '../pressure/types.js';
 import { calibrateGsrChannel } from './gsr.js';
 import { applyStreamingCalibration, type StreamingImuRanges } from './streaming.js';
 import type { KinematicCalibration } from './kinematic.js';
 import type { ImuFamily, InertialGroup } from './defaults.js';
+import type { GyroOnTheFlyCal, GyroOnTheFlyInfo } from './gyroOnTheFly.js';
 
 // ---------------------------------------------------------------------------
 // ADC constants
@@ -80,6 +82,8 @@ export interface StreamCalibrationState {
   device?: Partial<Record<InertialGroup, KinematicCalibration>>;
   /** Whether to calibrate the inertial groups at all. */
   emitInertial: boolean;
+  /** The gyro on-the-fly offset estimator, or `null` when bit 29 is clear. */
+  gyroOnTheFly?: GyroOnTheFlyCal | null;
   /** The configured GSR range: 0-3 fixed, 4 auto. */
   gsrRange: number;
   /** Both ExG chips' register banks, or `null` when the host has not read them. */
@@ -205,6 +209,16 @@ export const SCALAR_CALIBRATORS: Readonly<Record<string, ScalarCalibrator>> = Ob
     unit: CHANNEL_UNITS.NO_UNITS,
     calibrate: (raw) => raw,
   },
+
+  /*
+   * The Shimmer3R sound level (DEV-1413): 0.01 dB(A) counts, nominal. The
+   * no-level value, 0x8000, calibrates to NaN rather than -327.68 dB, and the
+   * field is still added, so a frame keeps its width while capture settles.
+   */
+  SOUND_LEVEL: {
+    unit: SOUND_LEVEL_UNIT,
+    calibrate: (raw) => soundLevelDbA(raw),
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -283,6 +297,7 @@ export function calibrateStreamFrame(oc: ObjectCluster, state: StreamCalibration
       family: state.family,
       ranges: state.ranges,
       device: state.device,
+      gyroOnTheFly: state.gyroOnTheFly,
     });
   }
 }
@@ -316,6 +331,12 @@ export interface StreamCalibrationInfo {
       }
     >
   >;
+  /**
+   * The gyro on-the-fly offset calibration (derived-sensor bit 29): whether it
+   * is enabled, and whether an estimate is replacing the offset of the gyro
+   * calibration in force.
+   */
+  gyroOnTheFly: GyroOnTheFlyInfo;
   gsr: { range: number };
   exg: {
     source: ExgCalibrationSource;

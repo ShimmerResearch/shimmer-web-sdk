@@ -221,6 +221,30 @@ export interface InfoMemLayout {
   idxMaxExpLengthLsb: number;
   idxMacAddress: number;
   idxSDConfigDelayFlag: number;
+  /**
+   * Configuration byte 232 (`NV_BUTTON_LOG_MODE`): button mode, log triggers
+   * and the TTL input, on LogAndStream firmware with the event channel
+   * (DEV-971). See `devices/events/buttonLogMode.ts`.
+   *
+   * Undefined unless {@link InfoMemContext.eventChannel} says the firmware has
+   * it. LogAndStream_Shimmer3R v1.01.026 is the first Shimmer3R release with
+   * it, and no Shimmer3 release has it yet. The development builds before a
+   * release report the version of the release before them, so a host asks the
+   * device (`Shimmer3RClient.supportsEventChannel`). Older firmware
+   * never writes the byte and leaves it at 0xFF, which reads as "as before".
+   */
+  idxButtonLogMode?: number;
+  /**
+   * Configuration byte 233 (`NV_AUDIO_MODE`): what a Shimmer3R records from
+   * its microphone while it logs to SD (DEV-99). See `devices/audio/mode.ts`.
+   *
+   * Undefined unless {@link InfoMemContext.audio} says the firmware has it, as
+   * `Shimmer3RClient.supportsAudio` answers: from LogAndStream_Shimmer3R
+   * v1.01.026, the first release with it, by the version alone; on v1.01.025,
+   * which the development builds before it report, by asking the device.
+   * Older firmware leaves the byte at 0xFF, which reads as off.
+   */
+  idxAudioMode?: number;
   idxBtFactoryReset: number;
 
   // InfoMem B
@@ -487,6 +511,8 @@ export function resolveInfoMemLayout(ctx: InfoMemContext): InfoMemLayout {
     idxMaxExpLengthLsb: 128 + 95, // 223
     idxMacAddress: 128 + 96, // 224
     idxSDConfigDelayFlag: 128 + 102, // 230
+    idxButtonLogMode: ctx.eventChannel === true && isSdLoggingFirmware(ctx) ? 128 + 104 : undefined, // 232
+    idxAudioMode: ctx.audio === true && isSdLoggingFirmware(ctx) ? 128 + 105 : undefined, // 233
     idxBtFactoryReset: 0,
 
     // B page. Java `idxNode0` = 128+128 = 256 with `maxNumOfExperimentNodes`

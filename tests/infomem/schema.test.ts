@@ -41,6 +41,11 @@ import {
   type Shimmer3SensorOption,
 } from '../../src/devices/shimmer3/sensorOptions.js';
 import { CTX, fullFieldInfoMem } from './fixtures.js';
+import {
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+} from '../../src/devices/events/buttonLogMode.js';
+import { AUDIO_MODE_OPTIONS } from '../../src/devices/audio/mode.js';
 
 const field = (key: string): InfoMemFieldDefinition => {
   const f = SHIMMER3_INFOMEM_FIELD_SCHEMA.find((d) => d.key === key);
@@ -54,16 +59,19 @@ describe('SHIMMER3_INFOMEM_FIELD_SCHEMA — structural invariants', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it('every field names a group that exists', () => {
-    const ids = new Set(SHIMMER3_INFOMEM_FIELD_GROUPS.map((g) => g.id));
+  it('every field names a group or subgroup that exists', () => {
+    const ids = new Set(
+      SHIMMER3_INFOMEM_FIELD_GROUPS.flatMap((g) => [g.id, ...(g.subgroups ?? []).map((s) => s.id)]),
+    );
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       expect(ids.has(f.group), `${f.key} → ${f.group}`).toBe(true);
     }
   });
 
   it('every field resolves to a real byte index in both contexts', () => {
-    for (const ctx of [CTX.modernShimmer3, CTX.shimmer3R]) {
-      const layout = resolveInfoMemLayout(ctx);
+    // With the event channel and audio, so bytes 232 and 233 are in the layout too.
+    for (const base of [CTX.modernShimmer3, CTX.shimmer3R]) {
+      const layout = resolveInfoMemLayout({ ...base, eventChannel: true, audio: true });
       for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
         const idx = resolveFieldIndex(f, layout);
         expect(Number.isInteger(idx), f.key).toBe(true);
@@ -170,7 +178,14 @@ describe('option tables come from devices/shimmer3/sensorOptions.ts', () => {
   }
 
   it('every option-bearing field is either a shared table or the local ON_OFF pair', () => {
-    const shared = new Set<unknown>(EXPECTED.map(([, table]) => table));
+    // Byte 232's two tables are the event channel module's own, not Java's,
+    // and byte 233's is the audio module's.
+    const shared = new Set<unknown>([
+      ...EXPECTED.map(([, table]) => table),
+      BUTTON_MODE_OPTIONS,
+      LOG_TRIGGER_OPTIONS,
+      AUDIO_MODE_OPTIONS,
+    ]);
     for (const f of SHIMMER3_INFOMEM_FIELD_SCHEMA) {
       if (!f.options) continue;
       if (shared.has(f.options)) continue;
@@ -227,6 +242,27 @@ describe('infoMemFieldsFor — generation gating', () => {
     for (const g of ['shimmer3-old-imu', 'shimmer3-new-imu', 'shimmer3r'] as const) {
       const rates = keysFor(g).filter((k) => k.startsWith('wrAccelRate.'));
       expect(rates, g).toHaveLength(1);
+    }
+  });
+
+  it('shows exactly one ConfigSetupByte0 bit-0 field per generation, named for the chip', () => {
+    // On a Shimmer3R the bit is the LIS2DW12's high-performance mode; labelled
+    // "High-Resolution" it read as a resolution setting, and clearing it put
+    // the part in a low-power mode capped at 200 Hz (DEV-1563).
+    for (const g of ['shimmer3-old-imu', 'shimmer3-new-imu', 'shimmer3r'] as const) {
+      const bit0 = keysFor(g).filter((k) => k === 'wrAccelHrm' || k.startsWith('wrAccelHrm.'));
+      expect(bit0, g).toHaveLength(1);
+    }
+    expect(keysFor('shimmer3r')).toContain('wrAccelHrm.lis2dw12');
+    expect(keysFor('shimmer3-old-imu')).toContain('wrAccelHrm');
+    expect(keysFor('shimmer3-new-imu')).toContain('wrAccelHrm');
+    const hpm = field('wrAccelHrm.lis2dw12');
+    expect(hpm.label).toBe('WR Accel High-Performance Mode');
+    expect(hpm.label).not.toMatch(/resolution/i);
+    expect(field('wrAccelHrm').label).toBe('WR Accel High-Resolution Mode');
+    // The same bit and the same model key, so parse/generate are unchanged.
+    for (const k of ['layoutKey', 'shift', 'width', 'configKey'] as const) {
+      expect(hpm[k], k).toEqual(field('wrAccelHrm')[k]);
     }
   });
 
@@ -519,7 +555,7 @@ describe('every schema field writes ONLY into its own declared bytes', () => {
   }
 
   for (const ctx of [CTX.modernShimmer3, CTX.shimmer3R] as const) {
-    const layout = resolveInfoMemLayout(ctx);
+    const layout = resolveInfoMemLayout({ ...ctx, eventChannel: true });
     const generation: Shimmer3Generation = layout.isShimmer3R ? 'shimmer3r' : 'shimmer3-old-imu';
 
     it(`${generation}: no field touches a byte it does not declare, and the value reads back`, () => {

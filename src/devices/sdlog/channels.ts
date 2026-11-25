@@ -13,6 +13,7 @@
  */
 
 import { CHANNEL_UNITS } from '../../core/units.js';
+import { SOUND_LEVEL_CHANNEL_ID, SOUND_LEVEL_NAME, SOUND_LEVEL_UNIT } from '../audio/soundLevel.js';
 import { SDLogHeaderBitmask as BM, hasSensorBit } from './constants.js';
 import type { SdLogChannel, SdLogPressureSensor } from './types.js';
 
@@ -366,6 +367,16 @@ const SHIMMER3R_SIGNAL_ID_TABLE: Readonly<Record<number, SdLogChannelSpec>> = Ob
   0x26: uncal('Exg2_CH2_16Bit', 'i16r'),
   0x27: uncal('BRIDGE_AMP_HIGH', 'u12'),
   0x28: uncal('BRIDGE_AMP_LOW', 'u12'),
+  // The sound level (DEV-1413), emitted calibrated: nominal dB(A), NaN for
+  // the no-level value 0x8000. Without this entry the catch-all would read
+  // it as u12 and turn a negative count into a large positive one.
+  [SOUND_LEVEL_CHANNEL_ID]: {
+    name: SOUND_LEVEL_NAME,
+    unit: SOUND_LEVEL_UNIT,
+    calibrated: true,
+    dataType: 'i16',
+    sizeBytes: 2,
+  },
 });
 
 /**

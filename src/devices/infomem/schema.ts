@@ -27,6 +27,12 @@
 import type { InfoMemContext } from './types.js';
 import { HW_ID, type InfoMemLayout } from './layout.js';
 import {
+  BUTTON_LOG_MODE,
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+} from '../events/buttonLogMode.js';
+import { AUDIO_MODE_BYTE, AUDIO_MODE_OPTIONS } from '../audio/mode.js';
+import {
   SHIMMER3_ADXL371_ACCEL_RATE_OPTIONS,
   SHIMMER3_BMP180_PRESSURE_RESOLUTION_OPTIONS,
   SHIMMER3_BMP581_PRESSURE_OVERSAMPLING_OPTIONS,
@@ -100,6 +106,14 @@ export interface InfoMemFieldDefinition {
   readonly shift?: number;
   /** Bit width within the byte (`bit` kind only). */
   readonly width?: number;
+  /**
+   * `bit` kind only: bits that, when any is set, make the firmware ignore the
+   * whole byte and act as though it were 0 - bit 7 of configuration byte 232,
+   * which older firmware and erased memory leave set. A read of such a byte
+   * gives 0, and a write starts from 0, so setting one field of a 0xFF byte
+   * does not leave the other bits saying 7.
+   */
+  readonly zeroWhenAnySet?: number;
   /**
    * COMPOSITE fields only: the layout key of the byte holding the field's high
    * bit(s). `layoutKey`/`shift`/`width` describe the LOW part, this pair the
@@ -209,6 +223,9 @@ export const SHIMMER3_INFOMEM_FIELD_GROUPS: readonly InfoMemFieldGroup[] = Objec
   {
     id: 'sdLogging',
     title: 'SD Logging',
+    /* Start-up holds how a log starts: the button and byte 232's other
+       triggers. Duration holds how long it runs. Byte 232's TTL input is in
+       Sensor Enables, with what gets recorded. */
     subgroups: [
       { id: 'sdLogging.startup', title: 'Start-up' },
       { id: 'sdLogging.duration', title: 'Duration' },
@@ -320,7 +337,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelRate.lis2dw12',
     label: 'WR Accel Rate',
-    desc: 'LIS2DW12 (Shimmer3R) rate — ConfigSetupByte0 bits 4-7 (SensorLIS2DW12.java:428).',
+    desc: 'LIS2DW12 (Shimmer3R) rate — ConfigSetupByte0 bits 4-7 (SensorLIS2DW12.java:428). The labels are the high-performance rates; in a low-power mode code 1 is 1.6 Hz and codes 7-9 deliver only 200 Hz.',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 4,
@@ -333,7 +350,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelLpm',
     label: 'WR Accel Low-Power Mode',
-    desc: 'ConfigSetupByte0 bit 1 (bitShiftLSM303DLHCAccelLPM=1, FW wrAccelLpModeLsb).',
+    desc: 'ConfigSetupByte0 bit 1 (bitShiftLSM303DLHCAccelLPM=1, FW wrAccelLpModeLsb). On a Shimmer3R (LIS2DW12) it only picks WHICH low-power mode the part uses while High-Performance Mode is off; with that off the part is in a low-power mode whatever this says. Consensys always sets it to the opposite of High-Performance Mode (SensorLIS2DW12.setLowPowerAccelWR).',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 1,
@@ -346,14 +363,30 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
   {
     key: 'wrAccelHrm',
     label: 'WR Accel High-Resolution Mode',
-    desc: 'ConfigSetupByte0 bit 0 (bitShiftLSM303DLHCAccelHRM=0, FW wrAccelHrMode).',
+    desc: 'LSM303 (Shimmer3) high-resolution mode — ConfigSetupByte0 bit 0 (bitShiftLSM303DLHCAccelHRM=0, FW wrAccelHrMode).',
     kind: 'bit',
     layoutKey: 'idxConfigSetupByte0',
     shift: 0,
     width: 1,
     options: ON_OFF,
     group: 'wrAccel',
-    appliesTo: ALL,
+    appliesTo: SHIMMER3_ONLY,
+    configKey: 'imu.wrAccelHrm',
+  },
+  {
+    // The same bit as `wrAccelHrm`, under the name it has on this chip. Labelled
+    // "High-Resolution" here it read as a resolution setting, and turning it off
+    // put a Shimmer3R's LIS2DW12 into low-power mode at 256 Hz (DEV-1563).
+    key: 'wrAccelHrm.lis2dw12',
+    label: 'WR Accel High-Performance Mode',
+    desc: 'LIS2DW12 (Shimmer3R) high-performance mode — ConfigSetupByte0 bit 0 (FW wrAccelHrMode; Java mHighPerModeAccelWR). The firmware gives the part (this bit << 2) | low-power mode, so this bit alone decides high performance against low power. On: every rate up to 1600 Hz. Off: a low-power mode, which cannot deliver more than 200 Hz, so a sampling rate above that leaves packets with no new wide-range reading. Consensys turns it on whenever the sensor is enabled (SensorLIS2DW12.setDefaultLIS2DW12AccelSensorConfig).',
+    kind: 'bit',
+    layoutKey: 'idxConfigSetupByte0',
+    shift: 0,
+    width: 1,
+    options: ON_OFF,
+    group: 'wrAccel',
+    appliesTo: S3R_ONLY,
     configKey: 'imu.wrAccelHrm',
   },
 
@@ -615,7 +648,9 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     configKey: 'trial.disableBluetooth',
   },
 
-  // ---- SD logging
+  // ---- SD logging. Not the TCXO (ExperimentConfig1 bit 4): no LogAndStream
+  // build supports it and the firmware clears it (`applyTcxoRule`), so it is
+  // not offered at all.
   {
     key: 'buttonStart',
     label: 'Start Logging On Button Press',
@@ -625,7 +660,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     shift: 5,
     width: 1,
     options: ON_OFF,
-    group: 'sdLogging',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     configKey: 'trial.buttonStart',
   },
@@ -638,26 +673,11 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     shift: 7,
     width: 1,
     options: ON_OFF,
-    group: 'sdLogging',
+    group: 'sdLogging.startup',
     appliesTo: ALL,
     readOnly: true,
     readOnlyReason: 'Deprecated - no longer acted on by current firmware.',
     configKey: 'trial.singleTouch',
-  },
-  {
-    key: 'tcxo',
-    label: 'TCXO',
-    desc: 'Use the temperature-compensated crystal oscillator — ExperimentConfig1 bit 4 (bitShiftTCX0=4, FW tcxo).',
-    kind: 'bit',
-    layoutKey: 'idxSDExperimentConfig1',
-    shift: 4,
-    width: 1,
-    options: ON_OFF,
-    group: 'sdLogging',
-    appliesTo: ALL,
-    readOnly: true,
-    readOnlyReason: 'Deprecated - the TCXO is not fitted on current hardware.',
-    configKey: 'trial.tcxo',
   },
   {
     key: 'estimatedExpLength',
@@ -667,7 +687,7 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     layoutKey: 'idxEstimatedExpLengthMsb',
     min: 0,
     max: 0xffff,
-    group: 'sdLogging',
+    group: 'sdLogging.duration',
     appliesTo: ALL,
     configKey: 'sd.estimatedExpLengthSec',
   },
@@ -679,9 +699,114 @@ export const SHIMMER3_INFOMEM_FIELD_SCHEMA: readonly InfoMemFieldDefinition[] = 
     layoutKey: 'idxMaxExpLengthMsb',
     min: 0,
     max: 0xffff,
-    group: 'sdLogging',
+    group: 'sdLogging.duration',
     appliesTo: ALL,
     configKey: 'sd.maxExpLengthMin',
+  },
+
+  // ---- Button, logging and TTL input: configuration byte 232 (DEV-971).
+  // Present only where the firmware has the byte, which the layout decides
+  // (`idxButtonLogMode`). Bit 7 set - erased memory, or older firmware - makes
+  // the whole byte read as 0, "as before". The button mode and the log triggers
+  // say how a log starts, so they are in SD Logging's Start-up; the TTL input
+  // says what is recorded, so it is in Sensor Enables. A host that shows press
+  // recording as an enable too splits the button mode with `splitButtonMode`.
+  {
+    key: 'buttonMode',
+    label: 'Button Mode',
+    desc:
+      'Byte 232 bits 0-2 (NV_BUTTON_LOG_MODE). 0 leaves the button to Start Logging On ' +
+      'Button Press, as before. Modes 4 and 5 record every press and release in the event ' +
+      'channel. Not 0, it also sets Start Logging On Button Press to its nearest equivalent.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 0,
+    width: 3,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: BUTTON_MODE_OPTIONS,
+    group: 'sdLogging.startup',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+  {
+    key: 'logTriggers',
+    label: 'What Else Starts Logging',
+    desc:
+      'Byte 232 bits 3-4. Read only when Button Mode is not 0. "Undock" includes unplugging ' +
+      'USB-C on a Shimmer3R; "Nothing" turns SD logging off.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 3,
+    width: 2,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: LOG_TRIGGER_OPTIONS,
+    group: 'sdLogging.startup',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+  {
+    key: 'ttlInput',
+    label: 'Record TTL Input',
+    desc:
+      'Byte 232 bit 5, whatever the button mode: edges on P1.5 (Shimmer3) or PE9 ' +
+      '(Shimmer3R), at board logic level. Not on SR48-6-0.',
+    kind: 'bit',
+    layoutKey: 'idxButtonLogMode',
+    shift: 5,
+    width: 1,
+    zeroWhenAnySet: BUTTON_LOG_MODE.INVALID,
+    options: ON_OFF,
+    group: 'sensors',
+    appliesTo: ALL,
+    configKey: 'buttonLogMode',
+  },
+
+  // ---- Audio recording: configuration byte 233 (DEV-99). Shimmer3R only, and
+  // present only where the firmware has the byte, which the layout decides
+  // (`idxAudioMode`). Bit 7 set - erased memory, or older firmware - or a
+  // reserved gain preset makes the whole byte read as 0, off. In Sensor
+  // Enables, with what is recorded, where the microphone is looked for: the
+  // audio is never sampled into the stream or the data file, but recorded
+  // beside it while logging, as the event markers are. The four modes are
+  // every combination of the fingerprint and raw audio, so a host can offer
+  // them as two enables (`joinAudioMode`). Bit 4 (DEV-1413) is a third: the
+  // sound level, which IS sampled into the stream and the data file, as
+  // channel 0x38, whatever the mode.
+  {
+    key: 'audioMode',
+    label: 'Audio Recording',
+    desc:
+      'Byte 233 bits 0-1 (NV_AUDIO_MODE): what the microphone records while logging to SD, ' +
+      'into audio/ beside each data file. Modes 2 and 3 store raw audio, which records ' +
+      'speech: confirm with the user first, and tell everyone near the device. A mode the ' +
+      'firmware does not build reads back as Off.',
+    kind: 'bit',
+    layoutKey: 'idxAudioMode',
+    shift: 0,
+    width: 2,
+    zeroWhenAnySet: AUDIO_MODE_BYTE.INVALID | AUDIO_MODE_BYTE.GAIN_MASK,
+    options: AUDIO_MODE_OPTIONS,
+    group: 'sensors',
+    appliesTo: S3R_ONLY,
+    configKey: 'audioMode',
+  },
+  {
+    key: 'soundLevel',
+    label: 'Sound Level',
+    desc:
+      'Byte 233 bit 4: the A-weighted sound level over the last 128 ms of microphone audio, ' +
+      'as channel 0x38 in the stream and the data file, in 0.01 dB(A). Nominal: from the ' +
+      "microphone's datasheet sensitivity, not checked against a calibrated meter. Independent " +
+      'of Audio Recording. Firmware without the channel reads back Off.',
+    kind: 'bit',
+    layoutKey: 'idxAudioMode',
+    shift: 4,
+    width: 1,
+    zeroWhenAnySet: AUDIO_MODE_BYTE.INVALID | AUDIO_MODE_BYTE.GAIN_MASK,
+    options: ON_OFF,
+    group: 'sensors',
+    appliesTo: S3R_ONLY,
+    configKey: 'audioMode',
   },
 
   // ---- Trial / experiment identity
@@ -905,7 +1030,9 @@ export function readInfoMemFieldValue(
       const shift = field.shift ?? 0;
       const width = field.width ?? 1;
       const mask = (1 << width) - 1;
-      const lsb = ((bytes[idx] ?? 0) >> shift) & mask;
+      const byte = bytes[idx] ?? 0;
+      if (field.zeroWhenAnySet !== undefined && (byte & field.zeroWhenAnySet) !== 0) return 0;
+      const lsb = (byte >> shift) & mask;
       const msbIdx = resolveMsbIndex(field, layout);
       if (msbIdx === undefined) return lsb;
       const msbMask = (1 << (field.msbWidth ?? 1)) - 1;
@@ -981,6 +1108,9 @@ export function writeInfoMemFieldValue(
       const width = field.width ?? 1;
       const mask = (1 << width) - 1;
       const raw = Number(value);
+      if (field.zeroWhenAnySet !== undefined && (bytes[idx] & field.zeroWhenAnySet) !== 0) {
+        bytes[idx] = 0;
+      }
       bytes[idx] = ((bytes[idx] & ~(mask << shift)) | ((raw & mask) << shift)) & 0xff;
       const msbIdx = resolveMsbIndex(field, layout);
       if (msbIdx === undefined) return;
@@ -1058,9 +1188,37 @@ export function writeInfoMemFieldValue(
   }
 }
 
-/** The schema fields that apply to a given part generation, in schema order. */
-export function infoMemFieldsFor(generation: Shimmer3Generation): InfoMemFieldDefinition[] {
-  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter((f) => f.appliesTo.includes(generation));
+/**
+ * Layout keys a layout may leave undefined, because the byte exists only on
+ * firmware the device has said it runs: configuration byte 232, which
+ * `InfoMemContext.eventChannel` brings in, and byte 233, which
+ * `InfoMemContext.audio` does.
+ */
+const CONDITIONAL_LAYOUT_KEYS: ReadonlySet<keyof InfoMemLayout> = new Set<keyof InfoMemLayout>([
+  'idxButtonLogMode',
+  'idxAudioMode',
+]);
+
+/**
+ * The schema fields that apply to a given part generation, in schema order.
+ *
+ * Pass the device's resolved layout to get exactly the fields it has bytes
+ * for, byte 232's three and byte 233's one included when its firmware has
+ * them. Without one,
+ * fields on a byte only some firmware has are left out, so a caller that reads
+ * every field it is given never meets an offset the layout does not define.
+ */
+export function infoMemFieldsFor(
+  generation: Shimmer3Generation,
+  layout?: InfoMemLayout,
+): InfoMemFieldDefinition[] {
+  return SHIMMER3_INFOMEM_FIELD_SCHEMA.filter(
+    (f) =>
+      f.appliesTo.includes(generation) &&
+      (layout
+        ? typeof layout[f.layoutKey] === 'number'
+        : !CONDITIONAL_LAYOUT_KEYS.has(f.layoutKey)),
+  );
 }
 
 /**

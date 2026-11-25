@@ -3,6 +3,7 @@
  */
 
 import type { PressureSensorKind } from '../pressure/types.js';
+import type { GyroOnTheFlyInfo } from '../calibration/gyroOnTheFly.js';
 
 /**
  * The pressure part an SD-log header records (byte 224, DEV-1123): a known
@@ -157,6 +158,31 @@ export interface SdLogHeader {
    */
   pressureSensorInferred: boolean;
   /**
+   * Header byte 225 (`SDH_BUTTON_LOG_MODE`, DEV-971): configuration byte 232
+   * as the firmware acted on it for this file - button mode, log triggers and
+   * TTL input - raw. Firmware before the field leaves 0xFF, which
+   * `decodeButtonLogMode` reads as "as before" by the byte's own rule. Null
+   * for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  buttonLogMode: number | null;
+  /**
+   * Header byte 226 (`SDH_AUDIO_MODE`, DEV-99): configuration byte 233 as the
+   * firmware acted on it for this file - what the microphone recorded into
+   * `audio/` beside it, and in bit 4 whether the sound level (channel 0x38,
+   * DEV-1413) was sampled into it - raw. Firmware before the field leaves
+   * 0xFF, which `audioModeOf` and `soundLevelEnabled` read as off by the
+   * byte's own rule. For the sound level the channel list says the same, and
+   * the decoder goes by the channel list. Null for a Shimmer3,
+   * which has no microphone, and for firmware other than LogAndStream.
+   *
+   * HARDWARE-VERIFY: from the firmware source only; no file carrying the field
+   * has been decoded.
+   */
+  audioMode: number | null;
+  /**
    * Human-readable notes on anything the decoder had to work around or could
    * not confirm in this header. Empty when there is nothing to report.
    */
@@ -191,6 +217,13 @@ export interface SdLogChannelCalibrationInfo {
   source: 'sd-header' | 'default';
   /** The hardware range value used to select the calibration. */
   range: number;
+  /**
+   * Gyro only: the on-the-fly offset calibration (derived-sensor bit 29).
+   * `enabled` comes from the header; `active`, `updates` and `offset` describe
+   * the decode once it has run - for a session, the state the last file left,
+   * with `updates` summed over every file.
+   */
+  gyroOnTheFly?: GyroOnTheFlyInfo;
 }
 
 /** Machine-readable reasons for rejecting an SD-log input. */

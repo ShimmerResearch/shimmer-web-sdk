@@ -44,7 +44,15 @@ import {
   type WiredBatteryStatus,
   type ExpansionBoardInfo,
 } from './protocol.js';
-import { parseBluetoothModuleVersion, type BluetoothModuleVersion } from '../identity.js';
+import {
+  buildShimmerSrIdPage,
+  formatShimmerSrCode,
+  isSameShimmerSrBoard,
+  parseBluetoothModuleVersion,
+  srReadBackError,
+  type BluetoothModuleVersion,
+  type ShimmerSrBoard,
+} from '../identity.js';
 import {
   resolveInfoMemLayout,
   parseInfoMem,
@@ -297,10 +305,15 @@ export class WiredShimmerClient extends BaseShimmerClient {
    * - The whole run holds this client's command queue. Nothing else reaches the
    *   sensor until the report ends — which is the truth about the firmware, not
    *   a limitation here: its main loop is blocked for the duration.
-   * - **The ExG chip test cannot pass from the dock.** Shimmer3 firmware prints
-   *   `- FAIL: ADS1292R test will not work from dock` because the dock UART and
-   *   that chip share pins. A FAIL on that line from this transport says nothing
-   *   about the board; run the test over Bluetooth to judge it.
+   * - **On a Shimmer3, the ExG chip test cannot pass from the dock.** Shimmer3
+   *   (MSP430) firmware does not run it there: it prints
+   *   `- FAIL: ADS1292R test will not work from dock` instead, because on that
+   *   board the dock UART and the chip share pins (`hal_FactoryTest.c`,
+   *   `SPI_test()`). A FAIL on that line from this transport says nothing about
+   *   the board; run the test over Bluetooth to judge it. **This is Shimmer3
+   *   only.** A Shimmer3R runs its ExG test (S3R_TEST_0021) normally over USB-C
+   *   and over the dock alike — its ExG SPI3 (PB4/PB5/PG9) and dock USART1
+   *   (PB6/PB7) share no pins — so an ExG FAIL from a Shimmer3R is a real result.
    *
    * @param type 0 MAIN, 1 LEDS, 2 ICS, 3 LED_STATES (`Test/shimmer_test.h:21-27`).
    * @param opts see {@link FactoryTestRunOptions}; `timeoutMs` defaults to the
@@ -535,6 +548,41 @@ export class WiredShimmerClient extends BaseShimmerClient {
   private async _readExpansionBoardImpl(): Promise<ExpansionBoardInfo | null> {
     const payload = await this._readMem(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, 16);
     return parseExpansionBoard(payload);
+  }
+
+  /**
+   * Program the daughter-card (expansion board) ID — the SR identity — and
+   * read it back. This is exactly what Consensys's factory "Program Exp.
+   * Board ID" does: `DockManager.writeExpansionBoardId` →
+   * `CommsProtocolWiredShimmerViaDock.writeDaughterCardId`, a WRITE of
+   * `DAUGHTER_CARD.CARD_ID` at address 0 with the 16-byte page
+   * `[boardId, boardRev, specialRev, 0xFF × 13]` ({@link buildShimmerSrIdPage}).
+   *
+   * The page is then read back (READ `CARD_ID`, 16 bytes from 0), and a
+   * read-back that differs from what was written throws. On success
+   * {@link identity}, when it has been read, takes the new board.
+   *
+   * The sensor keeps what it decided from the old board at boot until it
+   * restarts, so have it rebooted (undocked and powered off and on) before it
+   * is used as the new board.
+   *
+   * HARDWARE-VERIFY: the WRITE is the Java driver's, which Consensys has used
+   * in production for years; this client has not yet sent it to a sensor.
+   */
+  async writeExpansionBoard(board: ShimmerSrBoard): Promise<ExpansionBoardInfo> {
+    const page = buildShimmerSrIdPage(board);
+    const code = formatShimmerSrCode(board);
+    return this._serialize(async () => {
+      const payload = buildMemWritePayload(UART_PROP.DAUGHTER_CARD.CARD_ID, 0, page);
+      await this._writeRaw(UART_PROP.DAUGHTER_CARD.CARD_ID, payload);
+      const readBack = await this._readExpansionBoardImpl();
+      if (!readBack || !isSameShimmerSrBoard(readBack, board)) {
+        throw srReadBackError(board, readBack);
+      }
+      if (this.identity) this.identity = { ...this.identity, expansionBoard: readBack };
+      this._emitStatus(`SR number programmed: ${code}`);
+      return readBack;
+    });
   }
 
   /**

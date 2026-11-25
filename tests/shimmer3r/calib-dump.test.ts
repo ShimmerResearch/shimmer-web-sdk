@@ -167,19 +167,12 @@ describe.each(SHAPES)('Shimmer3RClient.writeCalibDump — %s', (_name, framed) =
     const dump = dumpOf(8); // 274 bytes
     const fw = await scriptedFirmware({ framed });
     await fw.client.writeCalibDump(dump);
-    const expected = framed
-      ? [
-          [64, 0],
-          [64, 64],
-          [64, 128],
-          [64, 192],
-          [18, 256],
-        ]
-      : [
-          [128, 0],
-          [128, 128],
-          [18, 256],
-        ];
+    // 128-byte chunks on either transport, as the InfoMem write uses.
+    const expected = [
+      [128, 0],
+      [128, 128],
+      [18, 256],
+    ];
     expect(chunks(fw.cmdsOf(SET_DUMP))).toEqual(expected);
     // The firmware takes the total from the FIRST chunk's header bytes and
     // counts the rest in, so the first chunk must start at offset 0.
@@ -206,9 +199,10 @@ describe.each(SHAPES)('Shimmer3RClient.writeCalibDump — %s', (_name, framed) =
   it('honours an explicit chunkBytes', async () => {
     const dump = dumpOf(4); // 142 bytes
     const fw = await scriptedFirmware({ framed });
-    await fw.client.writeCalibDump(dump, { chunkBytes: 128, update: false });
+    await fw.client.writeCalibDump(dump, { chunkBytes: 64, update: false });
     expect(chunks(fw.cmdsOf(SET_DUMP))).toEqual([
-      [128, 0],
+      [64, 0],
+      [64, 64],
       [14, 128],
     ]);
   });

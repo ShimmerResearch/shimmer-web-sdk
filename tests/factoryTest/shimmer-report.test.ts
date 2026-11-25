@@ -100,8 +100,8 @@ describe('parseShimmerFactoryTestReport - Shimmer3R MAIN report', () => {
       'Pre-qualification mode, CC and CV charging, or Top-off mode',
     );
     expect(parsed.metrics.charging_status).toBe('Charging');
-    expect(parsed.metrics.sd_manufacturer).toBe('SanDisk');
-    expect(parsed.metrics.sd_manufacture_date).toBe('2023-05');
+    expect(parsed.metrics.sd_manufacturer).toBe('Integral');
+    expect(parsed.metrics.sd_manufacture_date).toBe('2025-09');
     expect(parsed.metrics.bt_module_version).toContain('RN4678');
     expect(parsed.metrics.bmp390_fail_reason).toBe('Chip not detected');
   });
@@ -153,6 +153,84 @@ describe('parseShimmerFactoryTestReport - Shimmer3R MAIN report', () => {
   it('leaves nothing unrecognized and warns about nothing', () => {
     expect(parsed.unparsedLines).toEqual([]);
     expect(parsed.parserWarnings).toEqual([]);
+  });
+});
+
+describe('parseShimmerFactoryTestReport - SD card identity (DEV-1398)', () => {
+  /** The MAIN report with its SD identity lines replaced by these. */
+  const withSdLines = (lines: string[]) =>
+    parseShimmerFactoryTestReport(
+      S3R_MAIN_REPORT.replace(
+        / - Manufacturer:[^\r]*\r\n - Model:[^\r]*\r\n - CID:[^\r]*\r\n/,
+        crlf(lines),
+      ),
+    );
+
+  it('reads the model and every CID field, a hex OID included', () => {
+    const { metrics, unparsedLines } = parseShimmerFactoryTestReport(S3R_MAIN_REPORT);
+    expect(metrics.sd_model_recognised).toBe(true);
+    expect(metrics.sd_model).toBe('Integral UltimaPro 16GB INMSDH16G10-90U1');
+    expect(metrics.sd_cid_available).toBe(true);
+    expect(metrics.sd_mid).toBe(0x6f);
+    expect(metrics.sd_oid).toBe('0x0303');
+    expect(metrics.sd_pnm).toBe('SDABC');
+    expect(metrics.sd_prv).toBe('1.0');
+    expect(metrics.sd_psn).toBe(0xaa001102);
+    expect(metrics.sd_size_gb).toBe(14.56);
+    expect(unparsedLines).toEqual([]);
+  });
+
+  it('keeps OID and PNM as printed, hex forms and a trailing space included', () => {
+    const hex = withSdLines([
+      ' - Manufacturer: Verbatim, Manufacture Date=2026-07',
+      ' - Model: matches Verbatim 32GB industrial 47041',
+      ' - CID: MID=0x9F, OID=0x0303, PNM=0x5344000000, PRV=2.0, PSN=0x00004953, Size=29.12GB',
+    ]);
+    expect(hex.metrics.sd_mid).toBe(0x9f);
+    expect(hex.metrics.sd_oid).toBe('0x0303');
+    expect(hex.metrics.sd_pnm).toBe('0x5344000000');
+    expect(hex.metrics.sd_psn).toBe(0x4953);
+    expect(hex.unparsedLines).toEqual([]);
+
+    const space = withSdLines([
+      ' - Manufacturer: Silicon Power, Manufacture Date=2026-06',
+      ' - Model: matches Silicon Power 16GB SP016GBSTHBU1V10SP',
+      ' - CID: MID=0x9F, OID=TI, PNM=SPCC , PRV=2.0, PSN=0x27780191, Size=14.48GB',
+    ]);
+    expect(space.metrics.sd_pnm).toBe('SPCC ');
+    expect(space.metrics.sd_size_gb).toBe(14.48);
+  });
+
+  it('reads a card the firmware does not recognise', () => {
+    const { metrics } = withSdLines([
+      ' - Manufacturer: Unknown (0x6F), Manufacture Date=2025-09',
+      ' - Model: not recognised',
+      ' - CID: MID=0x6F, OID=0x0303, PNM=SDABC, PRV=1.0, PSN=0xAA001102, Size=14.56GB',
+    ]);
+    expect(metrics.sd_manufacturer).toBe('Unknown (0x6F)');
+    expect(metrics.sd_model_recognised).toBe(false);
+    expect(metrics.sd_model).toBeUndefined();
+    expect(metrics.sd_mid).toBe(0x6f);
+  });
+
+  it('reads a card that failed to initialise', () => {
+    const { metrics, unparsedLines } = withSdLines([' - CID: unavailable (card not initialised)']);
+    expect(metrics.sd_cid_available).toBe(false);
+    expect(metrics.sd_mid).toBeUndefined();
+    expect(unparsedLines).toEqual([]);
+  });
+
+  it('splits the size off the name on firmware before DEV-1398', () => {
+    const { metrics } = withSdLines([' - Manufacturer: SanDisk7.45GB, Manufacture Date=2023-05']);
+    expect(metrics.sd_manufacturer).toBe('SanDisk');
+    expect(metrics.sd_size_gb).toBe(7.45);
+    expect(metrics.sd_manufacture_date).toBe('2023-05');
+    expect(metrics.sd_model).toBeUndefined();
+
+    // A maker code missing from that firmware's list printed no name at all.
+    expect(
+      withSdLines([' - Manufacturer: 7.40GB, Manufacture Date=2025-03']).metrics.sd_manufacturer,
+    ).toBe('');
   });
 });
 

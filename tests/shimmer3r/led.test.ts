@@ -67,8 +67,8 @@ describe('Shimmer3RClient.toggleLed', () => {
   });
 
   it('writes without waiting for an ACK while streaming', async () => {
-    /* Every inbound byte belongs to the data plane then, so an ACK wait would
-       time out on a command the firmware did in fact run. */
+    /* See toggleLed. The ACK the firmware sends anyway is taken by the stream
+       parser without costing a packet (stream-bare-ack.test.ts). */
     const { client, state } = await connectedSensor();
     (client as unknown as { _streaming: boolean })._streaming = true;
     await client.toggleLed();

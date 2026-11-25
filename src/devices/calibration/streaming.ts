@@ -12,6 +12,7 @@
 import type { ObjectCluster } from '../../core/ObjectCluster.js';
 import { calibrateVector3, type KinematicCalibration } from './kinematic.js';
 import { getDefaultCalibration, type ImuFamily, type InertialGroup } from './defaults.js';
+import type { GyroOnTheFlyCal } from './gyroOnTheFly.js';
 
 /** Per-group hardware ranges tracked by a streaming client. */
 export interface StreamingImuRanges {
@@ -29,6 +30,13 @@ export interface StreamingCalibrationState {
   ranges: StreamingImuRanges;
   /** Device calibrations fetched over the radio (override the range default). */
   device?: Partial<Record<InertialGroup, KinematicCalibration>>;
+  /**
+   * The gyro on-the-fly offset estimator, when derived-sensor bit 29 is set.
+   * Its estimate replaces the gyro offset, and each gyro sample is fed to it
+   * after being calibrated, so an estimate takes effect from the next sample —
+   * Java's order (`buildMsg`, then `processData`'s algorithms).
+   */
+  gyroOnTheFly?: GyroOnTheFlyCal | null;
 }
 
 interface StreamGroup {
@@ -68,11 +76,19 @@ export function applyStreamingCalibration(
 
     const def = getDefaultCalibration(state.family, group, rangeFor(state.ranges, group));
     if (!def) continue;
-    const cal = state.device?.[group] ?? def.calibration;
+    const base = state.device?.[group] ?? def.calibration;
+    const otf = group === 'gyro' ? state.gyroOnTheFly : null;
+    const cal = otf ? otf.calibrationFor(base) : base;
 
-    const [cx, cy, cz] = calibrateVector3([fx.value, fy.value, fz.value], cal);
-    oc.add(axes[0], cx, def.unit, 'cal');
-    oc.add(axes[1], cy, def.unit, 'cal');
-    oc.add(axes[2], cz, def.unit, 'cal');
+    const raw: [number, number, number] = [fx.value, fy.value, fz.value];
+    const c = calibrateVector3(raw, cal);
+    oc.add(axes[0], c[0], def.unit, 'cal');
+    oc.add(axes[1], c[1], def.unit, 'cal');
+    oc.add(axes[2], c[2], def.unit, 'cal');
+    /* Not a frame that failed its link CRC. This SDK still emits one, flagged,
+       but Java discards it before decoding (`checkCrc`), so it never reaches
+       the window there; letting it in here would move every estimate it is
+       part of. */
+    if (oc.crcOk !== false) otf?.update(base, c, raw);
   }
 }

@@ -398,7 +398,7 @@ describe('calibrateStreamFrame — pressure pair', () => {
 
 describe('SCALAR_CALIBRATORS', () => {
   it('gives every entry a unit from the shared vocabulary', () => {
-    const allowed = new Set(['mV', 'no_units']);
+    const allowed = new Set(['mV', 'no_units', 'dB(A)']);
     for (const [name, c] of Object.entries(SCALAR_CALIBRATORS)) {
       expect(allowed.has(c.unit), `${name} → ${c.unit}`).toBe(true);
     }

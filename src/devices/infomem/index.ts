@@ -47,6 +47,8 @@ export {
 } from './generate.js';
 export type { GenerateInfoMemOptions, DeviceWriteDivergentRanges } from './generate.js';
 
+export { applyTcxoRule } from './tcxo.js';
+
 export {
   SHIMMER3_INFOMEM_FIELD_SCHEMA,
   SHIMMER3_INFOMEM_FIELD_GROUPS,
@@ -77,11 +79,18 @@ export {
   lsm6dsvAccelGyroRateHz,
   samplingRateHzFromDivider,
   checkImuRateCoversPacketRate,
+  lis2dw12AccelRateHz,
+  checkWrAccelRateCoversPacketRate,
 } from './rateCoverage.js';
-export type { ImuRateCoverage } from './rateCoverage.js';
+export type { ImuRateCoverage, WrAccelRateCoverage } from './rateCoverage.js';
 
 export {
   LSM6DSV_ODR,
   deriveLsm6dsvAccelGyroRate,
   deriveLsm6dsvRateOnEnableChange,
+  LIS2DW12_ODR,
+  LIS2DW12_LOW_POWER_MAX_HZ,
+  deriveLis2dw12AccelRate,
+  deriveLis2dw12ConfigOnEnableChange,
 } from './deriveRates.js';
+export type { Lis2dw12AccelDefaults } from './deriveRates.js';

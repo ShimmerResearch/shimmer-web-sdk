@@ -374,10 +374,14 @@ describe('stopping the stream gives up the alignment claim', () => {
     const { client, t, frames } = await connectStreaming();
 
     for (let i = 0; i < 20; i++) t.notify(buildFrame(1000 + i * TICKS_PER_FRAME));
-    const delivered = frames.length;
-    expect(delivered).toBeGreaterThan(0);
+    expect(frames.length).toBeGreaterThan(0);
 
     await client.stopStreaming();
+    /* The stop drains the tail, so the last frame, held until something
+       followed it, is delivered by the stop rather than dropped. */
+    const delivered = frames.length;
+    expect(delivered).toBe(20);
+    expect(frames[delivered - 1].TIMESTAMP).toBe(1000 + 19 * TICKS_PER_FRAME);
 
     // Start mid-frame, at the offset the wrong lock lives on.
     t.notify(residualBytes(90_000, 10).slice(FAKE_LOCK_OFFSET));
@@ -397,9 +401,10 @@ describe('stopping the stream gives up the alignment claim', () => {
   it('clears the same state on the combined stream+logging stop', async () => {
     const { client, t, frames } = await connectStreaming();
     for (let i = 0; i < 20; i++) t.notify(buildFrame(1000 + i * TICKS_PER_FRAME));
-    const delivered = frames.length;
 
     await client.stopStreamingAndLogging();
+    const delivered = frames.length;
+    expect(delivered).toBe(20);
     t.notify(residualBytes(90_000, 10).slice(FAKE_LOCK_OFFSET));
 
     for (const row of frames.slice(delivered)) {

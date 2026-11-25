@@ -111,9 +111,31 @@ export type {
   SensorStreamStats,
   StreamStatsSnapshot,
 } from './core/StreamStats.js';
+export {
+  DEFAULT_RECONNECT_POLICY,
+  nextReconnectDelayMs,
+  planStreamResume,
+  reconnectDelayMs,
+  resolveReconnectPolicy,
+  startAutoReconnect,
+} from './core/autoReconnect.js';
+export type {
+  ActivityAtDrop,
+  AutoReconnectAbandoned,
+  AutoReconnectAbandonReason,
+  AutoReconnectAttempt,
+  AutoReconnectFailure,
+  AutoReconnectHandle,
+  AutoReconnectOptions,
+  AutoReconnectOutcome,
+  AutoReconnectResult,
+  AutoReconnectTimers,
+  ReconnectPolicy,
+  StreamResumeAction,
+} from './core/autoReconnect.js';
 
 // Shimmer3R
-export { Shimmer3RClient } from './devices/shimmer3r/Shimmer3RClient.js';
+export { Shimmer3RClient, LogStartRefusedError } from './devices/shimmer3r/Shimmer3RClient.js';
 export type { Shimmer3RClientOptions } from './devices/shimmer3r/Shimmer3RClient.js';
 export { SensorBitmapShimmer3, channelIdToSensorBit } from './devices/shimmer3r/SensorBitmap.js';
 export type { SensorBitmapShimmer3Key } from './devices/shimmer3r/SensorBitmap.js';
@@ -121,6 +143,7 @@ export {
   OPCODES,
   BT_FEATURE,
   SHIMMER3R_DEFAULTS,
+  BYTE_STREAM_LINK,
   TIMESTAMP_FIELD,
   GSR_NAME,
 } from './devices/shimmer3r/constants.js';
@@ -162,11 +185,13 @@ export {
   SHIMMER3R_RESPONSE_PAYLOAD_LENGTHS,
   SHIMMER3R_INQ_NUM_CHANNELS_OFFSET,
   SHIMMER3R_INQ_CHANNELS_OFFSET,
+  inquiryNumChannelsOffset,
 } from './devices/shimmer3r/streamFraming.js';
 /**
- * Per-device length input the STATUS_RESPONSE span needs: 2 bytes from a
- * Shimmer3R on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`),
- * or `'unknown'` before the versions are read.
+ * Per-device length inputs: the STATUS_RESPONSE span, 2 bytes from a Shimmer3R
+ * on LogAndStream v1.00.024 or later, else 1 (`statusPayloadBytesFor`), or
+ * `'unknown'` before the versions are read; and the generation whose
+ * INQUIRY_RESPONSE layout to size (DEV-1514).
  */
 export type { Shimmer3RFramingOptions } from './devices/shimmer3r/streamFraming.js';
 /**
@@ -185,6 +210,7 @@ export type { Shimmer3DeviceStatus } from './devices/shimmer3r/protocol.js';
 export {
   CHANNEL_FORMATS,
   CHANNEL_FORMAT_OVERRIDES,
+  SHIMMER3_OLD_IMU_MAG_FORMATS,
   UNKNOWN_CHANNEL_ASSUMED_BYTES,
   isGenerationSensitiveChannel,
   channelLayoutDiffersByGeneration,
@@ -268,9 +294,11 @@ export {
   buildBlankBrandRecord,
 } from './devices/brandRecord.js';
 export type { BrandRecord, BrandRecordFields } from './devices/brandRecord.js';
-// Shimmer3R SD-card file transfer (FW >= v1.01.011)
+// Shimmer3R SD-card file transfer (Shimmer3R FW >= v1.01.011; no Shimmer3
+// release serves it — SD_TRANSFER_MIN_FIRMWARE)
 export {
   SD_TRANSFER_OPCODES,
+  SD_TRANSFER_MIN_FIRMWARE,
   SD_STATUS,
   SD_XFER,
   SD_ATTR_DIR,
@@ -327,6 +355,44 @@ export type {
   SdTransferSummary,
 } from './devices/shimmer3r/sdTransfer/Shimmer3RSdTransfer.js';
 
+// Shimmer3R Bluetooth module (IF820) OTA firmware update over BLE (DEV-1164)
+export {
+  IF820_OTA,
+  IF820_OTA_SERVICE_UUIDS,
+  IF820_OTA_COMMAND,
+  IF820_OTA_STATUS,
+  IF820_OTA_DEFAULT_CHUNK_SIZE,
+  IF820_OTA_FAST_CHUNK_SIZE,
+  IF820_OTA_SAFE_CHUNK_SIZE,
+  IF820_OTA_MIN_CHUNK_SIZE,
+  IF820_OTA_FIRST_WRITE_TIMEOUT_MS,
+  IF820_OTA_RECONNECT_ATTEMPTS,
+  IF820_OTA_RECONNECT_DELAY_MS,
+  IF820_OTA_RESPONSE_TIMEOUT_MS,
+  IF820_OTA_VERIFY_TIMEOUT_MS,
+  IF820_OTA_TRANSIENT_ERROR_REGEX,
+  If820OtaError,
+  if820OtaStatusText,
+  isIf820OtaTransientError,
+  runIf820OtaUpdate,
+  compareIf820Versions,
+  isIf820UpdateAvailable,
+  IF820_OTA_MIN_SENSOR_FIRMWARE,
+  if820OtaSensorSupport,
+  whenIf820OtaDeviceIdle,
+} from './devices/shimmer3r/if820Ota.js';
+export type {
+  If820OtaCharacteristicLike,
+  If820OtaServiceLike,
+  If820OtaGattServerLike,
+  If820OtaDeviceLike,
+  If820OtaProgress,
+  If820OtaOptions,
+  If820OtaResult,
+  If820OtaSensorIdentity,
+  If820OtaSensorSupport,
+} from './devices/shimmer3r/if820Ota.js';
+
 // Host-side directory-tree creation (File System Access API)
 export { ensureDirectoryPath } from './devices/verisense/protocolDataFlow.js';
 
@@ -365,6 +431,14 @@ export {
   // Shimmer3Client.getStatus and getBattery apply.
   shimmer3SupportsStatusRequest,
   shimmer3SupportsBatteryRequest,
+  // Whether SET_FEATURE may be sent: firmware older than it runs its bytes as
+  // commands. Both clients apply it.
+  shimmer3SupportsSetFeature,
+  // Whether a Shimmer3R's firmware might record audio, so is worth asking, and
+  // whether its version alone says it does (Shimmer3RClient.supportsAudio
+  // applies both).
+  shimmer3RMayRecordAudio,
+  shimmer3RRecordsAudio,
 } from './devices/shimmer3/protocol.js';
 export type {
   Shimmer3InquiryResult,
@@ -518,6 +592,7 @@ export type {
 export {
   parseInfoMem,
   generateInfoMem,
+  applyTcxoRule,
   deviceWriteDivergentRanges,
   compareInfoMemExcluding,
   resolveInfoMemLayout,
@@ -563,7 +638,12 @@ export {
   LSM6DSV_ODR,
   deriveLsm6dsvAccelGyroRate,
   deriveLsm6dsvRateOnEnableChange,
+  LIS2DW12_ODR,
+  LIS2DW12_LOW_POWER_MAX_HZ,
+  deriveLis2dw12AccelRate,
+  deriveLis2dw12ConfigOnEnableChange,
 } from './devices/infomem/index.js';
+export type { Lis2dw12AccelDefaults } from './devices/infomem/index.js';
 
 // Is the configured sensor output rate fast enough for the configured packet
 // rate? Two independent InfoMem fields that nothing in the firmware relates, so
@@ -573,8 +653,10 @@ export {
   lsm6dsvAccelGyroRateHz,
   samplingRateHzFromDivider,
   checkImuRateCoversPacketRate,
+  lis2dw12AccelRateHz,
+  checkWrAccelRateCoversPacketRate,
 } from './devices/infomem/index.js';
-export type { ImuRateCoverage } from './devices/infomem/index.js';
+export type { ImuRateCoverage, WrAccelRateCoverage } from './devices/infomem/index.js';
 
 // Identity defaults a host applies when it has to invent a configuration
 // (blank/erased InfoMem, or a reset to defaults) — kept in one place so every
@@ -728,8 +810,14 @@ export {
   MAX_CALIB_DUMP_BYTES,
   CALIB_READ_SOURCE,
   shouldOverrideCalibration,
+  DERIVED_GYRO_ON_THE_FLY_CAL,
+  GYRO_ON_THE_FLY_THRESHOLD_DPS,
+  GyroOnTheFlyCal,
+  gyroOnTheFlyWindow,
+  isGyroOnTheFlyEnabled,
 } from './devices/calibration/index.js';
 export type {
+  GyroOnTheFlyInfo,
   KinematicCalibration,
   ParseKinematicOptions,
   ImuFamily,
@@ -896,6 +984,11 @@ export {
   decodeSdSession,
   parseSdSessionName,
   parseSdTrialFolderName,
+  SD_DATA_ROOT,
+  SD_COMPANION_KINDS,
+  sdCompanionKindOf,
+  sdCompanionPathFor,
+  sdDataPathForCompanion,
   isNewImuSensors,
 } from './devices/sdlog/index.js';
 export type {
@@ -912,7 +1005,133 @@ export type {
   SdLogChannelSpec,
   SdLogDecodeOptions,
   SdLogDecodeResult,
+  SdCompanionKind,
 } from './devices/sdlog/index.js';
+
+// Event channel (DEV-971): configuration byte 232, and the button/TTL records
+// from an event file or the Bluetooth stream.
+export {
+  BUTTON_LOG_MODE,
+  BUTTON_MODE,
+  LOG_TRIGGERS,
+  BUTTON_MODE_OPTIONS,
+  LOG_TRIGGER_OPTIONS,
+  correctButtonLogMode,
+  buttonModeOf,
+  logTriggersOf,
+  isTtlInputEnabled,
+  recordsButtonPresses,
+  isDoublePress,
+  isLoggingDisabled,
+  isButtonDisabled,
+  doesPressToggleLogging,
+  doesUndockStartLogging,
+  nearestUserButtonEnable,
+  allowsSingleTouch,
+  withoutPressRecording,
+  BUTTON_LOGGING,
+  BUTTON_LOGGING_OPTIONS,
+  splitButtonMode,
+  canRecordPressesWith,
+  joinButtonMode,
+  withPressRecording,
+  decodeButtonLogMode,
+  encodeButtonLogMode,
+  describeButtonLogMode,
+  eventChannelBoardSupport,
+  applyButtonLogModeRules,
+  EVENT_TICKS_PER_SECOND,
+  EVENT_FILE,
+  EVENT_RECORD_TYPE,
+  EVENT_RECORD_FLAG,
+  EVENT_CHANNEL,
+  EVENT_INPUT,
+  EVENT_FILE_OPEN_REASON,
+  EVENT_CHANNEL_OPCODES,
+  EVENT_FRAME_LENGTH,
+  EVENT_CHANNEL_STATUS_LENGTH,
+  EventFileFormatError,
+  parseEventRecord,
+  describeEventRecord,
+  parseEventFile,
+  eventTicksToUnixMs,
+  eventFrameLength,
+  parseEventFrame,
+  parseEventChannelStatus,
+} from './devices/events/index.js';
+export type {
+  ButtonMode,
+  LogTriggers,
+  ButtonLogModeSettings,
+  ButtonLogging,
+  ButtonModeParts,
+  ButtonLogModeBehaviour,
+  EventChannelBoardSupport,
+  EventRecord,
+  EventFileHeader,
+  EventFile,
+  EventChannelStatus,
+} from './devices/events/index.js';
+
+// Shimmer3R audio recording (DEV-99): configuration byte 233, the recorder's
+// status, and the .WAV and .AFP files under audio/. The sound-level channel
+// (DEV-1413): byte 233 bit 4 and channel 0x38.
+export {
+  AUDIO_MODE_BYTE,
+  AUDIO_MODE,
+  AUDIO_GAIN_PRESET,
+  AUDIO_MODE_OPTIONS,
+  correctAudioMode,
+  audioModeOf,
+  audioGainPresetOf,
+  recordsAudioFingerprint,
+  recordsRawAudio,
+  joinAudioMode,
+  splitAudioMode,
+  soundLevelEnabled,
+  soundLevelSupportedByReadback,
+  withSoundLevel,
+  SOUND_LEVEL_CHANNEL_ID,
+  SOUND_LEVEL_NAME,
+  SOUND_LEVEL_NO_LEVEL,
+  SOUND_LEVEL_COUNTS_PER_DB,
+  SOUND_LEVEL_UNIT,
+  soundLevelDbA,
+  audioModeRecordsSpeech,
+  encodeAudioMode,
+  describeAudioMode,
+  applyAudioModeRules,
+  AUDIO_OPCODES,
+  AUDIO_STATUS_LENGTH,
+  AUDIO_STATUS_VERSION,
+  AUDIO_STATUS_BITS,
+  AUDIO_STATE,
+  AUDIO_FAULT,
+  describeAudioState,
+  describeAudioFault,
+  isAudioFaultFatal,
+  parseAudioStatus,
+  AUDIO_FILE,
+  AUDIO_FINGERPRINT_FILE,
+  AUDIO_FILE_OPEN_REASON,
+  AudioFileFormatError,
+  parseAudioWavHeader,
+  audioSampleTicks,
+  parseAudioFingerprintHeader,
+  parseAudioFingerprintRecord,
+  parseAudioFingerprintFile,
+  audioFingerprintRecordTicks,
+} from './devices/audio/index.js';
+export type {
+  AudioStatus,
+  AudioModeParts,
+  AudioFileIdentity,
+  AudioWavHeader,
+  AudioFingerprintHeader,
+  AudioFingerprintRecord,
+  AudioFingerprintChunk,
+  AudioFingerprintFile,
+} from './devices/audio/index.js';
 
 // Verisense
 export { VerisenseBleDevice } from './devices/verisense/VerisenseClient.js';
@@ -1231,10 +1450,23 @@ export type {
 // reaches the sensor over, so the tables and the display formatting live in one
 // place. Read today by `Shimmer3RClient` and `WiredShimmerClient`; the
 // classic-only `Shimmer3Client` has no identity reads yet.
+//
+// The SR identity is also WRITTEN through these (DEV-1493): the board list a
+// host offers, the 16-byte page Consensys programs, and the check that a page
+// may be written. The clients' `writeSrBoard` (Shimmer3RClient) and
+// `writeExpansionBoard` (Shimmer3Client, WiredShimmerClient) build on them.
 export {
   SHIMMER_PLATFORM_NAMES,
   SHIMMER_SR_BOARD_NAMES,
+  SHIMMER_SR_ID_PAGE_SIZE,
+  SHIMMER3R_SR_BOARD_IDS,
+  SHIMMER3_SR_BOARD_IDS,
   formatShimmerSrCode,
+  formatShimmerSrBoardName,
+  listShimmerSrBoards,
+  assertShimmerSrBoardWritable,
+  buildShimmerSrIdPage,
+  isSameShimmerSrBoard,
   isShimmerSrBoardValid,
   isShimmerSrBoardAtLeast,
   describeShimmerHardware,
@@ -1243,6 +1475,7 @@ export {
 } from './devices/identity.js';
 export type {
   ShimmerSrBoard,
+  ShimmerSrBoardChoice,
   ShimmerHardwareDescription,
   BluetoothModuleFamily,
   BluetoothModuleVersionEntry,

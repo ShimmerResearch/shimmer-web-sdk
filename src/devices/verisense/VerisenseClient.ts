@@ -134,6 +134,17 @@ import { describePlatformSupport, transportAdvice } from '../../core/platformSup
 // property) so it always aborts the retry loop.
 const CONNECT_CANCELLED_MESSAGE = 'Connect cancelled: disconnect requested during connect attempt.';
 
+/** A NUL-padded ASCII field of a .msbl header, up to its first NUL, with any
+ * unprintable byte shown as `\xNN` so a wrong file reads clearly in an error. */
+function msblAscii(img: Uint8Array, off: number, len: number): string {
+  let s = '';
+  for (const b of img.subarray(off, off + len)) {
+    if (b === 0) break;
+    s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`;
+  }
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // VerisenseBleDevice
 // ---------------------------------------------------------------------------
@@ -215,6 +226,11 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _sync: SyncSession | null = null;
   private _testReportMode = false; // Flag to capture raw streaming bytes for test reports
   private _throughputTestMode = false; // Flag to count raw bytes during a throughput test
+  // Ends the running test report or throughput test with an error. Set while
+  // one runs, so a disconnect or link drop can end it rather than leave its
+  // capture refusing every request on the next connection (DEV-1513).
+  // `linkGone`: nothing can be sent, so a report sends the device no stop.
+  private _endCapture: ((err: Error, linkGone: boolean) => void) | null = null;
   private _bootstrapRequestTimeoutOverrideMs: number | null = null;
   // Set by disconnect() so an in-flight connectWithRetry() loop stops instead
   // of treating the resulting GATT teardown as a transient link drop.
@@ -349,6 +365,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
   /** Subscribe to a transport's notify/disconnect streams. */
   private _wireTransport(transport: ShimmerTransport): void {
+    // A new link starts with nothing using it. A stream, sync or capture left
+    // over from the last one, never told its link went, would otherwise refuse
+    // every request on this one, the bootstrap's included (DEV-1513).
+    const replaced = new Error('The link was replaced by a new connection');
+    this._endCapture?.(replaced, true);
+    if (this._sync) this._abortSync(replaced);
+    this._mode = 'idle';
     this._transport = transport;
     /* Arm the base class's `onDisconnect` for this connection as well as this
        client's own `disconnected` event. Both exist for a reason: the event is
@@ -382,6 +405,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
   private _handleTransportDisconnect(reason?: Error): void {
     const kind: TransportKind = this._transportKind === 'serial' ? 'serial' : 'ble';
     this._mode = 'idle';
+    // A running test report or throughput test ends with the link. A pending
+    // request is left to time out: connectWithRetry() retries on that.
+    this._endCapture?.(reason ?? new Error('Disconnected'), true);
     this._transportKind = null;
     if (this._suppressDisconnectedEvent) {
       // Application-initiated teardown is not a fault for either channel.
@@ -727,6 +753,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }
     }
 
+    // A test report or throughput test cannot go on without the link, and a
+    // request still waiting for its reply will not get one: end them now
+    // rather than leave their callers to wait out their timeouts. The report
+    // sends its best-effort stop first, while the link is still open.
+    this._endCapture?.(new Error(opts.reason ?? 'Disconnected'), false);
+    this._rejectPending(new Error(opts.reason ?? 'Disconnected'));
+
     if (this._transportKind !== 'serial') {
       // Best-effort courtesy notification; swallow the rejection when the BLE
       // transport is not up (e.g. disconnect clicked mid-connect, tx not set).
@@ -815,6 +848,12 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     if (!bleOk && !serOk) throw new Error('Not connected');
     if (this._mode === 'streaming') throw new Error('Stop streaming before TransferLoggedData');
     if (this._mode === 'logged') throw new Error('Already syncing logged data');
+    // The sync takes over how incoming bytes are routed, so it must not start
+    // under a request waiting for its reply or a running capture (DEV-1513).
+    if (this._pending)
+      throw new Error('A request is pending: wait for it before TransferLoggedData');
+    const busy = this._linkBusyReason();
+    if (busy) throw new Error(`Cannot start TransferLoggedData while ${busy}`);
 
     let writable: FileSystemWritableFileStream | null = null;
     const chunks: Uint8Array[] = [];
@@ -948,6 +987,54 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     }
   }
 
+  /**
+   * What is using the link right now, as a phrase for an error message, or
+   * null when nothing is. A request sent then would take over how incoming
+   * bytes are routed: stream frames would be read as its reply and decoding
+   * would stop, a sync would lose its frames, and a test report's or throughput
+   * test's raw capture would be parsed as frames and lost (DEV-1513).
+   */
+  private _linkBusyReason(): string | null {
+    if (this._mode === 'streaming') return 'streaming (call stopStreaming() first)';
+    if (this._mode === 'logged') return 'logged data is being transferred';
+    if (this._testReportMode) return 'a hardware test report is running';
+    if (this._throughputTestMode) return 'a throughput test is running';
+    return null;
+  }
+
+  /**
+   * Refuse a request that would corrupt what is using the link. During a test
+   * report the only request allowed is a TEST_MODE write: the report's own
+   * start, or the exit that stops it ({@link stopTestMode}). During a
+   * throughput test the only one is the data-transfer loop that starts it.
+   */
+  private _assertRequestAllowed(
+    command: AsmCommand,
+    property: AsmProperty,
+    payloadBytes: number[] | Uint8Array,
+  ): void {
+    const isWrite = command === ASM_COMMAND.WRITE;
+    if (this._testReportMode && isWrite && property === ASM_PROPERTY.TEST_MODE) return;
+    if (
+      this._throughputTestMode &&
+      isWrite &&
+      property === ASM_PROPERTY.DEBUG_COMMAND &&
+      payloadBytes[0] === DEBUG_COMMAND_ID.TEST_DATA_TRANSFER_LOOP
+    ) {
+      return;
+    }
+    const busy = this._linkBusyReason();
+    if (busy) throw new Error(`Cannot send a request while ${busy}`);
+  }
+
+  /** Reject the pending request now rather than leaving it to time out. */
+  private _rejectPending(err: Error): void {
+    const pending = this._pending;
+    if (!pending) return;
+    if (this._mode === 'command') this._mode = 'idle';
+    pending.reject(err);
+  }
+
   private async _requestByCommand(
     command: AsmCommand,
     property: AsmProperty,
@@ -957,36 +1044,59 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     acceptedProperties?: ReadonlySet<AsmProperty>,
   ): Promise<VerisenseCommandResponse> {
     if (this._pending) throw new Error('A request is already pending');
+    // Before anything changes: a refused request must leave the stream, sync or
+    // capture that is using the link exactly as it was.
+    this._assertRequestAllowed(command, property, payloadBytes);
     this._mode = 'command';
     this._resetAssembler();
 
     const req = buildMessage(command, property, payloadBytes);
     const accepted = acceptedCommands ?? defaultAcceptedCommands(command);
 
+    let pending!: PendingCommandRequest;
     const pendingPromise = new Promise<VerisenseCommandResponse>((resolve, reject) => {
+      // Clear _pending only while it is still this request: a stale timer must
+      // not clear a newer request (the bootstrap retry drops _pending and sends
+      // again while the old request's timer is still running).
+      const settle = () => {
+        clearTimeout(t);
+        if (this._pending === pending) this._pending = null;
+      };
       const t = setTimeout(() => {
-        this._pending = null;
+        settle();
         reject(new Error('Request timeout'));
       }, timeoutMs);
 
-      this._pending = {
+      pending = {
         expectedProperty: property,
         acceptedCommands: accepted,
         acceptedProperties,
         resolve: (resp) => {
-          clearTimeout(t);
-          this._pending = null;
+          settle();
           resolve(resp);
         },
         reject: (e) => {
-          clearTimeout(t);
-          this._pending = null;
+          settle();
           reject(e);
         },
       };
     });
+    this._pending = pending;
+    // A reply that arrives during the write below can settle the request
+    // before the caller holds the promise (DEV-1086), and a failed write
+    // rejects it here. Neither is an unhandled rejection: the caller still
+    // receives the outcome from the promise returned below.
+    pendingPromise.catch(() => {});
 
-    await this.writeBytes(req);
+    try {
+      await this.writeBytes(req);
+    } catch (e) {
+      // Nothing was sent, so nothing will answer: free the link now, rather than
+      // leaving every other request refused as "already pending" until the
+      // timeout (DEV-1513).
+      if (this._pending === pending && this._mode === 'command') this._mode = 'idle';
+      pending.reject(e instanceof Error ? e : new Error(String(e)));
+    }
     return pendingPromise;
   }
 
@@ -1343,6 +1453,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const abortSignal = opts.signal ?? null;
     const onChunk = typeof opts.onChunk === 'function' ? opts.onChunk : null;
 
+    // Refuse before arming anything. A report refused later, from its start
+    // request, would clear the capture flag of whatever holds the link and
+    // send the device a stop on its behalf (DEV-1513).
+    if (this._pending) throw new Error('A request is already pending');
+    const busy = this._linkBusyReason();
+    if (busy) throw new Error(`Cannot start a hardware test report while ${busy}`);
+
     const TEST_REPORT_MODE_ID = 0xfe;
     const payload = new Uint8Array([
       TEST_REPORT_MODE_ID,
@@ -1378,6 +1495,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       const cleanup = () => {
         this._testReportMode = false;
+        this._endCapture = null;
         if (off) {
           try {
             off();
@@ -1404,7 +1522,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }
       };
 
-      const finish = (err?: Error) => {
+      const finish = (err?: Error, sendStop = true) => {
         if (done) return;
         done = true;
         cleanup();
@@ -1412,8 +1530,9 @@ export class VerisenseBleDevice extends BaseShimmerClient {
           // Best-effort: tell the device to stop the in-progress test/report so it
           // doesn't keep running a blocking suite against a connection no one is
           // reading (dialog closed / aborted / timed out). The firmware acts on
-          // this from interrupt context, so the report aborts promptly.
-          void this.stopTestMode(hwMajor, hwMinor, hwInternal).catch(() => {});
+          // this from interrupt context, so the report aborts promptly. Not when
+          // the link has gone: the firmware ends the report itself then.
+          if (sendStop) void this.stopTestMode(hwMajor, hwMinor, hwInternal).catch(() => {});
           reject(err);
           return;
         }
@@ -1432,8 +1551,18 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }, effectiveIdleMs);
       };
 
+      // An inactivity timeout, not a cap on the whole report: re-armed by every
+      // chunk, so a report that keeps streaming is never cut off part-way.
+      const armTimeout = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        timeoutTimer = setTimeout(() => {
+          finish(new Error(`runHardwareTestReport timeout: no report data for ${timeoutMs} ms`));
+        }, timeoutMs);
+      };
+
       off = this.on<Uint8Array>('testReportChunk', (rawChunk) => {
         if (done || !rawChunk?.length) return;
+        armTimeout();
 
         const chunk = sanitizeChunk(decoder.decode(rawChunk, { stream: true }));
         if (!chunk.length) return;
@@ -1464,13 +1593,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
         }
       });
 
-      timeoutTimer = setTimeout(() => {
-        finish(
-          new Error(
-            `runHardwareTestReport timeout after ${timeoutMs} ms while waiting for report data`,
-          ),
-        );
-      }, timeoutMs);
+      armTimeout();
 
       if (abortSignal) {
         if (abortSignal.aborted) {
@@ -1482,6 +1605,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       }
 
       // Enable test report mode before sending command
+      this._endCapture = (err, linkGone) => finish(err, !linkGone);
       this._testReportMode = true;
       void this.runTestMode(payload).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1603,6 +1727,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
    * erased and each page is written. Only SR68 Pulse+ hardware (the only board
    * carrying the hub) accepts it — other hardware NACKs the BEGIN stage.
    *
+   * The image is refused, before anything is sent, unless its header says
+   * `msbl` and names the hub's die, `MAX32670`. BEGIN erases the hub's
+   * application and the device does not read the target, so an image for
+   * another part, such as a MAX32664's (`MAX32660`), would leave the hub empty.
+   * The C-keyed and development-keyed builds both name `MAX32670`, so this
+   * cannot tell which key an image carries.
+   *
    * @param msbl       raw .msbl file bytes
    * @param onProgress optional progress callback (pagesDone, totalPages)
    * @returns the hub application firmware version string read back after flashing
@@ -1614,6 +1745,20 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const img = msbl instanceof Uint8Array ? msbl : new Uint8Array(msbl);
     if (img.length < MSBL.HEADER_SIZE) {
       throw new Error('uploadHubFirmware: file is too small to be a valid .msbl');
+    }
+
+    const magic = msblAscii(img, 0, MSBL.MAGIC.length);
+    if (magic !== MSBL.MAGIC) {
+      throw new Error(
+        `uploadHubFirmware: not a .msbl image (header starts "${magic}", expected "${MSBL.MAGIC}"); nothing was sent`,
+      );
+    }
+    const target = msblAscii(img, MSBL.OFF_TARGET, MSBL.TARGET_LEN);
+    if (target !== MSBL.HUB_TARGET) {
+      throw new Error(
+        `uploadHubFirmware: this .msbl is built for "${target}", not the MAX32674C algorithm hub ` +
+          `(expected "${MSBL.HUB_TARGET}"); nothing was sent and the hub was not erased`,
+      );
     }
 
     const numPages = img[MSBL.OFF_NUMPAGES] | (img[MSBL.OFF_NUMPAGES + 1] << 8);
@@ -1869,6 +2014,13 @@ export class VerisenseBleDevice extends BaseShimmerClient {
     const abortSignal = opts.signal ?? null;
     const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
 
+    // Refuse before arming anything, for the same reason as a test report: a
+    // test refused by its start request would clear the capture flag of
+    // whatever holds the link (DEV-1513).
+    if (this._pending) throw new Error('A request is already pending');
+    const busy = this._linkBusyReason();
+    if (busy) throw new Error(`Cannot start a throughput test while ${busy}`);
+
     return new Promise<ThroughputTestResult>((resolve, reject) => {
       let done = false;
       let bytes = 0;
@@ -1897,6 +2049,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
 
       const cleanup = () => {
         this._throughputTestMode = false;
+        this._endCapture = null;
         if (off) {
           try {
             off();
@@ -1972,6 +2125,7 @@ export class VerisenseBleDevice extends BaseShimmerClient {
       // Enable raw-count mode before sending so no blast bytes are missed. The
       // ACK is consumed by the normal command path (while _pending is set); the
       // dummy blast that follows is counted by the _feedStreamBytes branch.
+      this._endCapture = (err) => finish(err);
       this._throughputTestMode = true;
       void this.testDataTransferLoop(durationMs).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);

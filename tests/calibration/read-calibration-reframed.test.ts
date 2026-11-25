@@ -227,6 +227,8 @@ describe('Shimmer3Client.readCalibration over RFCOMM', () => {
           send([OPCODES.DEVICE_VERSION_RESPONSE, 3]);
         } else if (op === OPCODES.GET_FW_VERSION_COMMAND) {
           send([OPCODES.FW_VERSION_RESPONSE, 3, 0, 0, 0, 15, 0]);
+        } else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+          send([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]);
         } else {
           const index = SHIMMER3_GETS.findIndex((g) => g.get === op);
           if (index >= 0) send([ACK, SHIMMER3_GETS[index].resp, ...blockFor(index)]);

@@ -80,6 +80,8 @@ async function connected(
       setTimeout(() => tr.notify([ACK, DEVVER, 3]), 0);
     } else if (op === OPCODES.GET_FW_VERSION_COMMAND) {
       setTimeout(() => tr.notify([ACK, FWVER, ...(opts.fw ?? LOGANDSTREAM_0_16_0)]), 0);
+    } else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+      setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
     } else {
       reply(new Uint8Array(bytes), tr);
     }
@@ -149,6 +151,8 @@ describe('Shimmer3Client with a status push on the link', () => {
         setTimeout(() => tr.notify([...PUSH_DOCKED, ACK, DEVVER, 3]), 0);
       } else if (bytes[0] === OPCODES.GET_FW_VERSION_COMMAND) {
         setTimeout(() => tr.notify([ACK, FWVER, ...LOGANDSTREAM_0_16_0]), 0);
+      } else if (bytes[0] === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND) {
+        setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
       }
     });
     const client = new Shimmer3Client({ debug: false, transport: t });
@@ -488,7 +492,7 @@ describe('Shimmer3Client status and battery reads', () => {
     const stranded = client.getStatus(5000);
     await settle();
     await client.disconnect();
-    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    await expect(stranded).rejects.toThrow(/link was reset while waiting/);
     expect(Date.now() - started).toBeLessThan(1000);
 
     // Nothing from the old link is left waiting to take this push as its reply.
@@ -504,8 +508,32 @@ describe('Shimmer3Client status and battery reads', () => {
     const stranded = client.getBattery(5000);
     await settle();
     t.emitDisconnect(new Error('link lost'));
-    await expect(stranded).rejects.toThrow(/link closed while waiting/);
+    await expect(stranded).rejects.toThrow(/link was reset while waiting/);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('fails a read queued on a dropped link at its turn, rather than run it (DEV-573)', async () => {
+    // The read is bound to the link it was asked on. Run at its turn, it wrote
+    // GET_VBATT after the drop and then took the next link's battery reply.
+    const asked: number[] = [];
+    const { t, client } = await connected((bytes) => {
+      asked.push(bytes[0]);
+    });
+    const inFlight = client.getStatus(5000).catch(() => undefined);
+    const queued = client.getBattery(5000).then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await settle();
+    t.emitDisconnect(new Error('dropped'));
+    await inFlight;
+
+    const t2 = new LoopbackTransport({ capabilities: { framed: false } });
+    await connected(undefined, { t: t2, client });
+    t2.notify([ACK, INSTREAM, VBATT, ...BATT_RAW]);
+    expect(await queued).toMatch(/link was reset/);
+    expect(asked).toContain(OPCODES.GET_STATUS_COMMAND);
+    expect(asked).not.toContain(OPCODES.GET_VBATT_COMMAND);
   });
 
   it('fails at once when its write fails, and leaves nothing waiting', async () => {

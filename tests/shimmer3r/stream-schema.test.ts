@@ -3,6 +3,7 @@ import { Shimmer3RClient } from '../../src/devices/shimmer3r/Shimmer3RClient.js'
 import { OPCODES } from '../../src/devices/shimmer3r/constants.js';
 import { SensorBitmapShimmer3 } from '../../src/devices/shimmer3r/SensorBitmap.js';
 import { buildStreamSchema } from '../../src/devices/shimmer3r/streamSchema.js';
+import { buildShimmer3Schema } from '../../src/devices/shimmer3/protocol.js';
 import {
   channelLayoutDiffersByGeneration,
   isGenerationSensitiveChannel,
@@ -26,6 +27,7 @@ const HW_SHIMMER3 = 3;
 const HW_SHIMMER3R = 10;
 
 const CH = {
+  LN_ACCEL_X: 0x00,
   GYRO_X: 0x0a,
   BATTERY: 0x03,
   TEMPERATURE: 0x1a,
@@ -37,21 +39,19 @@ const CH = {
 } as const;
 
 /**
- * Shimmer3R-layout inquiry response, opcode-inclusive:
- * `[0x02, adcLo, adcHi, cfg0..cfg6, numCh, bufSize, ...channelIds]`.
+ * Inquiry response, opcode-inclusive, in the layout the hardware sends:
+ * `[0x02, adcLo, adcHi, cfg…, numCh, bufSize, ...channelIds]`, with a 7-byte
+ * config word on a Shimmer3R and a 4-byte one on a Shimmer3 (DEV-1514).
  * adcRaw 0x0280 = 640 → 32768/640 = 51.2 Hz; config word all zero.
+ *
+ * A device that does not answer the version sends the Shimmer3R's, the
+ * generation the client assumes then.
  */
-const inquiry = (channelIds: number[]): number[] => [
+const inquiry = (channelIds: number[], hardwareVersion: number | null): number[] => [
   INQ_RSP,
   0x80,
   0x02,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
+  ...Array<number>(hardwareVersion === HW_SHIMMER3 ? 4 : 7).fill(0),
   channelIds.length,
   1,
   ...channelIds,
@@ -93,7 +93,7 @@ async function session(
     if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) {
       if (hardwareVersion !== null) setTimeout(() => tr.notify([ACK, DEVVER, hardwareVersion]), 0);
     } else if (op === OPCODES.INQUIRY_COMMAND) {
-      setTimeout(() => tr.notify([ACK, ...inquiry(channelIds)]), 0);
+      setTimeout(() => tr.notify([ACK, ...inquiry(channelIds, hardwareVersion)]), 0);
     } else {
       setTimeout(() => tr.notify([ACK]), 0);
     }
@@ -207,7 +207,7 @@ describe('the same packet on a classic Shimmer3', () => {
     // 1 + 3 + 2 gyro + 2 temperature + 3 pressure + 2 battery.
     expect(schema.frameBytes).toBe(13);
     expect(schema.fields.map((f) => [f.name, f.fmt, f.endian, f.sizeBytes])).toEqual([
-      ['GYRO_X', 'i16', 'le', 2],
+      ['GYRO_X', 'i16', 'be', 2],
       ['TEMPERATURE', 'u16', 'be', 2],
       ['PRESSURE', 'u24', 'be', 3],
       ['BATTERY', 'u16', 'le', 2],
@@ -219,7 +219,7 @@ describe('the same packet on a classic Shimmer3', () => {
     const s = await session(HW_SHIMMER3, CHANNELS);
     await s.client.inquiry();
     const frames = await streamFrames(s, [
-      ...u16le(GYRO_X),
+      ...u16be(GYRO_X),
       ...u16be(TEMPERATURE),
       ...u24be(PRESSURE),
       ...u16le(BATTERY),
@@ -240,6 +240,54 @@ describe('the same packet on a classic Shimmer3', () => {
     expect(s3.schema.frameBytes).toBe(1 + 3 + 3 + 2 + 2); // temperature 2 bytes
     expect(s3r.schema.frameBytes).toBe(1 + 3 + 3 + 3 + 2); // temperature 3 bytes
     expect(s3.schema.frameBytes).not.toBe(s3r.schema.frameBytes);
+  });
+});
+
+describe('the alt accel 0x14-0x16 per generation (DEV-1338)', () => {
+  // Big-endian on both generations, in different encodings: on a Shimmer3R, the
+  // ADXL371's 12-bit value, left-justified, read from XDATA_H; on a Shimmer3,
+  // the 9-axis chip's own accelerometer as a plain i16, read from ACCEL_XOUT_H
+  // (SHIMMER3_STREAMING_DATA_FORMAT.md §5).
+  const ALT = [0x14, 0x15, 0x16];
+  const NAMES = ['HG_ACCEL_X', 'HG_ACCEL_Y', 'HG_ACCEL_Z'];
+
+  it('decodes a resting Shimmer3R ADXL371 to signed 12-bit counts', async () => {
+    // Counts as the HIL bench read them from a resting unit (100 mg/LSB).
+    const counts = [1, -5, -10];
+    const s = await session(HW_SHIMMER3R, [...ALT, CH.BATTERY]);
+    await s.client.inquiry();
+    const frames = await streamFrames(s, [
+      ...counts.flatMap((c) => u16be((c & 0xfff) << 4)),
+      ...u16le(3054),
+    ]);
+    expect(NAMES.map((n) => frames[0].get(n, 'raw')!.value)).toEqual(counts);
+    expect(frames[0].get('BATTERY', 'raw')!.value).toBe(3054);
+  });
+
+  it('decodes a Shimmer3 alt accel as a big-endian i16, not as 12 bits', async () => {
+    const values = [-300, 1234, -16384];
+    const s = await session(HW_SHIMMER3, ALT);
+    const { schema } = await s.client.inquiry();
+    expect(schema.fields.map((f) => [f.name, f.fmt, f.endian])).toEqual(
+      NAMES.map((n) => [n, 'i16', 'be']),
+    );
+    const frames = await streamFrames(
+      s,
+      values.flatMap((v) => u16be(v & 0xffff)),
+    );
+    // The 12-bit decode it used to get would read -19, 77, -1024.
+    expect(NAMES.map((n) => frames[0].get(n, 'raw')!.value)).toEqual(values);
+  });
+
+  it('gives Shimmer3Client the same i16 big-endian layout', () => {
+    const schema = buildShimmer3Schema(ALT, 'u24');
+    expect(schema.fields.map((f) => [f.name, f.fmt, f.endian])).toEqual(
+      NAMES.map((n) => [n, 'i16', 'be']),
+    );
+  });
+
+  it('counts the alt accel as laid out differently per generation', () => {
+    for (const id of ALT) expect(channelLayoutDiffersByGeneration(id)).toBe(true);
   });
 });
 
@@ -366,7 +414,7 @@ describe('a generation this client had to assume', () => {
   });
 
   it('trusts the schema when nothing in the packet depends on the generation', async () => {
-    const s = await session(null, [CH.GYRO_X, CH.BATTERY]);
+    const s = await session(null, [CH.LN_ACCEL_X, CH.BATTERY]);
     const { schema } = await s.client.inquiry();
     expect(schema.generationAssumed).toBe(true);
     expect(schema.trusted).toBe(true);
@@ -387,7 +435,7 @@ describe('a generation this client had to assume', () => {
     // what the channel is called, so assuming the wrong platform mislabels a
     // column without moving an offset. Distrusting the frame here would cry
     // wolf on the commonest expansion-board setup.
-    const s = await session(null, [CH.GYRO_X, CH.EXT_ADC_0]);
+    const s = await session(null, [CH.LN_ACCEL_X, CH.EXT_ADC_0]);
     expect(s.client.generationIsAssumed).toBe(true);
 
     const { schema } = await s.client.inquiry();
@@ -400,6 +448,18 @@ describe('a generation this client had to assume', () => {
     expect(warning, `no naming warning: ${s.status.join(' | ')}`).toBeDefined();
     expect(warning).toContain('different name');
     expect(warning).toContain('stays trusted');
+  });
+
+  it('distrusts a gyro frame, whose byte order differs by generation', async () => {
+    // Big-endian on a Shimmer3, little-endian on a Shimmer3R: guessing wrong
+    // byte-swaps every sample (DEV-1288), so the guess has to be flagged.
+    const s = await session(null, [CH.GYRO_X, CH.BATTERY]);
+    const { schema } = await s.client.inquiry();
+    expect(schema.generationAssumed).toBe(true);
+    expect(schema.trusted).toBe(false);
+    expect(s.status.some((m) => m.includes('decoded differently') && m.includes('0x0A'))).toBe(
+      true,
+    );
   });
 
   it('still distrusts a frame mixing a name-only and a layout difference', async () => {
@@ -416,8 +476,14 @@ describe('a generation this client had to assume', () => {
 
 describe('channelLayoutDiffersByGeneration', () => {
   it('is false for a channel both generations lay out identically', () => {
-    expect(channelLayoutDiffersByGeneration(CH.GYRO_X)).toBe(false);
+    expect(channelLayoutDiffersByGeneration(CH.LN_ACCEL_X)).toBe(false);
     expect(channelLayoutDiffersByGeneration(CH.BATTERY)).toBe(false);
+  });
+
+  it('is true for the gyro, big-endian on a Shimmer3 and little-endian on a Shimmer3R', () => {
+    for (const id of [0x0a, 0x0b, 0x0c]) {
+      expect(channelLayoutDiffersByGeneration(id), `0x${id.toString(16)}`).toBe(true);
+    }
   });
 
   it('is false across the ADC block, where only the name differs', () => {

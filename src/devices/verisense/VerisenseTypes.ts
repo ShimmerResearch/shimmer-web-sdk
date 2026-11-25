@@ -54,6 +54,12 @@ export interface TransferLoggedDataResult {
 }
 
 export interface RunHardwareTestReportOptions {
+  /**
+   * How long the report may go without sending anything before it is given up
+   * (default 120000). The clock restarts with every chunk, so a long report
+   * that keeps streaming, such as a NAND health test printing its progress
+   * dots, is never cut off part-way.
+   */
   timeoutMs?: number;
   marker?: string;
   endMarker?: string;

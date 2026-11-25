@@ -10,6 +10,7 @@ import {
   shimmer3SupportsExg,
   shimmer3SupportsStatusRequest,
   shimmer3SupportsBatteryRequest,
+  shimmer3SupportsSetFeature,
   SHIMMER3_STATUS_PAYLOAD_BYTES,
   FW_ID,
   ACK,
@@ -419,6 +420,17 @@ describe('shimmer3SupportsStatusRequest / shimmer3SupportsBatteryRequest (the Ja
     expect(shimmer3SupportsStatusRequest(fw(FW_ID.LOGANDSTREAM, 0, 5, 1), 3)).toBe(false);
     expect(shimmer3SupportsStatusRequest(fw(FW_ID.BTSTREAM, 0, 8, 1), 3)).toBe(true);
     expect(shimmer3SupportsStatusRequest(fw(FW_ID.BTSTREAM, 0, 8, 0), 3)).toBe(false);
+  });
+
+  it('has SET_FEATURE from LogAndStream 1.0.17 on a Shimmer3 and 1.0.52 on a Shimmer3R', () => {
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 0, 17), 3)).toBe(true);
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 0, 16), 3)).toBe(false);
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 1, 9), 3)).toBe(true);
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 0, 52), 10)).toBe(true);
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 0, 51), 10)).toBe(false);
+    // The Shimmer3 threshold does not carry over to a Shimmer3R, nor to BtStream.
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.LOGANDSTREAM, 1, 0, 20), 10)).toBe(false);
+    expect(shimmer3SupportsSetFeature(fw(FW_ID.BTSTREAM, 1, 0, 17), 3)).toBe(false);
   });
 
   it('serves the battery from LogAndStream 0.5.9 and BtStream 0.8.1', () => {

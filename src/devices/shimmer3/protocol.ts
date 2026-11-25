@@ -21,7 +21,9 @@ import {
   type StreamSchemaField,
 } from '../shimmer3r/streamSchema.js';
 import { u16le } from '../shimmer3r/protocol.js';
+import { SHIMMER3_OLD_IMU_MAG_FORMATS } from '../shimmer3r/channelFormats.js';
 import { EXG_BANK_LENGTH } from '../exg/registers.js';
+import type { StreamingImuRanges } from '../calibration/streaming.js';
 
 // Re-export the byte utilities so Shimmer3 consumers/tests import from one place;
 // these are identical for both device families (see ../shimmer3r/protocol.ts).
@@ -144,23 +146,61 @@ export interface Shimmer3InquiryResult {
  * pressure here and 3 little-endian bytes each on a Shimmer3R
  * (see `CHANNEL_FORMAT_OVERRIDES`).
  *
- * The only Shimmer3-relevant knob is the timestamp width (u24 for firmware code
- * ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength).
+ * Two Shimmer3-relevant knobs remain: the timestamp width (u24 for firmware
+ * code ≥ 6, else u16 — see ShimmerObject#updateTimestampByteLength), and the
+ * IMU generation, which sets the mag byte order.
  *
  * @param onProblem optional sink for the message an unrecognised channel ID
  *   produces; `Shimmer3Client` wires it to `onStatus`. The schema's `trusted`
  *   and `unknownChannelIds` say the same thing to code rather than to a log.
+ * @param imuGeneration `'old'` decodes mag `0x07`-`0x09` big-endian, as an
+ *   LSM303DLHC board sends it (`SHIMMER3_OLD_IMU_MAG_FORMATS`). `'new'` or
+ *   unknown (`null`, the default) keeps little-endian, which is right for every
+ *   new-IMU board. The Java driver falls back to old when it has no board id;
+ *   this does not, so that a failed or skipped board read never flips the byte
+ *   order of the boards made since.
  */
 export function buildShimmer3Schema(
   channelIds: number[],
   timestampFmt: TimestampFmt,
   onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3StreamSchema {
   return buildStreamSchema(channelIds, timestampFmt, {
     generation: 'shimmer3',
     dataPreambleByte: 0x00,
     onProblem,
+    formatOverrides: imuGeneration === 'old' ? SHIMMER3_OLD_IMU_MAG_FORMATS : undefined,
   });
+}
+
+/**
+ * A Shimmer3's inertial ranges, by calibration group, from the inquiry's
+ * config word (`configByte0`, ConfigSetupBytes 0-3 little-endian).
+ *
+ * - `wrAccel`: the LSM303 accel range, ConfigSetupByte0 bits 2-3 (config bits 2-3).
+ * - `gyro`: the MPU9x50 gyro range, ConfigSetupByte2 bits 0-1 (config bits 16-17).
+ * - `mag`: the LSM303 mag range, ConfigSetupByte2 bits 5-7 (config bits 21-23).
+ * - `lnAccel` is 0: the Kionix low-noise accel has one fixed range.
+ * - `altAccel` and `altMag` are 0: a Shimmer3 has neither part.
+ *
+ * Bit names as in the Shimmer3 InfoMem schema (`devices/infomem/schema.ts`).
+ * ConfigSetupByte3 bits 6-7 hold the MPU9x50 accel range, which no streamed
+ * channel is calibrated against, so it has no group here.
+ *
+ * Both `Shimmer3Client` and `Shimmer3RClient` take a Shimmer3's ranges from
+ * here. The second also drives a Shimmer3, and the Shimmer3R gives some of
+ * these bits other meanings (DEV-1515).
+ */
+export function shimmer3ImuRanges(configByte0: number): StreamingImuRanges {
+  return {
+    lnAccel: 0,
+    wrAccel: (configByte0 & 0xc) >>> 2,
+    gyro: (configByte0 & 0x30000) >>> 16,
+    mag: (configByte0 & 0xe00000) >>> 21,
+    altAccel: 0,
+    altMag: 0,
+  };
 }
 
 /**
@@ -174,6 +214,8 @@ export function buildShimmer3Schema(
  *
  * @param onProblem optional sink for schema problems (an unrecognised channel
  *   ID); see {@link buildShimmer3Schema}.
+ * @param imuGeneration the board's IMU generation when known; see
+ *   {@link buildShimmer3Schema}.
  * @throws if the buffer is shorter than the header, or shorter than the channel
  *   count it declares. Rejecting is deliberate — see the body — and callers can
  *   let it propagate: nothing is assigned from the result until it returns.
@@ -182,6 +224,7 @@ export function interpretShimmer3InquiryResponse(
   u8: Uint8Array,
   timestampFmt: TimestampFmt = 'u24',
   onProblem?: (message: string) => void,
+  imuGeneration: 'old' | 'new' | null = null,
 ): Shimmer3InquiryResult {
   const base = u8[0] === OPCODES.INQUIRY_RESPONSE ? 1 : 0;
 
@@ -219,9 +262,7 @@ export function interpretShimmer3InquiryResponse(
     ((u8[base + 2] | (u8[base + 3] << 8) | (u8[base + 4] << 16) | (u8[base + 5] << 24)) >>> 0) >>>
     0;
 
-  const accelRange = (configByte0 & 0xc) >>> 2;
-  const gyroRange = (configByte0 & 0x30000) >>> 16;
-  const magRange = (configByte0 & 0xe00000) >>> 21;
+  const { wrAccel: accelRange, gyro: gyroRange, mag: magRange } = shimmer3ImuRanges(configByte0);
   const gsrRange = (configByte0 >>> 25) & 0x7;
   const internalExpPower = (configByte0 >>> 24) & 0x1;
   const pressureResolution = (configByte0 >>> 28) & 0x3;
@@ -231,7 +272,7 @@ export function interpretShimmer3InquiryResponse(
   const chStart = headerEnd;
   const channelIds = [...u8.slice(chStart, chStart + numChannels)];
 
-  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem);
+  const schema = buildShimmer3Schema(channelIds, timestampFmt, onProblem, imuGeneration);
 
   /* Normalised to the opcode-inclusive form whichever way the bytes arrived.
    * `opcode` is by definition INQUIRY_RESPONSE here - `base` is 1 only when
@@ -483,6 +524,53 @@ export function shimmer3SupportsBatteryRequest(
   );
 }
 
+/**
+ * Whether this firmware has SET_FEATURE (0xB7) and NACKs a feature it does not
+ * know: LogAndStream 1.0.52 on a Shimmer3R and 1.0.17 on a Shimmer3, where it
+ * came with log-and-stream-common (the Java driver's
+ * `ShimmerVerObject.isSupportedSetFeature`).
+ *
+ * Older firmware must not be sent it. It drops the 0xB7 byte unanswered and
+ * runs each byte after it as a command - feature 3 is GET_SAMPLING_RATE_COMMAND,
+ * and a value of 1 is INQUIRY_COMMAND - which it ACKs, so the request would
+ * read as accepted.
+ */
+export function shimmer3SupportsSetFeature(
+  fw: Shimmer3FwVersion,
+  hardwareVersion: number,
+): boolean {
+  return (
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 0, 52) ||
+    isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3, FW_ID.LOGANDSTREAM, 1, 0, 17)
+  );
+}
+
+/**
+ * Whether this firmware might record audio (DEV-99), and so is worth asking:
+ * Shimmer3R LogAndStream v1.01.025 or later. False rules it out without
+ * sending anything. True from v1.01.026 means yes
+ * ({@link shimmer3RRecordsAudio}); on v1.01.025 it means ask the device
+ * (`Shimmer3RClient.supportsAudio`).
+ *
+ * LogAndStream_Shimmer3R v1.01.026 is the first release with audio. The
+ * development builds before it that have audio report the release they were
+ * cut from, v1.01.025, so for that version only the device can say.
+ * A Shimmer3 has no microphone.
+ */
+export function shimmer3RMayRecordAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 25);
+}
+
+/**
+ * Whether this firmware records audio (DEV-99) by its version alone:
+ * Shimmer3R LogAndStream v1.01.026, the first release with audio, or later.
+ * Every build from that release on has it, so a host need not ask. False
+ * does not rule audio out on v1.01.025 ({@link shimmer3RMayRecordAudio}).
+ */
+export function shimmer3RRecordsAudio(fw: Shimmer3FwVersion, hardwareVersion: number): boolean {
+  return isVersionAtLeast(fw, hardwareVersion, HW_ID.SHIMMER_3R, FW_ID.LOGANDSTREAM, 1, 1, 26);
+}
+
 // ---------------------------------------------------------------------------
 // Unframed-stream control-message framing
 // ---------------------------------------------------------------------------
@@ -622,10 +710,14 @@ export function shimmer3ControlMessageLength(buf: Uint8Array): number {
     return 2 + buf[1];
   }
 
-  if (opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE || opcode === OPCODES.INFOMEM_RESPONSE) {
-    // Variable length: [opcode][length][data...]. Firmware caps both a
-    // daughter-card memory read and an InfoMem read at 128 bytes — treat larger
-    // "lengths" as garbage and resync.
+  if (
+    opcode === OPCODES.DAUGHTER_CARD_MEM_RESPONSE ||
+    opcode === OPCODES.DAUGHTER_CARD_ID_RESPONSE ||
+    opcode === OPCODES.INFOMEM_RESPONSE
+  ) {
+    // Variable length: [opcode][length][data...]. Firmware caps a daughter-card
+    // memory read and an InfoMem read at 128 bytes, and the id page is 16 —
+    // treat larger "lengths" as garbage and resync.
     if (buf.length < 2) return NEED_MORE;
     const memLen = buf[1];
     if (memLen > 128) return RESYNC;

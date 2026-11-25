@@ -59,6 +59,8 @@ function exgDevice(init?: {
     if (op === OPCODES.GET_DEVICE_VERSION_COMMAND) setTimeout(() => tr.notify([DEVVER, hw]), 0);
     else if (op === OPCODES.GET_FW_VERSION_COMMAND)
       setTimeout(() => tr.notify([FWVER, ...dev.fw]), 0);
+    else if (op === OPCODES.GET_DAUGHTER_CARD_ID_COMMAND)
+      setTimeout(() => tr.notify([ACK, OPCODES.DAUGHTER_CARD_ID_RESPONSE, 3, 48, 4, 2]), 0);
     else if (op === GET_EXG) {
       const chip = bytes[1] as 0 | 1;
       let bank = dev.banks[chip];

@@ -58,6 +58,16 @@ export function generationFromHardwareVersion(
  *   this SDK has always emitted for it. Width and encoding are the same on
  *   both, so nothing decodes wrongly — only the label is platform-neutral.
  * - `0x14`-`0x16` → `HG_ACCEL_*`. The firmware calls these `X/Y/Z_ALT_ACCEL`.
+ *   Both generations send them **big-endian**, but in different encodings. This
+ *   map keeps the Shimmer3R entry, a 12-bit value left-justified from the
+ *   ADXL371's `XDATA_H` (the Java driver's `i12*>`), because that is what it has
+ *   always exported. The Shimmer3 layer overrides it with a plain `i16`: there,
+ *   these channels are the MPU9x50/ICM-20948's own accelerometer, read from
+ *   `ACCEL_XOUT_H` (log-and-stream-common
+ *   `docs/SHIMMER3_STREAMING_DATA_FORMAT.md` §5). Until DEV-1338 these entries
+ *   said `le`. The `i12*` decoders never read that field, so Shimmer3R values
+ *   were right, but a Shimmer3 got the 12-bit decode, which is a sixteenth of
+ *   the value.
  */
 export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
   0x00: { name: 'LN_ACCEL_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
@@ -73,15 +83,16 @@ export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.f
   0x04: { name: 'WR_ACCEL_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x05: { name: 'WR_ACCEL_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x06: { name: 'WR_ACCEL_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
-  0x14: { name: 'HG_ACCEL_X', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
-  0x15: { name: 'HG_ACCEL_Y', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
-  0x16: { name: 'HG_ACCEL_Z', fmt: 'i12*', endian: 'le', sizeBytes: 2 },
+  0x14: { name: 'HG_ACCEL_X', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
+  0x15: { name: 'HG_ACCEL_Y', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
+  0x16: { name: 'HG_ACCEL_Z', fmt: 'i12*', endian: 'be', sizeBytes: 2 },
   0x17: { name: 'ALT_MAG_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x18: { name: 'ALT_MAG_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x19: { name: 'ALT_MAG_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
-  0x0a: { name: 'GYRO_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
-  0x0b: { name: 'GYRO_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
-  0x0c: { name: 'GYRO_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
+  // Little-endian is the new-IMU layout (LSM303AHTR on a Shimmer3, and every
+  // Shimmer3R). An old-IMU Shimmer3 sends these big-endian; that is not a
+  // generation difference but a board-revision one, so it lives in
+  // SHIMMER3_OLD_IMU_MAG_FORMATS rather than in the generation layer.
   0x07: { name: 'MAG_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x08: { name: 'MAG_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x09: { name: 'MAG_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
@@ -101,6 +112,9 @@ export const CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.f
 
 /** Shimmer3-only layer of {@link CHANNEL_FORMAT_OVERRIDES}. */
 const SHIMMER3_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
+  0x0a: { name: 'GYRO_X', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x0b: { name: 'GYRO_Y', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x0c: { name: 'GYRO_Z', fmt: 'i16', endian: 'be', sizeBytes: 2 },
   0x0d: { name: 'EXT_EXP_ADC_A7', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x0e: { name: 'EXT_EXP_ADC_A6', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x0f: { name: 'EXT_EXP_ADC_A15', fmt: 'u16', endian: 'le', sizeBytes: 2 },
@@ -109,12 +123,18 @@ const SHIMMER3_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object
   0x13: { name: 'INT_EXP_ADC_A14', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x1a: { name: 'TEMPERATURE', fmt: 'u16', endian: 'be', sizeBytes: 2 },
   0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'be', sizeBytes: 3 },
+  0x14: { name: 'HG_ACCEL_X', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x15: { name: 'HG_ACCEL_Y', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x16: { name: 'HG_ACCEL_Z', fmt: 'i16', endian: 'be', sizeBytes: 2 },
   0x27: { name: 'BRIDGE_AMP_HIGH', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x28: { name: 'BRIDGE_AMP_LOW', fmt: 'u16', endian: 'le', sizeBytes: 2 },
 });
 
 /** Shimmer3R-only layer of {@link CHANNEL_FORMAT_OVERRIDES}. */
 const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
+  0x0a: { name: 'GYRO_X', fmt: 'i16', endian: 'le', sizeBytes: 2 },
+  0x0b: { name: 'GYRO_Y', fmt: 'i16', endian: 'le', sizeBytes: 2 },
+  0x0c: { name: 'GYRO_Z', fmt: 'i16', endian: 'le', sizeBytes: 2 },
   0x0d: { name: 'EXT_ADC_0', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x0e: { name: 'EXT_ADC_1', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x0f: { name: 'EXT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
@@ -123,12 +143,14 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
   0x13: { name: 'INT_ADC_2', fmt: 'u16', endian: 'le', sizeBytes: 2 },
   0x1a: { name: 'TEMPERATURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
   0x1b: { name: 'PRESSURE', fmt: 'u24', endian: 'le', sizeBytes: 3 },
+  // The sound level (DEV-1413): 0.01 dB(A), 0x8000 for no level.
+  0x38: { name: 'SOUND_LEVEL', fmt: 'i16', endian: 'le', sizeBytes: 2 },
 });
 
 /**
  * Per-generation channel table, layered over {@link CHANNEL_FORMATS}.
  *
- * Two kinds of entry live here, and only one of them is cosmetic:
+ * Six kinds of entry live here, and only the first is cosmetic:
  *
  * 1. **The ADC block, `0x0D`-`0x13`.** The IDs are reused with different
  *    meanings on the two platforms — `shimmer_sensing.h:107-122` defines
@@ -158,10 +180,27 @@ const SHIMMER3R_CHANNEL_FORMATS: Readonly<Record<number, ChannelFormat>> = Objec
  *    The emission *order* of the pair is also reversed between the two
  *    generations, which is why a host must always take the channel order from
  *    the inquiry response rather than from a fixed list of its own.
- * 3. **`0x27`/`0x28` STRAIN_HIGH/STRAIN_LOW.** Shimmer3-only: the bridge
+ * 3. **`0x0A`-`0x0C` GYRO_X/Y/Z.** Same width, opposite **byte order**: a
+ *    Shimmer3's MPU9x50 is read over I²C MSB first and streamed as the
+ *    firmware read it, so the Java driver types these `i16r` on `SHIMMER_3`
+ *    and `i16` on `SHIMMER_3R`, whose LSM6DSV is read LSB first
+ *    (`ShimmerObject.java:3227-3239`, `interpretDataPacketFormat`). The SD-log
+ *    decoder has always used `i16r` for the Shimmer3 (`sdlog/channels.ts`).
+ *    Until DEV-1288 these were shared little-endian, which decoded every
+ *    streamed Shimmer3 gyro sample byte-swapped: -591 read as -19971.
+ * 4. **`0x27`/`0x28` STRAIN_HIGH/STRAIN_LOW.** Shimmer3-only: the bridge
  *    amplifier is an expansion board with no Shimmer3R equivalent, so these
  *    are deliberately absent from the `shimmer3r` table and a Shimmer3R
  *    reporting them is reported as an unknown channel rather than guessed at.
+ * 5. **`0x14`-`0x16` HG_ACCEL_X/Y/Z, Shimmer3 only.** The shared entry is the
+ *    Shimmer3R's 12-bit ADXL371 value. A Shimmer3 sends its 9-axis chip's own
+ *    accelerometer there as a plain big-endian `i16`, so this layer overrides
+ *    the shared entry (DEV-1338).
+ * 6. **`0x38` SOUND_LEVEL, Shimmer3R only** (DEV-1413): the microphone's
+ *    A-weighted level over its last 128 ms block, a signed 16-bit
+ *    little-endian count of 0.01 dB(A), 0x8000 for no level
+ *    (`devices/audio/soundLevel.ts`). A Shimmer3 has no microphone, so, like
+ *    the bridge amplifier the other way round, it resolves to nothing there.
  *
  * Names follow the SD-log channel tables in `devices/sdlog/channels.ts` so the
  * streamed and logged copies of the same signal carry the same label. The one
@@ -191,6 +230,36 @@ export const CHANNEL_FORMAT_OVERRIDES: Readonly<
 > = Object.freeze({
   shimmer3: SHIMMER3_CHANNEL_FORMATS,
   shimmer3r: SHIMMER3R_CHANNEL_FORMATS,
+});
+
+/**
+ * The mag channels as an **old-IMU Shimmer3** sends them: big-endian.
+ *
+ * Shimmer3 boards before the "new IMU" revisions carry an LSM303DLHC, whose
+ * magnetometer registers run high byte first; the Java driver types `0x07`-`0x09`
+ * `i16r` when `isSupportedNewImuSensors()` is false and `i16` otherwise
+ * (`ShimmerObject.java:3156-3200`). Which boards are new-IMU is decided by
+ * the daughter-card id — see `sdlog/header.ts` `isNewImuSensors`, the same
+ * rule the SD-log decoder applies.
+ *
+ * This is not in {@link CHANNEL_FORMAT_OVERRIDES} because the generation does
+ * not decide it: two Shimmer3s can disagree. A caller that knows the board is
+ * old-IMU layers it on top of `channelFormatsFor('shimmer3')`; a caller that does
+ * not know keeps the little-endian default, which is right for every board
+ * made since the new IMU. (The SD-log decoder also reorders old-IMU mag to
+ * X, Z, Y; streaming needs no reorder, because each channel carries its own id
+ * and the inquiry lists them in the order they are sent.)
+ *
+ * Run on the bench (21 Oct 2026, `Shimmer3Client`, LogAndStream v1.01.007,
+ * RN42 v4.77): a Shimmer3 whose id page is blank, so old-IMU by the rule above,
+ * streamed mag at 256 Hz that read |B| ~1490 counts with a per-axis SD of
+ * 3-11 big-endian, and SD 600-2700 (noise) little-endian. The new-IMU
+ * revision thresholds themselves are still unverified; see `isNewImuSensors`.
+ */
+export const SHIMMER3_OLD_IMU_MAG_FORMATS: Readonly<Record<number, ChannelFormat>> = Object.freeze({
+  0x07: { name: 'MAG_X', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x08: { name: 'MAG_Y', fmt: 'i16', endian: 'be', sizeBytes: 2 },
+  0x09: { name: 'MAG_Z', fmt: 'i16', endian: 'be', sizeBytes: 2 },
 });
 
 const RESOLVED: Record<ShimmerGeneration, Readonly<Record<number, ChannelFormat>>> = {
@@ -253,6 +322,10 @@ export function isGenerationSensitiveChannel(id: number): boolean {
  *
  * - `0x1A`/`0x1B` qualify — 2 big-endian bytes then 3 on a Shimmer3 versus 3
  *   little-endian bytes each on a Shimmer3R, emitted in the opposite order.
+ * - The gyro `0x0A`-`0x0C` qualify — big-endian on a Shimmer3, little-endian on
+ *   a Shimmer3R.
+ * - The alt accel `0x14`-`0x16` qualify — a big-endian `i16` on a Shimmer3, a
+ *   left-justified 12-bit value on a Shimmer3R.
  * - The Shimmer3-only `0x27`/`0x28` qualify, because they resolve to nothing at
  *   all on a Shimmer3R, so assuming the wrong way either invents a width or
  *   loses one.
