@@ -181,24 +181,9 @@ describe.each(SHAPES)('Shimmer3RClient.writeInfoMem — one chunk, %s', (_name, 
 });
 
 describe('Shimmer3RClient.writeInfoMemBytes — chunking', () => {
-  it('defaults to 64-byte chunks over BLE', async () => {
+  it.each(SHAPES)('defaults to whole 128-byte pages at 0, 128 and 256 — %s', async (_n, framed) => {
     const image = patternImage();
-    const fw = await scriptedFirmware({ framed: true });
-    await fw.client.writeInfoMemBytes(image);
-    expect(writeChunks(fw)).toEqual([
-      [64, 0],
-      [64, 64],
-      [64, 128],
-      [64, 192],
-      [64, 256],
-      [64, 320],
-    ]);
-    expect([...fw.store]).toEqual([...image]);
-  });
-
-  it('defaults to the firmware ceiling of 128 over a byte stream', async () => {
-    const image = patternImage();
-    const fw = await scriptedFirmware({ framed: false });
+    const fw = await scriptedFirmware({ framed });
     await fw.client.writeInfoMemBytes(image);
     expect(writeChunks(fw)).toEqual([
       [128, 0],
@@ -212,11 +197,14 @@ describe('Shimmer3RClient.writeInfoMemBytes — chunking', () => {
     for (const framed of [true, false]) {
       const image = patternImage();
       const fw = await scriptedFirmware({ framed });
-      await fw.client.writeInfoMemBytes(image, { chunkBytes: 128 });
+      await fw.client.writeInfoMemBytes(image, { chunkBytes: 64 });
       expect(writeChunks(fw)).toEqual([
-        [128, 0],
-        [128, 128],
-        [128, 256],
+        [64, 0],
+        [64, 64],
+        [64, 128],
+        [64, 192],
+        [64, 256],
+        [64, 320],
       ]);
       expect([...fw.store]).toEqual([...image]);
     }
@@ -267,6 +255,71 @@ describe('Shimmer3RClient.writeInfoMemBytes — chunking', () => {
       /chunkBytes/,
     );
     expect(fw.cmdsOf(SET_INFOMEM)).toHaveLength(0);
+  });
+});
+
+// Firmware up to v1.01.027 keeps the calibration in a SET_INFOMEM chunk only
+// when the chunk starts at offset 0 or 128, and ACKs the chunk either way
+// (DEV-1562). Units in the field run that firmware until they update, so what
+// a configuration write puts on the wire is pinned here: whole pages, each at a
+// page base, over BLE as well as over a byte stream (DEV-1564).
+describe.each(SHAPES)('Shimmer3RClient InfoMem writes go out as whole pages — %s', (_n, framed) => {
+  /** Assert every chunk is one whole page, starting at a page base. */
+  function expectWholePages(fw: ScriptedFirmware, base: number): void {
+    const chunks = writeChunks(fw);
+    expect(chunks.map(([, addr]) => addr - base)).toEqual([0, 128, 256]);
+    for (const [len, addr] of chunks) {
+      expect(len).toBe(128);
+      expect((addr - base) % 128).toBe(0);
+    }
+  }
+
+  it('writeInfoMemConfig, the call Capture makes, sends one chunk per page', async () => {
+    const fw = await scriptedFirmware({ framed });
+    await fw.client.writeInfoMemConfig(seedConfig(), { verify: false });
+    expectWholePages(fw, 0);
+  });
+
+  it('writeInfoMemBytes does too, against the legacy 0x1800 page base', async () => {
+    const fw = await scriptedFirmware({
+      framed,
+      hardwareVersion: HW.SHIMMER3,
+      firmware: FW_LEGACY_SDLOG,
+    });
+    await fw.client.writeInfoMemBytes(patternImage());
+    expectWholePages(fw, 0x1800);
+  });
+
+  it('calibration survives the v1.01.027 chunk rule', async () => {
+    // Old calibration on the device, new calibration in the image.
+    const fw = await scriptedFirmware({
+      framed,
+      store: new Uint8Array(INFOMEM_SIZE).fill(0xaa),
+      calibSyncOnlyAtPageStart: true,
+    });
+    const image = patternImage();
+    await fw.client.writeInfoMemBytes(image);
+    expect([...fw.store]).toEqual([...image]);
+    expect([...(await fw.client.readInfoMemBytes())]).toEqual([...image]);
+  });
+
+  it('64-byte chunks lose it, which is the defect the default avoids', async () => {
+    // The emulation reproduces the bench result: the gyro block (55-75) new
+    // up to byte 63 and old from 64, and the mag (76-96) and wide-range accel
+    // (97-117) blocks old. Without this, the test above could pass against an
+    // emulation that never reverts anything.
+    const fw = await scriptedFirmware({
+      framed,
+      store: new Uint8Array(INFOMEM_SIZE).fill(0xaa),
+      calibSyncOnlyAtPageStart: true,
+    });
+    const image = patternImage();
+    await fw.client.writeInfoMemBytes(image, { chunkBytes: 64 });
+    expect([...fw.store.subarray(34, 64)]).toEqual([...image.subarray(34, 64)]);
+    expect([...fw.store.subarray(64, 118)]).toEqual(new Array(54).fill(0xaa));
+    // Everything outside those blocks still arrives.
+    expect([...fw.store.subarray(0, 34)]).toEqual([...image.subarray(0, 34)]);
+    expect([...fw.store.subarray(118)]).toEqual([...image.subarray(118)]);
   });
 });
 
