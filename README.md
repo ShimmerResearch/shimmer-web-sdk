@@ -538,13 +538,14 @@ sooner, at the risk of taking a refusing base for no base.
 - **Sending again.** Tries 2 s apart are what got every command through on the
   bench Base6 that refused them, sent from the HIL harness. The harness went
   from 8 tries to 15 after one select was refused 8 times in a row. This client
-  ran the rule on that Base6 (firmware 0.1.0) from Node on 25 Nov 2026: three
-  runs of `getDockInfo`, `getSlotOccupancy`, an identify, status and InfoMem
-  read of each of four docked Shimmer3s, and `disconnectAllSlots`, all passing.
-  In each run the first try of `SDQ$`, `SDP,01$` and `SDD$` was cut short a
-  byte and refused with `E`, and the first `SDV$` was sent without its `$` and
-  left unanswered; each was taken on the second try. Not yet seen on a base:
-  two or more failed tries in a row, `SDC,NN$`, and a Base15.
+  ran the rule from Node on 25 Nov 2026, on that Base6 and on a Base15 (both
+  firmware 0.1.0), three runs on each: `getDockInfo`, `getSlotOccupancy`, an
+  identify, status and InfoMem read of each docked Shimmer3 (four on the Base6;
+  six on the Base15, slots 14 and 15 included), and `disconnectAllSlots`, all
+  passing. In each run the first try of `SDQ$`, `SDP,01$` and `SDD$` was cut
+  short a byte and refused with `E`, and the first `SDV$` was sent without its
+  `$` and left unanswered; each was taken on the second try. Not yet seen on a
+  base: two or more failed tries in a row, and `SDC,NN$`.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only

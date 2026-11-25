@@ -592,16 +592,17 @@ export class SmartDockClient extends BaseShimmerClient {
    *
    * The rule is the one that got every command through on a Base6 refusing
    * them at random (24 Nov 2026), sent from the HIL harness. This client ran
-   * it on that Base6 (firmware 0.1.0) from Node on 25 Nov 2026, at commit
-   * afc58f6: three runs of getDockInfo, getSlotOccupancy, an identify, status
-   * and InfoMem read of each of four docked Shimmer3s, and
-   * disconnectAllSlots, all passing. In each run the first try of `SDQ$`,
-   * `SDP,01$` and `SDD$` was cut short a byte and refused with `E`, and the
-   * first `SDV$` was sent without its `$` and left unanswered; each was taken
-   * on try 2.
+   * it from Node on 25 Nov 2026, at commit afc58f6, on that Base6 and on a
+   * Base15 (both firmware 0.1.0), three runs on each: getDockInfo,
+   * getSlotOccupancy, an identify, status and InfoMem read of each docked
+   * Shimmer3 (four on the Base6; six on the Base15, slots 14 and 15
+   * included), and disconnectAllSlots, all passing. In each run the first try
+   * of `SDQ$`, `SDP,01$` and `SDD$` was cut short a byte and refused with
+   * `E`, and the first `SDV$` was sent without its `$` and left unanswered;
+   * each was taken on try 2.
    *
    * HARDWARE-VERIFY: not yet seen on a base: two or more failed tries in a
-   * row, `SDC,NN$` (a select with the SD card), and a Base15.
+   * row, and `SDC,NN$` (a select with the SD card).
    */
   private _sendWithRetry(
     cmdBytes: Uint8Array,
