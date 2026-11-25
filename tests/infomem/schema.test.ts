@@ -245,6 +245,27 @@ describe('infoMemFieldsFor — generation gating', () => {
     }
   });
 
+  it('shows exactly one ConfigSetupByte0 bit-0 field per generation, named for the chip', () => {
+    // On a Shimmer3R the bit is the LIS2DW12's high-performance mode; labelled
+    // "High-Resolution" it read as a resolution setting, and clearing it put
+    // the part in a low-power mode capped at 200 Hz (DEV-1563).
+    for (const g of ['shimmer3-old-imu', 'shimmer3-new-imu', 'shimmer3r'] as const) {
+      const bit0 = keysFor(g).filter((k) => k === 'wrAccelHrm' || k.startsWith('wrAccelHrm.'));
+      expect(bit0, g).toHaveLength(1);
+    }
+    expect(keysFor('shimmer3r')).toContain('wrAccelHrm.lis2dw12');
+    expect(keysFor('shimmer3-old-imu')).toContain('wrAccelHrm');
+    expect(keysFor('shimmer3-new-imu')).toContain('wrAccelHrm');
+    const hpm = field('wrAccelHrm.lis2dw12');
+    expect(hpm.label).toBe('WR Accel High-Performance Mode');
+    expect(hpm.label).not.toMatch(/resolution/i);
+    expect(field('wrAccelHrm').label).toBe('WR Accel High-Resolution Mode');
+    // The same bit and the same model key, so parse/generate are unchanged.
+    for (const k of ['layoutKey', 'shift', 'width', 'configKey'] as const) {
+      expect(hpm[k], k).toEqual(field('wrAccelHrm')[k]);
+    }
+  });
+
   it('shows exactly one WR-accel-range variant per generation, and only new-IMU gets the LSM303AH one', () => {
     for (const g of ['shimmer3-old-imu', 'shimmer3-new-imu', 'shimmer3r'] as const) {
       const ranges = keysFor(g).filter(
