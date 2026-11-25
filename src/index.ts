@@ -638,7 +638,12 @@ export {
   LSM6DSV_ODR,
   deriveLsm6dsvAccelGyroRate,
   deriveLsm6dsvRateOnEnableChange,
+  LIS2DW12_ODR,
+  LIS2DW12_LOW_POWER_MAX_HZ,
+  deriveLis2dw12AccelRate,
+  deriveLis2dw12ConfigOnEnableChange,
 } from './devices/infomem/index.js';
+export type { Lis2dw12AccelDefaults } from './devices/infomem/index.js';
 
 // Is the configured sensor output rate fast enough for the configured packet
 // rate? Two independent InfoMem fields that nothing in the firmware relates, so
@@ -648,8 +653,10 @@ export {
   lsm6dsvAccelGyroRateHz,
   samplingRateHzFromDivider,
   checkImuRateCoversPacketRate,
+  lis2dw12AccelRateHz,
+  checkWrAccelRateCoversPacketRate,
 } from './devices/infomem/index.js';
-export type { ImuRateCoverage } from './devices/infomem/index.js';
+export type { ImuRateCoverage, WrAccelRateCoverage } from './devices/infomem/index.js';
 
 // Identity defaults a host applies when it has to invent a configuration
 // (blank/erased InfoMem, or a reset to defaults) — kept in one place so every

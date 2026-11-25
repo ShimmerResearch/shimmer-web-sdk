@@ -511,26 +511,87 @@ delay (`SLOT_CHANGEOVER_DELAY_WITHOUT_SD_CARD`) before the per-Shimmer UART is
 usable. Normal base-command reads use the ported **1000 ms** timeout
 (`SMARTDOCK_RESPONSE_TIMEOUT`). Like D1, the base UART is an unframed byte
 stream, so the client accumulates bytes and extracts `\r\n`-terminated lines,
-ignoring unrelated / partial lines (resync); an `E` line rejects with an error.
+ignoring unrelated / partial lines (resync).
+
+**A base can refuse commands at random, so a command is sent again.** On 24 Nov
+2026 a Base6 answered most slot changes with an `E` within 20 ms, and left others
+unanswered, through a power cycle; sent again every 2 s, each got through within
+6 tries. Its firmware keeps only the last UART byte received, so a byte that
+arrives while its main loop is busy is lost. The same base later refused one
+select 8 times in a row. So each command is sent up to **15** times
+(`SMARTDOCK_DEFAULTS.CMD_RETRY_ATTEMPTS`), **2 s** after each try that fails
+(`CMD_RETRY_INTERVAL_MS`):
+
+- A try fails on an `E`, on no answer in time, or, for a slot change, on an answer
+  naming another slot (a slot, for `SDD$`). That answer may be a late one to an
+  earlier command, so it is not taken.
+- The answer asked for still counts if it arrives between tries, and the command
+  is not sent again. Anything else between tries, an `E` included, is dropped.
+- The call ends with one result: the answer, or the last try's failure. When the
+  last try names another slot, `activeSlot` is the slot it named.
+- Losing the link, or calling `disconnect()`, ends the command at once, and every
+  call queued behind it, without sending anything more.
+
+The Java driver sends each command once, so Consensys fails on such a base. The
+cost is time when the base will not answer: a query refused on every try fails
+after 28 s, and unanswered after 43 s; a slot change unanswered, after 178 s. Each
+try that fails is reported through `onStatus`. A host probing a port that may not
+be a base can pass `commandTries` (and `timeouts.retryIntervalMs`) to fail
+sooner, at the risk of taking a refusing base for no base.
 
 **Hardware-verify items** (need a real Base-6 / Base-15 to confirm):
 
 - **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
-  settle delay are ported as-is; real base latency (especially how long the
-  per-Shimmer UART takes to become usable after routing) needs measuring.
+  settle delay are ported as-is. On 25 Nov 2026 both were enough on both bases
+  this client ran on, with idle Shimmer3s on v1.01.009 and v1.01.010. Every
+  select was answered inside the 10 s, and every per-slot call passed after the
+  settle: an identify, a status read and an InfoMem read of each slot, each
+  after its own select. The status read is tried once and never failed.
+  Identify's first read, the MAC, is tried twice, and the run records don't say
+  whether it ever needed the second. Still to measure: how long a select takes
+  to be answered, and how soon after routing the per-Shimmer UART is usable,
+  which may be well under 1500 ms.
+- **Sending again.** Tries 2 s apart are what got every command through on the
+  bench Base6 that refused them, sent from the HIL harness. The harness went
+  from 8 tries to 15 after one select was refused 8 times in a row. This client
+  ran the rule from Node on 25 Nov 2026, on that Base6 and on a Base15 (both
+  firmware 0.1.0), three runs on each: `getDockInfo`, `getSlotOccupancy`, an
+  identify, status and InfoMem read of each docked Shimmer3 (four on the Base6;
+  six on the Base15, slots 14 and 15 included), and `disconnectAllSlots`, all
+  passing. In each run the first try of `SDQ$`, `SDP,01$` and `SDD$` was cut
+  short a byte and refused with `E`, and the first `SDV$` was sent without its
+  `$` and left unanswered; each was taken on the second try. Not yet seen on a
+  base: two or more failed tries in a row, and `SDC,NN$`.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only
-  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented — confirm no
-  production base needs the remap.
+  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented. On 25 Nov
+  2026 the decoding was right on both bases this client ran on: the Base6
+  reported slots 1-4 and the Base15 slots 1, 3, 4, 6, 14 and 15, exactly where
+  the Shimmer3s were docked, and identify found a unit in each. The Java
+  remaps only a Base15 whose version reply gives firmware identifier 1 and
+  version 0.0.0-0.0.5 (`SmartDockUart.java:818-823`). That Base15 reports
+  identifier 1 and version 0.1.0 (1.0.1.0), outside the range, and needed no
+  remap. Still to confirm: that no production base runs firmware in the remap
+  range.
 - **Base6-vs-15 detection.** `getDockInfo` derives family + slot count from the
   version reply's hardware-version field (`BASE_HARDWARE_IDS`: 1 → base15, 2 →
-  base6). In the Java driver the slot count actually comes from the **USB device
-  descriptor**, not the version byte — verify the version byte alone is
-  sufficient, or fall back to the occupancy-bitmap length.
+  base6), where the Java driver takes the slot count from the **USB device
+  descriptor**. On 25 Nov 2026 the version byte alone was right on both bases
+  this client ran on, each on firmware 0.1.0: the bench Base6 (`V,2,1,0,1,0`)
+  came back base6 with 6 slots, and a Base15 (hardware 1) base15 with 15, its
+  occupancy reaching slots 14 and 15. Still to confirm: that other base
+  firmware versions and board revisions report the same hardware byte. A byte
+  the SDK does not know gives `unknown` with 0 slots, and the host then has
+  only the occupancy-bitmap length to go on.
 - **Two-port assumption.** Real hardware presents the base control UART and the
-  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
-  confirm the port enumeration / which is which on the target platform.
+  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`). On
+  25 Nov 2026 that held on both bases this client ran on, from Node on Windows:
+  base commands went to one port, and each docked Shimmer's identify, status
+  and InfoMem reads to the other (COM11 and COM14 for the bench Base6). The
+  runner was told which port was which. Still to confirm: how the two ports
+  enumerate through Web Serial in a browser and on macOS or Linux, and how a
+  host tells them apart without being told.
 
 ## Factory Self-Test (Shimmer3 / Shimmer3R)
 
