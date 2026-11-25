@@ -1,6 +1,6 @@
 {
   "name": "@shimmerresearch/shimmer-web-sdk",
-  "version": "0.5.24",
+  "version": "0.5.27",
   "description": "Web Bluetooth and Web Serial API for Shimmer sensor devices (Shimmer3R, Verisense IMU/Pulse+)",
   "type": "module",
   "main": "dist/shimmer-web-sdk.cjs",
@@ -63,11 +63,11 @@
     "eslint": "^10.15.0",
     "globals": "^17.14.0",
     "prettier": "^3.10.1",
-    "rollup": "^4.68.5",
+    "rollup": "^4.68.8",
     "rollup-plugin-dts": "^6.5.1",
     "tslib": "^2.9.1",
     "typedoc": "^0.28.20",
     "typescript": "^6.0.3",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
