@@ -562,8 +562,13 @@ sooner, at the risk of taking a refusing base for no base.
   the SDK does not know gives `unknown` with 0 slots, and the host then has
   only the occupancy-bitmap length to go on.
 - **Two-port assumption.** Real hardware presents the base control UART and the
-  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`);
-  confirm the port enumeration / which is which on the target platform.
+  per-Shimmer UART as two separate serial ports (`SmartDock.java:226-229`). On
+  25 Nov 2026 that held on both bases this client ran on, from Node on Windows:
+  base commands went to one port, and each docked Shimmer's identify, status
+  and InfoMem reads to the other (COM11 and COM14 for the bench Base6). The
+  runner was told which port was which. Still to confirm: how the two ports
+  enumerate through Web Serial in a browser and on macOS or Linux, and how a
+  host tells them apart without being told.
 
 ## Factory Self-Test (Shimmer3 / Shimmer3R)
 
