@@ -337,7 +337,8 @@ export function parseSmartDockVersion(line: string): SmartDockVersionInfo | null
  *
  * NB: the Java `remapSlotsSmartDockToUi` remap for the BASE15U *prototype*
  * board (firmware 1.0.0.≤5) is deliberately NOT applied here — it only affects
- * pre-production hardware; see the README hardware-verify note.
+ * pre-production hardware. A Base15 on 1.0.1.0 (identifier 1, firmware 0.1.0)
+ * needed none (25 Nov 2026); see the README hardware-verify note.
  */
 export function parseSlotOccupancy(line: string): boolean[] | null {
   if (classifyBaseResponse(line) !== 'occupancy') return null;

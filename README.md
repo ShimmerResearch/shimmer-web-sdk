@@ -556,8 +556,15 @@ sooner, at the risk of taking a refusing base for no base.
 - **Occupancy semantics.** Occupancy is decoded from the `SDQ$` → `Q,<bitmap>`
   reply (one ASCII `0`/`1` per slot, index 0 → slot 1). The auto-notify `S,<map>`
   push and the **prototype-board slot remap** (`remapSlotsSmartDockToUi`, only
-  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented — confirm no
-  production base needs the remap.
+  BASE15U firmware ≤ 1.0.0.5) are deliberately **not** implemented. On 25 Nov
+  2026 the decoding was right on both bases this client ran on: the Base6
+  reported slots 1-4 and the Base15 slots 1, 3, 4, 6, 14 and 15, exactly where
+  the Shimmer3s were docked, and identify found a unit in each. The Java
+  remaps only a Base15 whose version reply gives firmware identifier 1 and
+  version 0.0.0-0.0.5 (`SmartDockUart.java:818-823`). That Base15 reports
+  identifier 1 and version 0.1.0 (1.0.1.0), outside the range, and needed no
+  remap. Still to confirm: that no production base runs firmware in the remap
+  range.
 - **Base6-vs-15 detection.** `getDockInfo` derives family + slot count from the
   version reply's hardware-version field (`BASE_HARDWARE_IDS`: 1 → base15, 2 →
   base6), where the Java driver takes the slot count from the **USB device
