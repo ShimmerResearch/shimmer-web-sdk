@@ -328,6 +328,14 @@ export interface StreamCalibrationInfo {
         source: StreamCalibrationSource;
         usingDefaultCalibration: boolean;
         unit: string;
+        /**
+         * True when the calibration in force is a Shimmer3's pre-2025 KXTC9-2050
+         * default record (offset 2253, sensitivity 92), which reads about 17 %
+         * high (DEV-1528). Low-noise accel on a Shimmer3 only; false elsewhere.
+         * The record stays in force: this only says so, for a host to show.
+         * See `isStaleKxtc9DefaultCalibration`.
+         */
+        staleDefault: boolean;
       }
     >
   >;

@@ -361,6 +361,7 @@ describe('Shimmer3RClient — calibration provenance', () => {
       source: 'default',
       usingDefaultCalibration: true,
       unit: 'deg/s',
+      staleDefault: false,
     });
     expect(info.adc).toEqual({ vrefVolts: 3, bits: 12 });
     expect(info.gsr).toEqual({ range: 0 });
@@ -386,6 +387,7 @@ describe('Shimmer3RClient — calibration provenance', () => {
       source: 'radio-dump',
       usingDefaultCalibration: false,
       unit: 'deg/s',
+      staleDefault: false,
     });
   });
 

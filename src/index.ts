@@ -815,6 +815,10 @@ export {
   GyroOnTheFlyCal,
   gyroOnTheFlyWindow,
   isGyroOnTheFlyEnabled,
+  STALE_KXTC9_DEFAULT_OFFSET,
+  STALE_KXTC9_DEFAULT_SENSITIVITY,
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+  isStaleKxtc9DefaultCalibration,
 } from './devices/calibration/index.js';
 export type {
   GyroOnTheFlyInfo,

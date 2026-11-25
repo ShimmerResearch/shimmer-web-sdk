@@ -46,6 +46,10 @@ import {
   type StreamCalibrationState,
 } from '../calibration/streamChannels.js';
 import { selectDumpCalibrations, type DumpCalibrationsByGroup } from '../calibration/sensorIds.js';
+import {
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+  isStaleKxtc9DefaultCalibration,
+} from '../calibration/staleDefaults.js';
 import { summariseExgBanks } from '../exg/calibration.js';
 import { GyroOnTheFlyCal, gyroOnTheFlyInfo } from '../calibration/gyroOnTheFly.js';
 import type { ExgBanks } from '../exg/knobs.js';
@@ -2172,8 +2176,32 @@ export class Shimmer3Client extends BaseShimmerClient {
     this._exgBanks = null;
     this._exgBanksSource = null;
     this._pressureCalibration = null;
+    this._staleLnAccelWarned = false;
     // Its estimates are of the old device's gyro, against the old calibration.
     this._gyroOnTheFly.reset();
+  }
+
+  /** Whether this link has already warned of a stale LN accel record (DEV-1528). */
+  private _staleLnAccelWarned = false;
+
+  /**
+   * True when the low-noise accel is being calibrated against the pre-2025
+   * KXTC9-2050 default record (offset 2253, sensitivity 92), which reads about
+   * 17 % high. See `isStaleKxtc9DefaultCalibration`.
+   */
+  private _lnAccelCalibrationIsStaleDefault(): boolean {
+    return isStaleKxtc9DefaultCalibration(this._deviceCalibrations.lnAccel);
+  }
+
+  /**
+   * Say so, once per link, when the calibration now in force is that stale
+   * record (DEV-1528). It stays in force; see the Shimmer3R client's method of
+   * the same name for why.
+   */
+  private _warnIfStaleLnAccelCalibration(): void {
+    if (this._staleLnAccelWarned || !this._lnAccelCalibrationIsStaleDefault()) return;
+    this._staleLnAccelWarned = true;
+    this._emitStatus(STALE_LN_ACCEL_DEFAULT_WARNING);
   }
 
   /**
@@ -2195,6 +2223,7 @@ export class Shimmer3Client extends BaseShimmerClient {
       if (fromCommand && fromCommand.range === range) next[group] = fromCommand.cal;
     }
     this._deviceCalibrations = next;
+    this._warnIfStaleLnAccelCalibration();
   }
 
   /**
@@ -2243,6 +2272,7 @@ export class Shimmer3Client extends BaseShimmerClient {
         source,
         usingDefaultCalibration: source === 'default',
         unit: defaults.unit,
+        staleDefault: group === 'lnAccel' && this._lnAccelCalibrationIsStaleDefault(),
       };
     }
     const gyroBase =

@@ -19,6 +19,10 @@ import {
   type InertialGroup,
 } from '../calibration/index.js';
 import {
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+  isStaleKxtc9DefaultCalibration,
+} from '../calibration/staleDefaults.js';
+import {
   GyroOnTheFlyCal,
   gyroOnTheFlyInfo,
   isGyroOnTheFlyEnabled,
@@ -151,12 +155,22 @@ export function buildSdLogCalibPlan(
     const calibration = parsed ?? def.calibration;
 
     entries.push({ group: spec.group, indices: [xi, yi, zi], calibration });
+    // DEV-1528: a Shimmer3 header still carrying the pre-2025 KXTC9-2050
+    // default record. It stays the calibration applied - the output is left
+    // as it was - and the header says so, once (the plan is built more than
+    // once for a session's first file).
+    const staleDefault =
+      spec.group === 'lnAccel' && family !== 'shimmer3r' && isStaleKxtc9DefaultCalibration(parsed);
+    if (staleDefault && !header.warnings.includes(STALE_LN_ACCEL_DEFAULT_WARNING)) {
+      header.warnings.push(STALE_LN_ACCEL_DEFAULT_WARNING);
+    }
     const entryInfo: SdLogChannelCalibrationInfo = {
       group: spec.group,
       unit: def.unit,
       usingDefaultCalibration: usingDefault,
       source: usingDefault ? 'default' : 'sd-header',
       range: spec.range,
+      staleDefault,
     };
     if (spec.group === 'gyro') {
       const enabled = isGyroOnTheFlyEnabled(header.derivedSensorsBig);

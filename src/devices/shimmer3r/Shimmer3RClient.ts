@@ -52,6 +52,10 @@ import {
   type StreamCalibrationState,
 } from '../calibration/streamChannels.js';
 import { selectDumpCalibrations, type DumpCalibrationsByGroup } from '../calibration/sensorIds.js';
+import {
+  STALE_LN_ACCEL_DEFAULT_WARNING,
+  isStaleKxtc9DefaultCalibration,
+} from '../calibration/staleDefaults.js';
 import { summariseExgBanks } from '../exg/calibration.js';
 import {
   GyroOnTheFlyCal,
@@ -861,6 +865,13 @@ export class Shimmer3RClient extends BaseShimmerClient {
    */
   private _adoptedDump: { dump: CalibDump; family: ImuFamily } | null = null;
 
+  /**
+   * Whether this link has already warned that a Shimmer3's low-noise accel
+   * calibration is the pre-2025 KXTC9-2050 default (DEV-1528): once per link,
+   * however often the calibration is re-picked.
+   */
+  private _staleLnAccelWarned = false;
+
   /** `imuGeneration` as the caller gave it; it wins over a board read. */
   private readonly _imuGenerationOption: Shimmer3ImuGeneration | undefined;
 
@@ -1393,6 +1404,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
     this._deviceCalibrations = {};
     this._dumpCalibrations = {};
     this._adoptedDump = null;
+    this._staleLnAccelWarned = false;
     this._btCommandCalibrations = {};
     this._exgBanks = null;
     this._exgBanksSource = null;
@@ -5182,6 +5194,31 @@ export class Shimmer3RClient extends BaseShimmerClient {
       if (fromCommand && fromCommand.range === range) next[group] = fromCommand.cal;
     }
     this._deviceCalibrations = next;
+    this._warnIfStaleLnAccelCalibration();
+  }
+
+  /**
+   * True when a Shimmer3's low-noise accel is being calibrated against the
+   * pre-2025 KXTC9-2050 default record (offset 2253, sensitivity 92), which
+   * reads about 17 % high. See `isStaleKxtc9DefaultCalibration`.
+   */
+  private _lnAccelCalibrationIsStaleDefault(): boolean {
+    return (
+      this.generation === 'shimmer3' &&
+      isStaleKxtc9DefaultCalibration(this._deviceCalibrations.lnAccel)
+    );
+  }
+
+  /**
+   * Say so, once per link, when the calibration now in force is that stale
+   * record (DEV-1528). It stays in force: substituting the corrected defaults
+   * would change a user's calibrated output partway through their use, so the
+   * output is left exactly as it was and the user is told to recalibrate.
+   */
+  private _warnIfStaleLnAccelCalibration(): void {
+    if (this._staleLnAccelWarned || !this._lnAccelCalibrationIsStaleDefault()) return;
+    this._staleLnAccelWarned = true;
+    this._emitStatus(STALE_LN_ACCEL_DEFAULT_WARNING);
   }
 
   /**
@@ -5260,6 +5297,7 @@ export class Shimmer3RClient extends BaseShimmerClient {
         source,
         usingDefaultCalibration: source === 'default',
         unit: defaults.unit,
+        staleDefault: group === 'lnAccel' && this._lnAccelCalibrationIsStaleDefault(),
       };
     }
     const gyroBase =

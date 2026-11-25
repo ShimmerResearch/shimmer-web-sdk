@@ -205,6 +205,15 @@ Three rules worth knowing before reading the numbers:
   hands back a dump for inspection; `applyCalibDump(dump)` is what makes the
   stream use it. Which numbers are in force, per group and per range, is what
   `calibrationInfo` reports.
+- **A Shimmer3 may still hold the pre-2025 default LN accel calibration.**
+  Firmware before February 2025 wrote offset 2253 and sensitivity 92 as its
+  own record, and that reads about 17 % high, because every Shimmer3 runs the
+  KXTC9-2050 at 3.0 V. The SDK keeps using the record, so a host's output does
+  not change under a user on an update. Instead it says so once per connection
+  through `onStatus`, and marks the group `staleDefault` in `calibrationInfo`.
+  The SD decoder does the same per session, in `header.warnings` and
+  `header.calibration`. `isStaleKxtc9DefaultCalibration` is the rule, for a
+  host that reads a record itself. Recalibrating in Consensys clears it.
 - **The gyro offset can move while you stream.** With derived-sensor bit 29
   (`GYRO_ON_THE_FLY_CAL`) set, the SDK runs the Java driver's on-the-fly
   offset calibration, as Consensys does. Whenever the last round(fs) samples

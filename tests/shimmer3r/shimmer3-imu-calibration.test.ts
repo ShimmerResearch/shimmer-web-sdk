@@ -11,6 +11,7 @@ import {
 import {
   calibrateVector3,
   generateKinematicCalibBlock,
+  parseKinematicCalibBlock,
 } from '../../src/devices/calibration/kinematic.js';
 import { generateCalibDump, parseCalibDump } from '../../src/devices/calibration/dump.js';
 import { SC_SENSOR } from '../../src/devices/calibration/sensorIds.js';
@@ -567,4 +568,121 @@ describe('Shimmer3 A615, as the bench saw it through SDK 0.5.18 (20 Nov 2026)', 
       expect(oc.get('ALT_MAG_X', 'cal')).toBeNull();
     });
   }
+});
+
+describe('a Shimmer3 whose LN accel record is the pre-2025 default (DEV-1528)', () => {
+  // Firmware before DEV-4 (Feb 2025) wrote 2253/92, the KXTC9-2050's 3.3 V
+  // figures, into a new-IMU Shimmer3's own record; the part runs at 3.0 V, so
+  // the record reads about 17 % high. The client keeps it in force - nothing
+  // a customer gets out changes on an update - and says so, once per link.
+  const KIONIX_ALIGN = [0, -1, 0, -1, 0, 0, 0, 0, -1];
+  const STALE = 'pre-2025 default calibration (offset 2253, sensitivity 92)';
+
+  /** A dump holding one LN accel record per range, `offset`/`sensitivity` on every axis. */
+  const lnAccelDump = (
+    hw: number,
+    sensorId: number,
+    ranges: number[],
+    offset: number,
+    sensitivity: number,
+    sensitivityScale = 1,
+  ) =>
+    parseCalibDump(
+      generateCalibDump(
+        { hardwareId: hw, firmwareId: 3, firmwareMajor: 1, firmwareMinor: 1, firmwareInternal: 9 },
+        ranges.map((range) => {
+          const calibBytes = generateKinematicCalibBlock(
+            [offset, offset, offset],
+            [sensitivity, sensitivity, sensitivity],
+            KIONIX_ALIGN,
+            { sensitivityScale },
+          );
+          return {
+            sensorId,
+            range,
+            calibLen: calibBytes.length,
+            timestampTicks: new Uint8Array(8),
+            calibBytes,
+            isDefault: false,
+          };
+        }),
+      ),
+    );
+  const staleShimmer3 = () => lnAccelDump(HW.SHIMMER3, SC_SENSOR.ANALOG_ACCEL, [0], 2253, 92);
+  const warnings = (s: Sensor) => s.status.filter((m) => m.includes(STALE)).length;
+
+  for (const link of LINKS) {
+    it(`warns once and streams with the record unchanged, over ${link.name}`, async () => {
+      const s = await sensor(SHIMMER3_NEW, link);
+      await identifyAndInquire(s);
+      expect(s.client.applyCalibDump(staleShimmer3())).toEqual(['lnAccel']);
+      expect(warnings(s)).toBe(1);
+      expect(s.client.calibrationInfo.inertial.lnAccel).toMatchObject({
+        source: 'radio-dump',
+        staleDefault: true,
+      });
+
+      const oc = await streamOne(s, payloadFor(SHIMMER3_NEW, false));
+      expectClose(
+        calOf(oc, 'lnAccel'),
+        calibrateVector3(
+          RAW.lnAccel,
+          parseKinematicCalibBlock(
+            generateKinematicCalibBlock([2253, 2253, 2253], [92, 92, 92], KIONIX_ALIGN),
+          )!,
+        ),
+      );
+      // Not the 2047/83 default: the stale record really is the one in force.
+      expect(calOf(oc, 'lnAccel')).not.toEqual(expected('shimmer3-new', 'lnAccel', 0));
+      // The stream and its stop re-pick nothing that warns again.
+      expect(warnings(s)).toBe(1);
+    });
+  }
+
+  it('warns once the version read shows a dump adopted before it is a Shimmer3', async () => {
+    const s = await sensor(SHIMMER3_NEW, LINKS[0]);
+    s.client.applyCalibDump(staleShimmer3());
+    expect(warnings(s)).toBe(0);
+    await identifyAndInquire(s);
+    expect(warnings(s)).toBe(1);
+    expect(s.client.calibrationInfo.inertial.lnAccel?.staleDefault).toBe(true);
+  });
+
+  it('warns again on the next connect', async () => {
+    const s = await sensor(SHIMMER3_NEW, LINKS[0]);
+    await identifyAndInquire(s);
+    s.client.applyCalibDump(staleShimmer3());
+    await s.client.disconnect();
+    await s.client.connect();
+    await identifyAndInquire(s);
+    s.client.applyCalibDump(staleShimmer3());
+    expect(warnings(s)).toBe(2);
+  });
+
+  it('says nothing of a 2047/83 record', async () => {
+    const s = await sensor(SHIMMER3_NEW, LINKS[0]);
+    await identifyAndInquire(s);
+    s.client.applyCalibDump(lnAccelDump(HW.SHIMMER3, SC_SENSOR.ANALOG_ACCEL, [0], 2047, 83));
+    expect(warnings(s)).toBe(0);
+    expect(s.client.calibrationInfo.inertial.lnAccel?.staleDefault).toBe(false);
+  });
+
+  it('says nothing of the same numbers on a Shimmer3R, whose LN accel is not a KXTC9', async () => {
+    const s = await sensor(SHIMMER3R, LINKS[0]);
+    await identifyAndInquire(s);
+    const def = getDefaultCalibration('shimmer3r', 'lnAccel', 0)!;
+    const adopted = s.client.applyCalibDump(
+      lnAccelDump(
+        HW.SHIMMER3R,
+        SC_SENSOR.LSM6DSV_ACCEL,
+        [0, 1, 2, 3],
+        2253,
+        92,
+        def.sensitivityScale,
+      ),
+    );
+    expect(adopted).toEqual(['lnAccel']);
+    expect(warnings(s)).toBe(0);
+    expect(s.client.calibrationInfo.inertial.lnAccel?.staleDefault).toBe(false);
+  });
 });
