@@ -533,8 +533,15 @@ sooner, at the risk of taking a refusing base for no base.
 **Hardware-verify items** (need a real Base-6 / Base-15 to confirm):
 
 - **Slot-change timing.** The 10 s slot-change timeout and 1500 ms without-SD
-  settle delay are ported as-is; real base latency (especially how long the
-  per-Shimmer UART takes to become usable after routing) needs measuring.
+  settle delay are ported as-is. On 25 Nov 2026 both were enough on both bases
+  this client ran on, with idle Shimmer3s on v1.01.009 and v1.01.010. Every
+  select was answered inside the 10 s, and every per-slot call passed after the
+  settle: an identify, a status read and an InfoMem read of each slot, each
+  after its own select. The status read is tried once and never failed.
+  Identify's first read, the MAC, is tried twice, and the run records don't say
+  whether it ever needed the second. Still to measure: how long a select takes
+  to be answered, and how soon after routing the per-Shimmer UART is usable,
+  which may be well under 1500 ms.
 - **Sending again.** Tries 2 s apart are what got every command through on the
   bench Base6 that refused them, sent from the HIL harness. The harness went
   from 8 tries to 15 after one select was refused 8 times in a row. This client
